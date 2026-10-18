@@ -1,0 +1,53 @@
+[project]
+name = "wwyd"
+version = "0.1.0"
+description = "MCP server that holds a person's character and answers \"what would the owner do here?\""
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Eugene Melnikov" }]
+keywords = ["mcp", "persona", "ai-agent", "memory", "privacy", "auto-responder"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: AsyncIO",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications",
+    "Typing :: Typed",
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=2.3,<3",
+    "jsonschema",
+]
+
+[project.urls]
+Homepage = "https://github.com/melnikaite/wwyd"
+Repository = "https://github.com/melnikaite/wwyd"
+Issues = "https://github.com/melnikaite/wwyd/issues"
+Changelog = "https://github.com/melnikaite/wwyd/blob/main/CHANGELOG.md"
+
+[project.scripts]
+wwyd = "wwyd.cli:main"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.20"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["llm: needs a live LLM backend (skipped by default)"]
+addopts = "-m 'not llm'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]  # the formatter owns line length; long SQL strings stay readable

@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/melnikaite/wwyd/main/schema/persona.v1.json",
+  "title": "wwyd persona export, version 1",
+  "description": "One persona: audiences, categories and claims (SPEC section 4.7). Excludes LLM keys, limits, audit, change log and auth data. Archived and rejected claims are included with their status. Claim `visibility` is `owner_only` or `shared`; importers also accept the legacy values `audiences` and `anyone`, which wwyd normalises to `shared` before validating against this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "version", "persona", "audiences", "categories", "claims"],
+  "properties": {
+    "format": {"const": "wwyd.persona"},
+    "version": {"const": 1},
+    "exported_at": {"$ref": "#/$defs/timestamp"},
+    "persona": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 100},
+        "timezone": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "audiences": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {"$ref": "#/$defs/audience_name"},
+          "description": {"type": "string", "maxLength": 1000},
+          "is_default": {"type": "boolean"}
+        }
+      }
+    },
+    "categories": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path"],
+        "properties": {
+          "path": {"$ref": "#/$defs/category_path"},
+          "description": {"type": "string", "maxLength": 1000}
+        }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "maxItems": 20000,
+      "items": {"$ref": "#/$defs/claim"}
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "nullable_timestamp": {"anyOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
+    "audience_name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$"},
+    "category_path": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,39}(/[a-z0-9][a-z0-9_-]{0,39}){0,2}$"
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sources": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "share": {"type": "number", "minimum": 0, "maximum": 1},
+        "period": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}(-\\d{2})?\\.\\.\\d{4}-\\d{2}(-\\d{2})?$"
+        },
+        "stats": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
+          "additionalProperties": {
+            "anyOf": [{"type": "number"}, {"type": "array", "items": {"type": "number"}}]
+          }
+        }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "category", "text"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^clm_[a-z0-9]{1,64}$"},
+        "kind": {
+          "enum": ["trait", "preference", "habit", "decision_rule", "style", "boundary"]
+        },
+        "category": {"$ref": "#/$defs/category_path"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 500},
+        "audiences": {
+          "anyOf": [
+            {"const": "all"},
+            {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/audience_name"}
+            }
+          ]
+        },
+        "visibility": {"enum": ["owner_only", "shared"]},
+        "status": {"enum": ["pending", "approved", "rejected", "archived"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "evidence": {"$ref": "#/$defs/evidence"},
+        "key": {"type": ["string", "null"], "maxLength": 128},
+        "origin": {"enum": ["derived", "added", "imported", "owner"]},
+        "proposed_category": {"anyOf": [{"$ref": "#/$defs/category_path"}, {"type": "null"}]},
+        "superseded_by": {"type": ["string", "null"], "pattern": "^clm_[a-z0-9]{1,64}$"},
+        "archive_reason": {
+          "enum": ["merged", "superseded", "decayed", "budget", "owner", null]
+        },
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "updated_at": {"$ref": "#/$defs/timestamp"},
+        "reviewed_at": {"$ref": "#/$defs/nullable_timestamp"},
+        "archived_at": {"$ref": "#/$defs/nullable_timestamp"},
+        "last_evidence_at": {"$ref": "#/$defs/nullable_timestamp"}
+      }
+    }
+  }
+}

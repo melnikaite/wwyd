@@ -1,0 +1,47 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste real conversations, contact data (names, phone numbers, emails, messenger IDs), tokens or API keys, or exported personas. Use synthetic data only.**
+
+        Security vulnerabilities and privacy leaks go through [private reporting](https://github.com/melnikaite/wwyd/blob/main/SECURITY.md), not public issues.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps with synthetic data.
+      placeholder: |
+        1. uv run wwyd stdio --user you@example.com
+        2. Call add_claims with ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: wwyd version or commit
+      placeholder: 0.1.0 / abc1234
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, MCP client.
+      placeholder: macOS 15, Python 3.13, Claude Code
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Remove anything personal before pasting.
+      render: shell

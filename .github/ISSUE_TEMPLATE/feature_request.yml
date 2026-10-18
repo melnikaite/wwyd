@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest an idea or a change to the spec.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        wwyd is spec-first: please check [SPEC.md](https://github.com/melnikaite/wwyd/blob/main/SPEC.md), especially the non-goals (§1) and privacy invariants (§2), before proposing a feature.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and why is it hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Which spec sections would change?
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy impact
+      description: Does this touch raw input, contact identities, live data or visibility? How are the invariants kept?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
