@@ -22,8 +22,14 @@ class Fact(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    what: str = Field(max_length=500)
-    value: str = Field(max_length=2000)
+    what: str = Field(max_length=500, description="Copied from the need.")
+    value: str | None = Field(
+        max_length=2000,
+        description="The answer; null means the harness cannot find this out.",
+    )
+    kind: str | None = Field(
+        default=None, max_length=40, description="Optional echo of the need's kind."
+    )
 
 
 def register(server: WwydServer) -> None:
@@ -51,7 +57,10 @@ def register(server: WwydServer) -> None:
         """Predict what the owner would reply or decide.
 
         Returns type "answer" (answer, confidence, disclosure to show with it, used_claims),
-        "needs" (facts to look up and pass back in `facts`; the server keeps no state) or
+        "needs" (facts to look up, each with a kind: calendar.free_busy,
+        contact.relationship or other; treat unknown kinds as other. Call again with
+        `facts` [{what, value}], value null if it cannot be found out; the server keeps no
+        state) or
         "escalate" with a code: low_confidence, out_of_persona, boundary, rate_limited,
         spend_cap, llm_unavailable, audience_not_permitted. Situations are sent to the
         persona's LLM backend and are never stored.

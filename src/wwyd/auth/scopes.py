@@ -55,7 +55,8 @@ def parse_scope(value: str | None) -> Scope | None:
         return Scope(value)  # type: ignore[arg-type]
     if value.startswith("respond:"):
         names = value[len("respond:") :].split(",")
-        if names and all(AUDIENCE_NAME.match(n) for n in names):
+        # "default" is an alias resolved per call (SPEC §4.3); scopes must name real audiences.
+        if names and all(AUDIENCE_NAME.match(n) and n != "default" for n in names):
             return Scope("respond", tuple(sorted(set(names))))
     return None
 

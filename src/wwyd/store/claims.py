@@ -128,7 +128,8 @@ def _resolve_audiences(audiences: Any, by_name: dict[str, str]) -> tuple[bool, l
             raise Invalid(
                 f"unknown audience {name!r}", field="audiences", reason="unknown_audience"
             )
-        ids.append(by_name[name])
+        if by_name[name] not in ids:  # "default" and the real name may both be given
+            ids.append(by_name[name])
     return False, ids
 
 
@@ -524,7 +525,10 @@ def _add_one(
     text = check_text(item.get("text"))
     category = item.get("category")
     if not isinstance(category, str) or category not in categories:
-        raise Invalid("unknown category", field="category")
+        raise Invalid(
+            "unknown category; see list_categories, or create it with upsert_category",
+            field="category",
+        )
     category_id = categories[category]
     audiences_all, audience_ids = _resolve_audiences(item.get("audiences"), audiences)
     visibility = _check_choice(item.get("visibility", "shared"), VISIBILITIES, "visibility")

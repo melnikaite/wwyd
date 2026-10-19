@@ -20,9 +20,10 @@ from wwyd.mcp.caller import Caller
 from wwyd.predict import answer as answer_step
 from wwyd.predict.context import budgeted, fts_match, in_categories, visible_claims
 from wwyd.predict.disclosure import build_disclosure
-from wwyd.predict.prompts import answer_user
-from wwyd.predict.route import route
+from wwyd.predict.prompts import answer_user, claim_line
+from wwyd.predict.route import MAX_ROUTES, route
 from wwyd.store import audit as audit_store
+from wwyd.store.audiences import DEFAULT_ALIAS, find_audience
 from wwyd.store.personas import DEFAULT_SETTINGS
 
 log = logging.getLogger(__name__)
@@ -93,7 +94,7 @@ async def predict(
     *,
     situation: str,
     audience: str,
-    facts: list[dict[str, str]] | None = None,
+    facts: list[dict[str, str | None]] | None = None,
     kind: str = "reply",
     include_private: bool = False,
     audit: bool = True,
@@ -102,15 +103,10 @@ async def predict(
     persona_id = caller.persona_id
 
     # Resolve the audience (unknown name -> default) and check the caller may use it.
-    row = conn.execute(
-        "SELECT id, name, description FROM audiences WHERE persona_id = ? AND name = ?",
-        (persona_id, audience),
-    ).fetchone()
+    # The "default" alias resolves to the default audience without a fallback (SPEC §4.3).
+    row = find_audience(conn, persona_id, audience)
     if row is None:
-        row = conn.execute(
-            "SELECT id, name, description FROM audiences WHERE persona_id = ? AND is_default = 1",
-            (persona_id,),
-        ).fetchone()
+        row = find_audience(conn, persona_id, DEFAULT_ALIAS)
         run.audience_fallback = True
         if row is None:
             # The store keeps exactly one default audience; this guards a hand-edited DB.
@@ -143,7 +139,11 @@ async def predict(
 
     llm = get_llm(conn, persona_id)
     try:
-        if sum(c.tokens for c in visible) < SMALL_SET_TOKENS:
+        # Routing picks up to MAX_ROUTES categories; with that few it cannot narrow anything.
+        if (
+            sum(c.tokens for c in visible) < SMALL_SET_TOKENS
+            or len({c.category for c in visible}) <= MAX_ROUTES
+        ):
             selected = visible
         else:
             categories = _categories(conn, persona_id, {c.category for c in visible})
@@ -167,17 +167,18 @@ async def predict(
         owner = conn.execute(
             "SELECT display_name FROM personas WHERE id = ?", (persona_id,)
         ).fetchone()[0]
+        labels = {f"c{i}": c.id for i, c in enumerate(context, 1)}
         user = answer_user(
             owner=owner,
             audience=row["name"],
             audience_description=row["description"],
-            claims=[c.line() for c in context],
+            claims=[claim_line(label, c) for label, c in zip(labels, context, strict=True)],
             facts=facts or [],
             kind=kind,
             situation=situation,
         )
         run.llm_called = True
-        data, tokens = await answer_step.ask(llm, user)
+        data, tokens = await answer_step.ask(llm, user, kind=kind)
         run.tokens += tokens
     except (SpendCap, RateLimited) as exc:
         run.llm_called = run.tokens > 0
@@ -186,8 +187,26 @@ async def predict(
         return run.finish(_llm_error(exc))
 
     result = answer_step.interpret(
-        data, {c.id for c in context}, has_boundary=any(c.kind == "boundary" for c in context)
+        data,
+        labels,
+        has_boundary=any(c.kind == "boundary" for c in context),
+        unavailable=[f for f in facts or [] if f.get("value") is None],
     )
+    rules = {c.id for c in context if c.kind == "decision_rule"}
+    if (
+        result["type"] == "answer"
+        and any(f.get("value") is None for f in facts or [])
+        and rules.intersection(result["used_claims"])
+    ):
+        # Only decision rules ask for facts; answering through one while the harness said
+        # a fact is not available is a guess (small models confidently decline instead).
+        return run.finish(
+            _escalate(
+                "low_confidence",
+                "a fact the decision rule needs is not available",
+                _confidence=result["confidence"],
+            )
+        )
     if result["type"] == "answer":
         threshold = float(settings.get("escalate_below", DEFAULT_SETTINGS["escalate_below"]))
         if result["confidence"] < threshold:

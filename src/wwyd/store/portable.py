@@ -16,7 +16,7 @@ from wwyd.db import transaction
 from wwyd.errors import Invalid, TooLarge
 from wwyd.ids import new_id, now_iso
 from wwyd.store import categories as cats
-from wwyd.store.audiences import audience_ids_by_name
+from wwyd.store.audiences import audience_ids_by_name, check_not_alias
 from wwyd.store.claims import _SELECT, _to_dicts, check_evidence, check_text, insert_claim
 from wwyd.store.personas import (
     DEFAULT_AUDIENCE,
@@ -151,8 +151,9 @@ def _import_audiences(
     counts: dict[str, int],
 ) -> None:
     ts = now_iso()
-    existing = audience_ids_by_name(conn, persona_id)
+    existing = audience_ids_by_name(conn, persona_id, alias=False)
     for aud in audiences:
+        check_not_alias(aud["name"], "audiences")
         if aud["name"] in existing:
             if "description" in aud:
                 conn.execute(

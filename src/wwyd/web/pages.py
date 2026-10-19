@@ -321,7 +321,7 @@ async def _pending(request: Request, req: str | None):  # noqa: ANN202
 
 
 def _consent_ctx(request: Request, sess: WebSession, req: str, client, params) -> dict[str, Any]:  # noqa: ANN001
-    from wwyd.auth.provider import client_display_name
+    from wwyd.auth.provider import client_display_name, is_insecure_redirect
 
     auds = _audiences(_conn(request), sess.user.persona_id)
     requested = pick_requested(params.scopes)
@@ -339,6 +339,7 @@ def _consent_ctx(request: Request, sess: WebSession, req: str, client, params) -
         "client_id_host": urlsplit(client.client_id).netloc if is_cimd else None,
         "client_id_url": client.client_id if is_cimd else None,
         "redirect_host": urlsplit(str(params.redirect_uri)).netloc,
+        "insecure_redirect": is_insecure_redirect(str(params.redirect_uri)),
         "kinds": [(k, *DESCRIPTIONS[k]) for k in KINDS],
         "audiences": auds,
         "selected_kind": requested.kind if requested else None,

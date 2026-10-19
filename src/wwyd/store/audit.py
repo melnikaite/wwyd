@@ -94,7 +94,9 @@ def list_audit(
             raise Invalid("since must be an ISO 8601 timestamp", field="since") from None
         where.append("a.ts >= ?")
         params.append(since_ts)
-    if audience is not None:
+    if audience == "default":  # the reserved alias (SPEC §4.3)
+        where.append("au.is_default = 1")
+    elif audience is not None:
         where.append("au.name = ?")
         params.append(audience)
     if outcome is not None:

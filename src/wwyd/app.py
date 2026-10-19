@@ -27,6 +27,7 @@ from starlette.routing import Route
 from wwyd.auth import accounts
 from wwyd.auth.middleware import AuthSurfaceMiddleware, BodyLimitMiddleware, mcp_body_cap
 from wwyd.auth.provider import Resolver, WwydProvider, WwydTokenVerifier, http_caller_provider
+from wwyd.auth.revoke import revocation_route
 from wwyd.auth.throttle import Throttles
 from wwyd.config import Config, ConfigError, db_path
 from wwyd.db import open_db
@@ -188,10 +189,15 @@ def create_app(
     app.router.routes.append(
         Route("/.well-known/oauth-authorization-server", as_metadata, methods=["GET"])
     )
+    # Our /revoke replaces the SDK's (public clients, API keys; see wwyd.auth.revoke).
+    app.router.routes.append(revocation_route(provider))
     app.router.routes.extend(
         r
         for r in sdk_routes
-        if not (isinstance(r, Route) and r.path == "/.well-known/oauth-authorization-server")
+        if not (
+            isinstance(r, Route)
+            and r.path in ("/.well-known/oauth-authorization-server", "/revoke")
+        )
     )
     app.include_router(pages_router)
     static_dir = resources.files("wwyd.web") / "static"

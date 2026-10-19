@@ -14,6 +14,9 @@
   {% endif %}
   <br>Only continue if you started this connection yourself.
 </p>
+{% if insecure_redirect %}
+<div class="notice error" role="alert">This app receives your authorization over unencrypted http on <span class="host">{{ redirect_host }}</span>; only continue on a network you trust.</div>
+{% endif %}
 {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
 <form method="post" action="/consent">
   <input type="hidden" name="csrf" value="{{ csrf }}">

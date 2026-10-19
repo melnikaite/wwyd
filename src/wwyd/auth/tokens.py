@@ -351,6 +351,25 @@ def verify_api_key(conn: sqlite3.Connection, key: str) -> Principal | None:
     )
 
 
+def revoke_api_key_by_value(conn: sqlite3.Connection, key: str) -> bool:
+    """Revoke the key itself (RFC 7009 /revoke): possessing the key proves the right to
+    revoke it. Constant-time secret check as in :func:`verify_api_key`."""
+    match = API_KEY_RE.match(key)
+    if not match:
+        return False
+    row = conn.execute(
+        "SELECT id, key_hash FROM api_keys WHERE prefix = ? AND revoked_at IS NULL",
+        (match.group(1),),
+    ).fetchone()
+    if row is None or not hmac.compare_digest(row["key_hash"], clock.digest(match.group(2))):
+        return False
+    cur = conn.execute(
+        "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+        (clock.now_iso(), row["id"]),
+    )
+    return cur.rowcount == 1
+
+
 def verify_bearer(conn: sqlite3.Connection, token: str) -> Principal | None:
     if token.startswith("wwyd_"):
         return verify_api_key(conn, token)

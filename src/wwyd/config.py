@@ -83,8 +83,15 @@ class Config:
     limits: LimitDefaults = DEFAULTS
     # Instance default LLM backend (SPEC §12): the ``[llm]`` table and ``WWYD_LLM_<NAME>``.
     llm: LlmSettings = field(default_factory=LlmSettings)
+    # ``[auth] allow_insecure_redirects`` / ``WWYD_AUTH_ALLOW_INSECURE_REDIRECTS`` (SPEC §9.1):
+    # accept plain-http redirect URIs on non-loopback hosts (LAN deployments).
+    allow_insecure_redirects: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.allow_insecure_redirects, bool):
+            self.allow_insecure_redirects = _as_bool(
+                self.allow_insecure_redirects, "[auth] allow_insecure_redirects"
+            )
         if isinstance(self.trusted_proxies, str):
             self.trusted_proxies = [p.strip() for p in self.trusted_proxies.split(",") if p.strip()]
         self.public_url = (self.public_url or f"http://127.0.0.1:{self.port}").rstrip("/")
@@ -224,12 +231,46 @@ def load_llm(table: Any = None, environ: dict[str, str] | None = None) -> LlmSet
     return LlmSettings(**values)
 
 
+def _as_bool(raw: Any, where: str) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower() if isinstance(raw, str) else None
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(f"{where} must be true or false")
+
+
+_AUTH_FIELDS = {"allow_insecure_redirects"}
+
+
+def load_auth(table: Any = None, environ: dict[str, str] | None = None) -> dict[str, Any]:
+    """Config values from the ``[auth]`` TOML table with ``WWYD_AUTH_<NAME>`` env applied."""
+    env = os.environ if environ is None else environ
+    values: dict[str, Any] = {}
+    if table is not None:
+        if not isinstance(table, dict):
+            raise ConfigError("[auth] in wwyd.toml must be a table")
+        for name, raw in table.items():
+            if name not in _AUTH_FIELDS:
+                known = ", ".join(sorted(_AUTH_FIELDS))
+                raise ConfigError(f"unknown key {name!r} in [auth]; known: {known}")
+            values[name] = raw
+    for name in _AUTH_FIELDS:
+        raw = env.get(f"WWYD_AUTH_{name.upper()}")
+        if raw is not None and raw != "":
+            values[name] = raw
+    return {k: _as_bool(v, f"[auth] {k}") for k, v in values.items()}
+
+
 def load_config(**overrides: Any) -> Config:
     """Merge defaults, ``wwyd.toml`` in the data dir, ``WWYD_*`` env vars and ``overrides``."""
-    names = {f.name for f in fields(Config)} - {"limits", "llm"}
+    names = {f.name for f in fields(Config)} - {"limits", "llm"} - _AUTH_FIELDS
     values: dict[str, Any] = {}
     limits_table: Any = None
     llm_table: Any = None
+    auth_table: Any = None
     toml_path = data_dir() / CONFIG_FILENAME
     if toml_path.exists():
         try:
@@ -239,10 +280,12 @@ def load_config(**overrides: Any) -> Config:
         values.update({k: v for k, v in loaded.items() if k in names})
         limits_table = loaded.get("limits")
         llm_table = loaded.get("llm")
+        auth_table = loaded.get("auth")
     for name in names:
         raw = os.environ.get(f"WWYD_{name.upper()}")
         if raw is not None and raw != "":
             values[name] = raw
+    values.update(load_auth(auth_table))
     values.update({k: v for k, v in overrides.items() if v is not None})
     for key in _INT_KEYS & values.keys():
         try:

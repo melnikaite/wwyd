@@ -49,7 +49,7 @@
 
 <section class="card" id="keys">
   <h2>API keys</h2>
-  <p class="muted small">For scripts and plugins that cannot sign in. Sent as <code>Authorization: Bearer &lt;key&gt;</code>.</p>
+  <p class="muted small">For scripts and plugins that cannot sign in. Sent as <code>Authorization: Bearer &lt;key&gt;</code>. A script can revoke its own key with <code>POST /revoke</code> and <code>token=&lt;key&gt;</code>.</p>
   {% if new_key %}
   <div class="notice ok" role="status">
     <strong>Your new key. Copy it now; it will not be shown again.</strong>

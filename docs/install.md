@@ -105,6 +105,10 @@ same compose file works on any Linux server with Docker: copy `deploy/` there an
   `allow_private_base_urls = false` under `[llm]` in `wwyd.toml`). Then a user's own LLM
   address must be a public one, so nobody can make the server call machines on its private
   network. The instance's default LLM backend is not affected.
+- **Public instance?** Set `WWYD_AUTH_ALLOW_INSECURE_REDIRECTS=false` (or
+  `allow_insecure_redirects = false` under `[auth]`). Apps can then only register https
+  redirect addresses (or loopback ones on the user's own machine), so an authorization
+  never travels over plain http. The default allows http for LAN setups.
 - **Behind your own reverse proxy** (Caddy or nginx in front of `uvx wwyd`, without the
   compose file): set `WWYD_TRUSTED_PROXIES` to the proxy's address (e.g. `127.0.0.1`).
   Otherwise every client appears to come from the proxy's IP, and the per-IP sign-in

@@ -191,3 +191,35 @@ def test_list_categories_tree(conn, pid):
     assert work["claim_count"] == 0 and work["total_claim_count"] == 1
     assert [c["path"] for c in work["children"]] == ["work/decisions", "work/meetings"]
     assert all(n["description"] for n in tree.values())
+
+
+# --- the "default" alias (SPEC §4.3) ---------------------------------------------------------
+
+
+def test_default_alias_is_reserved(conn, pid):
+    au.upsert_audience(conn, pid, "work")
+    with pytest.raises(Invalid) as exc:
+        au.upsert_audience(conn, pid, "work", rename_to="default")
+    assert exc.value.details["field"] == "rename_to"
+    assert {a["name"] for a in au.list_audiences(conn, pid)} == {"everyone", "work"}
+
+
+def test_default_alias_resolves_to_default_audience(conn, pid):
+    au.upsert_audience(conn, pid, "everyone", rename_to="anyone")
+    out = au.upsert_audience(conn, pid, "default", description="whoever")
+    assert out["created"] is False and out["audience"]["name"] == "anyone"
+    assert au.get_audience(conn, pid, "default")["name"] == "anyone"
+    created = add_claims(
+        conn,
+        pid,
+        [{"kind": "trait", "category": "food", "text": "Likes tea.", "audiences": ["default"]}],
+    )["created"]
+    assert get_claim(conn, pid, created[0])["audiences"] == ["anyone"]
+    with pytest.raises(Conflict):
+        au.delete_audience(conn, pid, "default")
+
+
+def test_unknown_category_points_to_list_categories(conn, pid):
+    out = add_claims(conn, pid, [{"kind": "trait", "category": "nope", "text": "Likes tea."}])
+    assert out["dropped"][0]["reason"] == "invalid"
+    assert "list_categories" in out["dropped"][0]["detail"]

@@ -66,7 +66,9 @@ def register(server: WwydServer) -> None:
     ) -> dict[str, Any]:
         """Add claims derived elsewhere. They land as pending unless status is approved.
 
-        Returns created claim IDs, absorbed items ({index, into}) and dropped items
+        `category` must be an existing path: see list_categories (create new ones with
+        upsert_category). `audiences` takes names from list_audiences; "default" means the
+        default audience. Returns created claim IDs, absorbed items ({index, into}) and dropped items
         ({index, reason}); reasons: invalid, unknown_audience, guard (contains an email,
         phone, URL or @handle), previously_rejected.
         """

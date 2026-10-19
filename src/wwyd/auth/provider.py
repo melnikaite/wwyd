@@ -89,6 +89,12 @@ def _is_loopback(url: AnyUrl) -> bool:
     return url.scheme == "http" and (url.host or "") in LOOPBACK_HOSTS
 
 
+def is_insecure_redirect(url: AnyUrl | str) -> bool:
+    """Plain http to a non-loopback host: the code travels unencrypted over the network."""
+    parts = urlsplit(str(url))
+    return parts.scheme == "http" and (parts.hostname or "") not in LOOPBACK_HOSTS
+
+
 def _same_ignoring_port(a: AnyUrl, b: AnyUrl) -> bool:
     return (a.scheme, a.host, a.path or "/", a.query) == (b.scheme, b.host, b.path or "/", b.query)
 
@@ -143,6 +149,13 @@ class WwydProvider:
                         "invalid_client_metadata",
                         "scope must be owner, read or respond:<audience>[,<audience>…]",
                     )
+        if not self.config.allow_insecure_redirects and any(
+            is_insecure_redirect(u) for u in client_info.redirect_uris or []
+        ):
+            raise RegistrationError(
+                "invalid_redirect_uri",
+                "http redirect URIs are only accepted for loopback hosts on this server",
+            )
         client = WwydClient.model_validate(client_info.model_dump())
         self.conn.execute(
             "INSERT INTO oauth_clients(client_id, source, client_name, metadata, created_at)"
@@ -252,6 +265,11 @@ class WwydProvider:
             log.info("CIMD document rejected: only public clients are supported")
             return None
         if not doc.get("redirect_uris"):
+            return None
+        if not self.config.allow_insecure_redirects and any(
+            is_insecure_redirect(str(u)) for u in doc["redirect_uris"]
+        ):
+            log.info("CIMD document rejected: insecure http redirect URI")
             return None
         try:
             return WwydClient.model_validate({**doc, "token_endpoint_auth_method": "none"})

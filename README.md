@@ -120,6 +120,8 @@ real replies; see [docs/eval.md](docs/eval.md).
   uses `predict`.
 - [docs/habits.md](docs/habits.md): the habit detectors and the claims they produce.
 - [docs/eval.md](docs/eval.md): evaluation method and results.
+- [docs/clients.md](docs/clients.md): the contract for MCP client authors (auth, scopes,
+  revocation, tool shapes, needs/facts round trip, error codes, versioning).
 
 ## Tools
 
@@ -169,6 +171,7 @@ variables.
 | `smtp_*` | `WWYD_SMTP_*` | Optional mail for password reset links |
 | `[limits]` | `WWYD_LIMIT_<NAME>` | Instance default limits (SPEC §11), e.g. `spend_cap_usd` |
 | `[llm]` | `WWYD_LLM_<NAME>` | Instance default LLM backend |
+| `[auth] allow_insecure_redirects` | `WWYD_AUTH_ALLOW_INSECURE_REDIRECTS` | Accept http OAuth redirect URIs on non-loopback hosts (default `true`; set `false` on public hosted instances) |
 
 The `[llm]` table has `base_url`, `model`, `api_key`, `price_in_per_m` and
 `price_out_per_m` (USD per million tokens). Unset values keep the built-in LocalAI default

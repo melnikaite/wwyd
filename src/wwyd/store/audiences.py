@@ -14,11 +14,31 @@ from wwyd.store.common import check_audience_name, check_description
 
 _LIVE = "c.status IN ('pending', 'approved')"
 
+# Reserved alias (SPEC §4.3): wherever a tool takes an audience name, "default" means the
+# persona's default audience, whatever it is called. No audience may be named "default".
+DEFAULT_ALIAS = "default"
+
+
+def check_not_alias(name: str, field: str = "name") -> None:
+    if name == DEFAULT_ALIAS:
+        raise Invalid(
+            f"{DEFAULT_ALIAS!r} is reserved as an alias for the default audience", field=field
+        )
+
 
 def _row(conn: sqlite3.Connection, persona_id: str, name: str) -> sqlite3.Row | None:
+    if name == DEFAULT_ALIAS:
+        return conn.execute(
+            "SELECT * FROM audiences WHERE persona_id = ? AND is_default = 1", (persona_id,)
+        ).fetchone()
     return conn.execute(
         "SELECT * FROM audiences WHERE persona_id = ? AND name = ?", (persona_id, name)
     ).fetchone()
+
+
+def find_audience(conn: sqlite3.Connection, persona_id: str, name: str) -> sqlite3.Row | None:
+    """The audience called ``name`` (or the default one for the ``default`` alias)."""
+    return _row(conn, persona_id, name)
 
 
 def get_audience(conn: sqlite3.Connection, persona_id: str, name: str) -> sqlite3.Row:
@@ -28,11 +48,21 @@ def get_audience(conn: sqlite3.Connection, persona_id: str, name: str) -> sqlite
     return row
 
 
-def audience_ids_by_name(conn: sqlite3.Connection, persona_id: str) -> dict[str, str]:
-    return {
-        r["name"]: r["id"]
-        for r in conn.execute("SELECT id, name FROM audiences WHERE persona_id = ?", (persona_id,))
-    }
+def audience_ids_by_name(
+    conn: sqlite3.Connection, persona_id: str, *, alias: bool = True
+) -> dict[str, str]:
+    """Name -> ID; with ``alias`` the map also resolves ``default`` to the default audience."""
+    out: dict[str, str] = {}
+    default_id = None
+    for r in conn.execute(
+        "SELECT id, name, is_default FROM audiences WHERE persona_id = ?", (persona_id,)
+    ):
+        out[r["name"]] = r["id"]
+        if r["is_default"]:
+            default_id = r["id"]
+    if alias and default_id is not None:
+        out.setdefault(DEFAULT_ALIAS, default_id)
+    return out
 
 
 def _public(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
@@ -84,6 +114,7 @@ def upsert_audience(
         row = _row(conn, persona_id, name)
         created = row is None
         if created:
+            check_not_alias(name)
             if rename_to is not None:
                 raise NotFound(f"audience {name!r} not found", name=name)
             audience_id = new_id("aud")
@@ -101,11 +132,12 @@ def upsert_audience(
                     "a persona always has one default audience; make another one default instead",
                     field="is_default",
                 )
-            if rename_to is not None and rename_to != name:
+            if rename_to is not None and rename_to != row["name"]:
+                check_not_alias(rename_to, "rename_to")
                 if _row(conn, persona_id, rename_to) is not None:
                     raise Conflict(f"audience {rename_to!r} already exists", name=rename_to)
                 conn.execute("UPDATE audiences SET name = ? WHERE id = ?", (rename_to, audience_id))
-                revoke_tokens_for(conn, persona_id, [name])
+                revoke_tokens_for(conn, persona_id, [row["name"]])
             if description is not None:
                 conn.execute(
                     "UPDATE audiences SET description = ? WHERE id = ?", (description, audience_id)
@@ -157,7 +189,7 @@ def delete_audience(
                 [(cid, target["id"]) for cid in only_here],
             )
         conn.execute("DELETE FROM audiences WHERE id = ?", (row["id"],))
-        revoke_tokens_for(conn, persona_id, [name])
+        revoke_tokens_for(conn, persona_id, [row["name"]])
     return {"deleted": name, "reassigned": len(only_here)}
 
 

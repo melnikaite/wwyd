@@ -117,7 +117,7 @@ class AuthSurfaceMiddleware:
                 if status == 201:
                     self.t.register_global.hit("*")
                 return
-            elif path == "/token" and method == "POST":
+            elif path in ("/token", "/revoke") and method == "POST":
                 await self._token(scope, receive, send, ip)
                 return
             elif path == "/mcp" or path.startswith("/mcp/"):

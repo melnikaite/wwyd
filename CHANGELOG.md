@@ -46,8 +46,34 @@ First public release.
   `ghcr.io/melnikaite/wwyd`, GitHub Releases from tags (RELEASING.md).
 - Compaction size budget as per-user limits (`max_claims_per_category`,
   `max_approved_tokens`).
+- `predict` needs carry a machine-readable `kind` (`calendar.free_busy`,
+  `contact.relationship`, `other`; unknown kinds are to be read as `other`).
+- `predict` facts accept `value: null` ("the harness cannot find this out"); the server
+  then answers without it or escalates with `low_confidence` (always when the answer
+  relies on a decision rule), and never asks for it again.
+- Reserved audience alias `default`: every audience-taking tool resolves it to the
+  persona's default audience, without a fallback hint. No audience can be named `default`.
+- docs/clients.md: the contract for MCP client authors (auth, scopes, revocation, tool
+  shapes, error codes, versioning).
+
+### Changed
+
+- `predict` latency: claims are shown to the model under short labels instead of claim IDs
+  (fewer output tokens), and routing is skipped when the visible claims span at most three
+  categories.
+- The `unknown category` error of `add_claims` points to `list_categories` and
+  `upsert_category`.
+
+### Fixed
+
+- `/revoke` accepts public clients with `client_id` only (RFC 7009); it is now our own
+  handler. It also revokes wwyd API keys passed as `token`, and is throttled like `/token`.
 
 ### Security
+
+- `[auth] allow_insecure_redirects` / `WWYD_AUTH_ALLOW_INSECURE_REDIRECTS` (default `true`):
+  when `false`, DCR and CIMD reject plain-http redirect URIs on non-loopback hosts. The
+  consent page warns when a redirect goes over unencrypted http.
 
 - Client ID metadata document fetches are pinned to the validated IP (no DNS rebinding).
 - `[llm] allow_private_base_urls` / `WWYD_LLM_ALLOW_PRIVATE_BASE_URLS`: SSRF guard for a

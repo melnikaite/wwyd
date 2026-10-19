@@ -223,3 +223,9 @@ async def test_search_score_is_relative(conn, pid, client):
     assert all(0 < h["score"] <= 1 for h in hits)
     out = await call(client, "search_claims", {"query": "oatmeal"})
     assert [c["score"] for c in out["claims"]] == [1.0]
+
+
+def test_respond_scope_cannot_name_the_default_alias():
+    assert parse_scope("respond:default") is None
+    assert parse_scope("respond:work,default") is None
+    assert parse_scope("respond:work") is not None

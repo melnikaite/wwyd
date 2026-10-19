@@ -214,3 +214,13 @@ async def test_job_status_unknown_and_mark_interrupted(client, conn, pid):
     assert jobs.mark_interrupted(conn) == 1
     status = await call(client, "job_status", {"job_id": job_id})
     assert status["status"] == "interrupted"
+
+
+def test_default_audience_alias_in_records():
+    from datetime import UTC
+
+    from wwyd.ingest.records import parse_batch
+
+    note = {"type": "decision", "situation": "Lunch?", "choice": "yes", "audience": "default"}
+    batch = parse_batch([note], tz=UTC, audiences={"anyone"}, default_audience="anyone")
+    assert batch.decisions[0].audience == "anyone" and batch.unknown_audiences == 0

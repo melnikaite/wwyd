@@ -34,7 +34,7 @@ def answer(text: str = "Sure, Tuesday works.", confidence: float = 0.9, used=Non
         ids = (
             used
             if used is not None
-            else [w[1:-1] for w in call["user"].split() if w[:5] == "[clm_"]
+            else [w[1:-1] for w in call["user"].split() if w[:2] == "[c" and w[-1] == "]"]
         )
         return {
             "type": "answer",
@@ -85,7 +85,9 @@ async def test_small_set_skips_routing(conn, user, pid, fake_llm):
     assert out["disclosure"] == TEMPLATES["en"].replace("{owner}", "owner")
     assert out["hints"] == []
     assert not fake_llm.by_purpose("route")
-    assert all(i in fake_llm.calls[0]["user"] for i in ids)
+    # Claims are shown under short labels, never their IDs.
+    assert "[c1]" in fake_llm.calls[0]["user"] and "[c2]" in fake_llm.calls[0]["user"]
+    assert not any(i in fake_llm.calls[0]["user"] for i in ids)
 
 
 def big_set(conn, pid) -> dict[str, str]:
@@ -93,8 +95,26 @@ def big_set(conn, pid) -> dict[str, str]:
         {"kind": "preference", "category": "food", "text": f"Food habit number {i}. " + "x" * 200}
         for i in range(40)
     ]
-    ids = seed(conn, pid, [STYLE, MEETING, *food])
+    travel = {"kind": "preference", "category": "travel", "text": "Likes trains."}
+    ids = seed(conn, pid, [STYLE, MEETING, *food, travel])
     return {"style": ids[0], "meeting": ids[1], "food": ids[2]}
+
+
+def shown(conn, prompt: str) -> set[str]:
+    """IDs of the claims whose text is in a prompt (claims appear under labels, not IDs)."""
+    rows = conn.execute("SELECT id, text FROM claims").fetchall()
+    return {r["id"] for r in rows if f") {r['text']}\n" in prompt + "\n"}
+
+
+async def test_few_categories_skip_routing(conn, user, pid, fake_llm):
+    food = [
+        {"kind": "preference", "category": "food", "text": f"Food habit number {i}. " + "x" * 200}
+        for i in range(40)
+    ]
+    seed(conn, pid, [STYLE, MEETING, *food])  # large, but only 3 categories
+    fake_llm.on("answer", answer())
+    await predict(conn, owner(user), situation="Meet Tuesday?", audience="everyone")
+    assert not fake_llm.by_purpose("route")
 
 
 async def test_routing_selects_categories_and_core(conn, user, pid, fake_llm):
@@ -105,7 +125,7 @@ async def test_routing_selects_categories_and_core(conn, user, pid, fake_llm):
     assert out["type"] == "answer"
     route_call = fake_llm.by_purpose("route")[0]
     assert "work/meetings" in route_call["user"] and "clm_" not in route_call["user"]
-    ctx = fake_llm.by_purpose("answer")[0]["user"]
+    ctx = shown(conn, fake_llm.by_purpose("answer")[0]["user"])
     assert ids["meeting"] in ctx and ids["style"] in ctx and ids["food"] not in ctx
 
 
@@ -121,7 +141,7 @@ async def test_fts_fallback(conn, user, pid, fake_llm, route_reply):
     await predict(
         conn, owner(user), situation="Is a meeting with buffer possible?", audience="everyone"
     )
-    ctx = fake_llm.by_purpose("answer")[0]["user"]
+    ctx = shown(conn, fake_llm.by_purpose("answer")[0]["user"])
     assert ids["meeting"] in ctx and ids["style"] in ctx and ids["food"] not in ctx
 
 
@@ -145,7 +165,9 @@ async def test_needs_facts_round_trip(conn, user, pid, fake_llm):
     fake_llm.on("answer", handler)
     first = await predict(conn, owner(user), situation="Sync Tuesday?", audience="everyone")
     assert first["type"] == "needs"
-    assert first["needs"] == [{"what": "free slots Tuesday", "why": f"decision_rule {meeting}"}]
+    assert first["needs"] == [
+        {"kind": "other", "what": "free slots Tuesday", "why": f"decision_rule {meeting}"}
+    ]
     assert first["used_claims"] == [meeting]
     second = await predict(
         conn,
@@ -171,12 +193,124 @@ def test_escalate_with_absent_facts_becomes_needs():
     out = interpret(data, {"clm_m"})
     assert out == {
         "type": "needs",
-        "needs": [{"what": "free slots tomorrow", "why": "decision_rule clm_m"}],
+        "needs": [{"kind": "other", "what": "free slots tomorrow", "why": "decision_rule clm_m"}],
         "used_claims": ["clm_m"],
     }
     assert interpret({**data, "escalate": "boundary"}, {"clm_m"})["type"] == "escalate"
     data["absent_facts"] = []
     assert interpret(data, {"clm_m"})["type"] == "escalate"
+
+
+def _needs_reply(*items: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "needs",
+        "answer": "",
+        "confidence": 0,
+        "used_claims": [],
+        "language": "en",
+        "absent_facts": list(items),
+        "escalate": "",
+        "reason": "",
+    }
+
+
+def test_need_kinds_normalised():
+    from wwyd.predict.answer import interpret
+
+    out = interpret(
+        _needs_reply(
+            {"kind": "calendar.free_busy", "what": "free slots Tue", "why": "r"},
+            {"kind": "contact.relationship", "what": "who is Sam to the owner", "why": "r"},
+            {"kind": "weather", "what": "rain tomorrow", "why": "r"},
+            {"what": "no kind", "why": "r"},
+        ),
+        set(),
+    )
+    assert [n["kind"] for n in out["needs"]] == [
+        "calendar.free_busy",
+        "contact.relationship",
+        "other",
+        "other",
+    ]
+
+
+def test_answer_schema_has_need_kind():
+    from wwyd.predict.prompts import ANSWER_SCHEMA
+
+    item = ANSWER_SCHEMA["properties"]["absent_facts"]["items"]
+    assert item["properties"]["kind"]["enum"] == [
+        "calendar.free_busy",
+        "contact.relationship",
+        "other",
+    ]
+    assert list(item["properties"]) == sorted(item["properties"])  # kind < what < why
+
+
+async def test_unavailable_fact_renders_and_is_not_asked_again(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on(
+        "answer",
+        _needs_reply(
+            {"kind": "calendar.free_busy", "what": "free slots Tuesday afternoon", "why": "r"}
+        ),
+    )
+    out = await predict(
+        conn,
+        owner(user),
+        situation="Sync Tuesday?",
+        audience="everyone",
+        facts=[{"what": "free slots Tuesday", "value": None, "kind": "calendar.free_busy"}],
+    )
+    assert "- free slots Tuesday: not available" in fake_llm.calls[-1]["user"]
+    # The harness already said it cannot find this out: no second needs round trip.
+    assert out["type"] == "escalate" and out["escalate"] == "low_confidence"
+
+
+async def test_unavailable_fact_keeps_other_needs(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on(
+        "answer",
+        _needs_reply(
+            {"kind": "calendar.free_busy", "what": "free slots Tuesday", "why": "r"},
+            {"kind": "contact.relationship", "what": "is Sam a client", "why": "r"},
+        ),
+    )
+    out = await predict(
+        conn,
+        owner(user),
+        situation="Sync with Sam Tuesday?",
+        audience="everyone",
+        facts=[{"what": "Free slots Tuesday.", "value": None}],
+    )
+    assert out["type"] == "needs"
+    assert [n["kind"] for n in out["needs"]] == ["contact.relationship"]
+
+
+async def test_answer_through_rule_with_unavailable_fact_escalates(conn, user, pid, fake_llm):
+    style, meeting = seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("answer", answer("Not possible tomorrow.", used=["c2"]))
+    facts = [{"what": "free slots tomorrow", "value": None}]
+    out = await predict(conn, owner(user), situation="Call?", audience="default", facts=facts)
+    assert out["type"] == "escalate" and out["escalate"] == "low_confidence"
+    fake_llm.on("answer", answer("Thanks!", used=["c1"]))  # style only: fine
+    out = await predict(conn, owner(user), situation="Thx", audience="default", facts=facts)
+    assert out["type"] == "answer"
+
+
+async def test_predict_tool_accepts_null_fact(client, conn, pid, fake_llm):
+    seed(conn, pid, [STYLE])
+    fake_llm.on("answer", answer())
+    out = await call(
+        client,
+        "predict",
+        {
+            "situation": "Hi",
+            "audience": "default",
+            "facts": [{"what": "free slots", "value": None, "kind": "calendar.free_busy"}],
+        },
+    )
+    assert out["type"] == "answer"
+    assert "- free slots: not available" in fake_llm.calls[-1]["user"]
 
 
 @pytest.mark.parametrize(
@@ -308,11 +442,12 @@ async def test_respond_scope_never_sees_private_or_other_audiences(
         audience="work",
         include_private=include_private,
     )
-    ctx = fake_llm.calls[-1]["user"]
+    prompt = fake_llm.calls[-1]["user"]
+    ctx = shown(conn, prompt)
     assert ids["shared_all"] in ctx and ids["shared_work"] in ctx
     for key in ("private_all", "private_work", "shared_family"):
         assert ids[key] not in ctx
-    assert "Private" not in ctx and "Family rule" not in ctx and "Pending one" not in ctx
+    assert "Private" not in prompt and "Family rule" not in prompt and "Pending one" not in prompt
     if include_private:
         assert any("include_private" in h for h in out["hints"])
 
@@ -321,10 +456,10 @@ async def test_owner_audience_view_and_include_private(conn, user, pid, fake_llm
     ids = visibility_set(conn, pid)
     fake_llm.on("answer", answer())
     await predict(conn, owner(user), situation="Hi", audience="work")
-    ctx = fake_llm.calls[-1]["user"]
+    ctx = shown(conn, fake_llm.calls[-1]["user"])
     assert ids["private_all"] not in ctx and ids["private_work"] not in ctx
     await predict(conn, owner(user), situation="Hi", audience="work", include_private=True)
-    ctx = fake_llm.calls[-1]["user"]
+    ctx = shown(conn, fake_llm.calls[-1]["user"])
     assert ids["private_all"] in ctx and ids["private_work"] in ctx
     assert ids["shared_family"] not in ctx
 
@@ -349,6 +484,26 @@ async def test_unknown_audience_falls_back_with_hint(conn, user, pid, fake_llm):
     assert out["type"] == "answer"
     assert any("default audience" in h for h in out["hints"])
     assert "Talking to: everyone" in fake_llm.calls[-1]["user"]
+
+
+async def test_default_alias_resolves_without_fallback(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE])
+    upsert_audience(conn, pid, "everyone", rename_to="anyone")
+    fake_llm.on("answer", answer())
+    out = await predict(conn, owner(user), situation="Hi", audience="default")
+    assert out["type"] == "answer" and out["hints"] == []
+    assert "Talking to: anyone" in fake_llm.calls[-1]["user"]
+    assert audit.list_audit(conn, pid)["entries"][0]["audience_fallback"] is False
+
+
+async def test_default_alias_respond_checks_real_name(conn, user, pid, fake_llm, audiences):
+    seed(conn, pid, [STYLE])
+    fake_llm.on("answer", answer())
+    # A scope naming "default" does not cover the default audience: scopes name real ones.
+    out = await predict(conn, respond(user, ("default",)), situation="Hi", audience="default")
+    assert out["escalate"] == "audience_not_permitted"
+    out = await predict(conn, respond(user, ("everyone",)), situation="Hi", audience="default")
+    assert out["type"] == "answer"
 
 
 # --- limits and audit ----------------------------------------------------------------------
@@ -479,3 +634,13 @@ async def test_predict_privacy_canary(conn, user, pid, fake_llm, audiences, capl
         assert canary not in logged
     for row in conn.execute("SELECT * FROM audit"):
         assert not any(canary in str(v) for v in tuple(row) for canary in CANARIES)
+
+
+def test_labels_map_back_to_claim_ids():
+    from wwyd.predict.answer import interpret
+
+    data = _needs_reply({"kind": "other", "what": "x", "why": "decision_rule c2"})
+    data["used_claims"] = ["c2", "[c1]", "a2", "c9"]
+    out = interpret(data, {"c1": "clm_one", "c2": "clm_two"})
+    assert out["used_claims"] == ["clm_two", "clm_one"]
+    assert out["needs"][0]["why"] == "decision_rule clm_two"

@@ -106,7 +106,7 @@ persona can switch `ingest_raw` to code-only derivation (`llm_for_ingest: false`
   per-IP auth throttles act globally; the server logs a one-time warning when it sees
   `X-Forwarded-For` from a loopback/private peer with `trusted_proxies` empty), the instance default LLM (`[llm]`, including
   `allow_private_base_urls`, see §12), default limits
-  (`[limits]`), and optional SMTP.
+  (`[limits]`), `[auth] allow_insecure_redirects` (§9.1), and optional SMTP.
 
 ### Source of truth per subsystem
 
@@ -145,6 +145,12 @@ detectors and the nightly pass), `settings` (JSON: LLM backend, `llm_for_ingest`
   Russian/English". There are no fixed dimensions.
 - Exactly one audience per persona has `is_default = true`. A new persona starts with one
   default audience, `everyone` ("anyone not in another group"), which the owner can rename.
+- `default` is a reserved alias, not a name: every tool that takes an audience name
+  (`predict`, `get_persona`, `add_claims`, `list_claims`, `ingest_raw` records, …) resolves
+  `default` to the persona's default audience, whatever it is called, with no fallback
+  hint. Creating, renaming or importing an audience named `default` fails with `invalid`.
+  Scopes are different: `respond:` scopes name real audiences, and `respond:default` is
+  not a valid scope (rejected at registration, consent and key creation).
 - Only owner-scoped calls create, change or delete audiences.
 
 ### 4.4 category
@@ -377,17 +383,29 @@ weight, grouped by category, cut at `max_tokens` (estimated as chars/4).
 
 **`predict`** (owner, respond) — see §8.
 ```
-in:  { situation: string ≤ 8000, audience: string, facts?: [{ what, value }] ≤ 20,
+in:  { situation: string ≤ 8000, audience: string | "default",
+       facts?: [{ what, value: string | null, kind? }] ≤ 20,
        kind?: "reply"|"decision", include_private?: bool }
 out: one of
   { type: "answer",   answer, confidence, disclosure, used_claims: [id], hints: [string] }
-  { type: "needs",    needs: [{ what, why }], used_claims: [id], hints }
+  { type: "needs",    needs: [{ kind, what, why }], used_claims: [id], hints }
   { type: "escalate", escalate: "low_confidence"|"out_of_persona"|"boundary"|
                       "rate_limited"|"spend_cap"|"llm_unavailable"|"audience_not_permitted",
                       reason, hints }
 ```
 `escalate` is a reason code rather than `true`, so `rate_limited` and the rest share one
 field (D6).
+
+`needs[].kind` is machine-readable so a harness can route the lookup without parsing
+`what`: `calendar.free_busy` (the owner's free/busy time, slots, other calls),
+`contact.relationship` (who the other person is to the owner), `other`. The list is closed
+in the schema today but may grow; clients must treat an unknown kind as `other`.
+
+Reply contract: the harness calls `predict` again with the same situation and
+`facts: [{ what, value }]`, `what` copied from the need (`kind` may be echoed and is used
+only for matching). `value: null` means "the harness cannot find this out": the model then
+answers without that fact or the call escalates with `low_confidence`; it never asks for
+that fact (same `what`, or same non-`other` kind) again.
 
 ### 6.6 Persona lifecycle and settings (owner)
 - **`export_persona`** → `{ document }` (§4.7). Large personas are still small (budgeted).
@@ -466,11 +484,12 @@ The guard is deliberately crude and strict (D7). The privacy canary test
 ### 8.1 Flow
 1. **Limits** (§11): per token, per persona, per audience. Over a limit → `escalate:
    "rate_limited"` with no LLM call.
-2. **Resolve audience.** Unknown name → the default audience, and `hints` says so. For a
+2. **Resolve audience.** `default` → the default audience (§4.3). Unknown name → the
+   default audience, `audience_fallback` in the audit row, and `hints` says so. For a
    `respond` token the resolved audience must be within its scope, otherwise
    `escalate: "audience_not_permitted"`.
-3. **Load the visible set** in SQL (§8.3). If its total size is under ~1500 tokens, skip
-   routing and use it all.
+3. **Load the visible set** in SQL (§8.3). If its total size is under ~1500 tokens, or it
+   spans at most 3 categories (routing could not narrow it), skip routing and use it all.
 4. **Route:** one cheap LLM call that sees only category paths and descriptions plus the
    situation, and returns 1–3 paths (JSON). If the call fails or returns nothing, fall back
    to FTS5 over the visible set with terms from the situation.
@@ -480,7 +499,7 @@ The guard is deliberately crude and strict (D7). The privacy canary test
 6. **Answer:** one LLM call with the owner's display name, the audience description, the
    claims (with IDs), the facts and the situation. The model returns strict JSON:
    `{"type":"answer","answer","confidence","used_claims","language"}` or
-   `{"type":"needs","needs":[{"what","why"}]}` or
+   `{"type":"needs","needs":[{"kind","what","why"}]}` or
    `{"type":"escalate","escalate":"out_of_persona"|"boundary","reason"}`.
 7. **Post-process:** drop `used_claims` IDs not in the context; `confidence <
    escalate_below` (default 0.6) → `escalate: "low_confidence"`; add the `disclosure`;
@@ -513,8 +532,22 @@ AND (visibility = 'shared'
 The process is both the OAuth 2.1 authorization server and the resource server. We use the
 MCP SDK's auth building blocks, not Authlib:
 - `create_auth_routes()` mounted in our FastAPI app gives `/authorize`, `/token`,
-  `/register` (DCR), `/revoke` and `/.well-known/oauth-authorization-server`, with S256 PKCE
+  `/register` (DCR) and `/.well-known/oauth-authorization-server`, with S256 PKCE
   verification done by the SDK.
+- `/revoke` (RFC 7009) is our own handler, replacing the SDK's (which demands a
+  `client_secret` field even from public clients). Clients authenticate per their
+  registered method (`none`: `client_id` only; `client_secret_post`/`_basic`: with the
+  secret, else 401 `invalid_client`); an access or refresh token is revoked only if it
+  belongs to that client. A `token` that is a wwyd API key revokes that key, with no client
+  authentication needed (possession proves the right; constant-time check). Unknown tokens,
+  garbage keys and other clients' tokens get 200 with nothing revoked. Throttled like
+  `/token`.
+- **Redirect URIs:** plain `http` redirect URIs on non-loopback hosts are accepted by
+  default (LAN deployments), and the consent page then warns that the authorization travels
+  unencrypted. With `[auth] allow_insecure_redirects = false`
+  (`WWYD_AUTH_ALLOW_INSECURE_REDIRECTS`), DCR rejects them with `invalid_redirect_uri` and
+  CIMD documents containing them are rejected; only `https` and loopback `http`
+  (`127.0.0.1`, `::1`, `localhost`) remain. Recommended for public hosted instances.
 - Our `OAuthAuthorizationServerProvider` implementation stores clients, codes and tokens in
   SQLite (`get_client`, `register_client`, `authorize`, `load_authorization_code`,
   `exchange_authorization_code`, `load_refresh_token`, `exchange_refresh_token`,
@@ -568,7 +601,7 @@ the host of their client ID URL. If the client requested a scope, it is preselec
   refresh token revokes the whole grant; a bad one returns `invalid_grant`.
 - **API keys** (`wwyd_<8-char prefix>_<secret>`) for scripts and plugins, created on the
   account page with the same scopes, shown once, revoked the same way. Sent as
-  `Authorization: Bearer`.
+  `Authorization: Bearer`. A key can also revoke itself: `POST /revoke` with `token=<key>`.
 - `respond:` scopes bind audience *names*: deleting (or renaming) an audience revokes the
   grants and keys whose scope names it (`tokens.revoke_for_audience`), so a later audience
   with the same name inherits nothing.
@@ -893,14 +926,23 @@ Deviations and details recorded while implementing M2–M6:
 - **Preflight.** A failed `GET /models` preflight when saving a backend is rejected with
   `invalid`.
 - **HTTP 402** from the LLM backend maps to `spend_cap`.
-- **Revocation.** `/revoke` needs an empty `client_secret` for public clients in this MCP
-  SDK version.
 - **Self-service resets** do not show the admin-reset notice on the account page.
 - **`/healthz`** is an unauthenticated liveness endpoint that does not touch the DB.
-- **Answer shape.** The answer call's JSON has an `absent_facts: [{what, why}]` field
+- **Answer shape.** The answer call's JSON has an `absent_facts: [{kind, what, why}]` field
   (replacing `needs`) that the model fills first: the facts the applicable decision rules
   need but `facts` lacks. The name sorts before `answer` on purpose, since some backends'
   JSON grammars emit keys alphabetically and the field only helps if it is generated
   before the model commits to an answer. Post-processing turns `type: "escalate"` with a
   non-empty `absent_facts` into `needs` (small models list the gap, then escalate),
-  except `escalate: "boundary"`, which always stands.
+  except `escalate: "boundary"`, which always stands. A missing or unknown `kind` becomes
+  `other`. Needs for a fact the call already received as `value: null` are dropped; if none
+  remain the result is `low_confidence`. Facts with `value: null` reach the model as
+  "not available". An answer that relies on a `decision_rule` claim while any fact of the
+  call is `null` also becomes `low_confidence`: only decision rules ask for facts, and
+  small models otherwise confidently decline ("not possible tomorrow") without the fact.
+- **Prompt layout for latency.** The answer system prompt (instructions, worked examples,
+  schema) is static and byte-identical across calls; owner, audience, claims, facts and
+  the situation follow in the user message, so a llama.cpp-style prompt prefix cache
+  covers the long part. Claims are shown under short labels (`c1`, `c2`, …) and mapped back
+  to IDs in post-processing (`used_claims`, `needs[].why`): claim IDs cost ~10 output
+  tokens each, and output tokens dominate latency on small local models.

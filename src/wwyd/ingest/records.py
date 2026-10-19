@@ -203,7 +203,7 @@ def parse_batch(
     batch = Batch(counts={name: 0 for name in RECORD_TYPES})
 
     def audience(value: str | None) -> str:
-        if value is None:
+        if value is None or value == "default":  # the reserved alias (SPEC §4.3)
             return default_audience
         if value in audiences:
             return value
