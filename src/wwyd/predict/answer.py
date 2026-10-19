@@ -9,12 +9,10 @@ from typing import Any
 
 from wwyd.errors import LLMUnavailable
 from wwyd.llm import LLM
-from wwyd.predict.prompts import ANSWER_SCHEMA, ANSWER_SYSTEM
+from wwyd.predict.prompts import ANSWER_SCHEMA, ANSWER_SYSTEM, DEPENDS_KEY
 
-MAX_NEEDS = 10
-# Machine-readable need kinds (SPEC §6.5). Clients treat unknown kinds as "other".
-NEED_KINDS = ("calendar.free_busy", "contact.relationship", "other")
 MAX_FIELD = 500
+MAX_DEPENDS_ON = 400  # SPEC §8.1
 
 
 async def ask(llm: LLM, user: str, *, kind: str = "reply") -> tuple[dict[str, Any], int]:
@@ -61,19 +59,23 @@ def used_claims(data: dict[str, Any], context: Mapping[str, str] | Iterable[str]
     return out
 
 
-_LABEL = re.compile(r"\[?\b(c\d+)\b\]?")
+_SENTENCE_END = re.compile(r"[.!?…](?=\s|$)")
 
 
-def _why(value: Any, ids: dict[str, str]) -> str:
-    return _LABEL.sub(lambda m: ids.get(m.group(1), m.group(0)), _str(value))
-
-
-def _same(a: str, b: str) -> bool:
-    return a.casefold().strip(" .") == b.casefold().strip(" .")
-
-
-def _has_facts(raw: Any) -> bool:
-    return isinstance(raw, list) and any(isinstance(i, dict) and _str(i.get("what")) for i in raw)
+def depends_on(value: Any, limit: int = MAX_DEPENDS_ON) -> str | None:
+    """The public ``depends_on``: stripped, ``None`` when empty, cut to ``limit`` chars at
+    a sentence boundary if one is in the second half, else at a word boundary."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    ends = [m.end() for m in _SENTENCE_END.finditer(head)]
+    if ends and ends[-1] >= limit // 2:
+        return head[: ends[-1]]
+    cut = head.rsplit(" ", 1)[0] if " " in head else head
+    return cut.rstrip(" ,;:-") + "…"
 
 
 def interpret(
@@ -81,62 +83,34 @@ def interpret(
     context: Mapping[str, str] | Iterable[str],
     *,
     has_boundary: bool = True,
-    unavailable: Iterable[dict[str, Any]] = (),
 ) -> dict[str, Any]:
-    """Normalise the model's reply into answer | needs | escalate (before thresholds).
+    """Normalise the model's reply into answer | escalate (before thresholds).
 
     ``context`` maps the prompt's claim labels to claim IDs (a plain set of IDs also works).
     A "boundary" escalation without any boundary claim in the context is reported as
-    out_of_persona (small models use it for "I lack information"). ``unavailable`` are the
-    facts the harness answered with ``value: null``: a need for one of them (same text, or
-    same specific kind) is dropped, and if nothing is left the result is low_confidence.
+    out_of_persona (small models use it for "I lack information"). A non-empty
+    ``depends_on`` is never a reason to escalate by itself.
     """
     ids = _id_map(context)
-    gone = [f for f in unavailable if isinstance(f.get("what"), str)]
     kind = data.get("type")
-    if (
-        kind == "escalate"
-        and data.get("escalate") != "boundary"
-        and _has_facts(data.get("absent_facts"))
-    ):
-        # Small models list the missing facts and still pick escalate; the facts win,
-        # except over a boundary, which always stands.
-        kind = "needs"
     used = used_claims(data, ids)
-    if kind == "needs":
-        needs = []
-        dropped = False
-        raw = data.get("absent_facts", data.get("needs"))
-        for item in raw if isinstance(raw, list) else []:
-            if isinstance(item, dict) and _str(item.get("what")):
-                need_kind = item.get("kind") if item.get("kind") in NEED_KINDS else "other"
-                what = _str(item.get("what"))
-                if any(
-                    _same(what, f["what"]) or (need_kind != "other" and f.get("kind") == need_kind)
-                    for f in gone
-                ):
-                    dropped = True
-                    continue
-                needs.append({"kind": need_kind, "what": what, "why": _why(item.get("why"), ids)})
-            if len(needs) >= MAX_NEEDS:
-                break
-        if needs:
-            return {"type": "needs", "needs": needs, "used_claims": used}
-        if dropped:
-            return {
-                "type": "escalate",
-                "escalate": "low_confidence",
-                "reason": "a fact the decision needs is not available",
-                "_confidence": 0.0,
-            }
-        kind = "escalate"
     if kind == "answer" and _str(data.get("answer"), 8000):
         return {
             "type": "answer",
             "answer": _str(data.get("answer"), 8000),
+            "depends_on": depends_on(data.get(DEPENDS_KEY)),
             "confidence": _confidence(data.get("confidence")),
             "used_claims": used,
             "language": _str(data.get("language"), 16) or None,
+        }
+    if kind not in ("answer", "escalate"):
+        # The model did not commit to an answer (e.g. the pre-D23 "needs" type); it did not
+        # say the situation is outside the persona.
+        return {
+            "type": "escalate",
+            "escalate": "low_confidence",
+            "reason": "the model did not commit to an answer",
+            "_confidence": 0.0,
         }
     code = data.get("escalate")
     if code == "boundary" and not has_boundary:

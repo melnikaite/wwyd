@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``predict``: what would the owner do here? (SPEC §8).
 
-Nothing in this package logs or stores the situation, facts or answer. The audit row
-(§4.6) carries only codes and numbers.
+Nothing in this package logs or stores the situation, context or answer. The audit row
+(§4.6) carries only codes, numbers and claim IDs.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ class _Run:
                 self.caller.user_id, self.caller.persona_id, self.audience_id
             )
         if self.audit:
-            audit_store.record(
+            result["prediction_id"] = audit_store.record(
                 self.conn,
                 self.caller.persona_id,
                 scope=self.caller.scope,
@@ -69,6 +69,7 @@ class _Run:
                 audience_id=self.audience_id,
                 audience_fallback=self.audience_fallback,
                 confidence=result.get("confidence", result.get("_confidence")),
+                used_claims=result.get("used_claims") or (),
                 llm_tokens=self.tokens,
                 latency_ms=int((time.monotonic() - self.started) * 1000),
             )
@@ -95,7 +96,7 @@ async def predict(
     *,
     situation: str,
     audience: str,
-    facts: list[dict[str, str | None]] | None = None,
+    context: str | None = None,
     kind: str = "reply",
     include_private: bool = False,
     audit: bool = True,
@@ -160,7 +161,7 @@ async def predict(
                 selected = [c for c in visible if c.id in hits]
             core = [c for c in visible if c.kind in CORE_KINDS]
             selected = list({c.id: c for c in [*core, *selected]}.values())
-        context = budgeted(selected, CONTEXT_BUDGET_TOKENS)
+        claims = budgeted(selected, CONTEXT_BUDGET_TOKENS)
         settings = json.loads(
             conn.execute("SELECT settings FROM personas WHERE id = ?", (persona_id,)).fetchone()[0]
             or "{}"
@@ -175,13 +176,13 @@ async def predict(
             if kind == "reply"
             else None
         )
-        labels = {f"c{i}": c.id for i, c in enumerate(context, 1)}
+        labels = {f"c{i}": c.id for i, c in enumerate(claims, 1)}
         user = answer_user(
             owner=owner,
             audience=row["name"],
             audience_description=row["description"],
-            claims=[claim_line(label, c) for label, c in zip(labels, context, strict=True)],
-            facts=facts or [],
+            claims=[claim_line(label, c) for label, c in zip(labels, claims, strict=True)],
+            context=context,
             kind=kind,
             situation=situation,
             style=style_step.parameters(profile) if profile is not None else None,
@@ -198,24 +199,8 @@ async def predict(
     result = answer_step.interpret(
         data,
         labels,
-        has_boundary=any(c.kind == "boundary" for c in context),
-        unavailable=[f for f in facts or [] if f.get("value") is None],
+        has_boundary=any(c.kind == "boundary" for c in claims),
     )
-    rules = {c.id for c in context if c.kind == "decision_rule"}
-    if (
-        result["type"] == "answer"
-        and any(f.get("value") is None for f in facts or [])
-        and rules.intersection(result["used_claims"])
-    ):
-        # Only decision rules ask for facts; answering through one while the harness said
-        # a fact is not available is a guess (small models confidently decline instead).
-        return run.finish(
-            _escalate(
-                "low_confidence",
-                "a fact the decision rule needs is not available",
-                _confidence=result["confidence"],
-            )
-        )
     if result["type"] == "answer":
         threshold = float(settings.get("escalate_below", DEFAULT_SETTINGS["escalate_below"]))
         if result["confidence"] < threshold:

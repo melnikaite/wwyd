@@ -50,8 +50,10 @@ The response is `200` whether or not something was revoked.
 ## Versioning
 
 `serverInfo.version` in the MCP `initialize` result is a semantic version. Before 1.0,
-breaking changes to tool shapes only bump the minor version (0.1 -> 0.2) and are listed in
-`CHANGELOG.md`. Additive changes (new optional inputs, new output fields, new enum values
+every breaking change to tool shapes bumps the minor version (0.2 -> 0.3) as soon as it
+lands on `main`, also between releases, so a version gate in your client catches it;
+breaking changes are listed in `CHANGELOG.md`. 0.1.0 was never released: the first release
+is 0.2.0. Additive changes (new optional inputs, new output fields, new enum values
 where this page says the list may grow) can appear in any release: **ignore unknown fields**
 and treat unknown values as documented below.
 
@@ -86,7 +88,7 @@ Input:
 {
   situation: string (1..8000),        // the message or situation as the owner would see it
   audience: string,                   // audience name, or "default"
-  facts?: [{ what: string, value: string | null, kind?: string }] (<= 20),
+  context?: string (<= 2000),         // what you found out, in plain words; never stored
   kind?: "reply" | "decision",        // default "reply"
   include_private?: bool              // owner only
 }
@@ -95,10 +97,13 @@ Input:
 Output, one of:
 
 ```
-{ type: "answer",   answer, confidence, disclosure, used_claims: [id], hints: [string] }
-{ type: "needs",    needs: [{ kind, what, why }], used_claims: [id], hints }
-{ type: "escalate", escalate: code, reason, hints }
+{ type: "answer",   answer, depends_on: string | null, confidence, disclosure, used_claims: [id],
+                    prediction_id, hints: [string] }
+{ type: "escalate", escalate: code, reason, prediction_id, hints }
 ```
+
+`prediction_id` (`adt_...`) is the ID of the call's audit row; keep it if the owner may
+later say what they would actually have done (see corrections under `ingest_raw`).
 
 - `answer`: for `kind: "reply"` the message text in the owner's style; for `"decision"` a
   short statement of what the owner decides. Show `disclosure` with any message you send on
@@ -106,35 +111,57 @@ Output, one of:
 - `escalate` codes: `low_confidence`, `out_of_persona`, `boundary`, `rate_limited`,
   `spend_cap`, `llm_unavailable`, `audience_not_permitted`. Hand the situation to the owner.
 
-### Needs and the facts round trip
+### `depends_on` and `context`
 
-`needs` means a decision rule of the owner depends on facts the server cannot know. Each
-need has:
+wwyd answers like someone who knows the owner well but cannot see their calendar, the
+weather or anything else outside the persona. `answer` is always ready to send in the
+owner's voice and never asserts what wwyd cannot know: when the owner's real answer
+depends on such things it stays non-committal ("let me check and get back to you").
+`depends_on` then says, in one or two plain sentences from the owner's claims and in the
+answer's language, what the answer depends on; it is `null` when nothing outside the
+persona matters. It has no structure and no fixed vocabulary, is not styled, and is at
+most 400 characters. A non-empty `depends_on` is not an escalation.
 
-- `kind`: `calendar.free_busy` (the owner's free/busy time, slots, other calls),
-  `contact.relationship` (who the other person is to the owner) or `other`. The list may
-  grow: **treat an unknown kind as `other`**.
-- `what`: the fact to look up, in words, specific to the situation.
-- `why`: which rule asked for it (`decision_rule clm_...`).
+What to do with it is up to you:
 
-The server keeps no state. To continue, call `predict` again with the same `situation`,
-`audience` and `kind`, plus `facts`: one entry per need, `what` copied from the need,
-`value` the answer as text, `kind` optionally echoed. If you cannot find a fact out, send it
-with **`value: null`**: the server then decides without it or escalates with
-`low_confidence`, and never asks for that fact again. A client that keeps answering needs
-therefore terminates; still cap the round trips (two is plenty).
+- send `answer` as is (simple auto-responders);
+- refine the answer yourself from `depends_on` with your own LLM and tools;
+- or look things up and call `predict` again with the same `situation`, `audience` and
+  `kind`, plus `context`: what you found out, as a conclusion in plain words ("free today
+  from 19:30"), never raw data such as a whole schedule. The answer then comes in the
+  owner's wording. The server keeps no state between calls.
 
 ```
--> predict {situation: "Call tomorrow at 3?", audience: "default"}
-<- {type: "needs", needs: [{kind: "calendar.free_busy",
-                            what: "owner's free slots tomorrow around 15:00", why: "..."}]}
--> predict {situation: "Call tomorrow at 3?", audience: "default",
-            facts: [{what: "owner's free slots tomorrow around 15:00",
-                     value: "14:00-16:00", kind: "calendar.free_busy"}]}
-<- {type: "answer", answer: "3 works", ...}
+-> predict {situation: "созвонимся завтра в 15:00?", audience: "default"}
+<- {type: "answer", answer: "гляну календарь и отпишусь",
+    depends_on: "Согласится, если завтра свободно с 14:55 до 15:25; иначе предложит
+                 ближайшее время с тем же запасом.", ...}
+-> predict {situation: "созвонимся?", audience: "default"}
+<- {type: "answer", answer: "давай, скину время чуть позже",
+    depends_on: "С друзьями созванивается после 18:00 и оставляет минимум 5 минут между звонками.", ...}
+-> predict {situation: "пойдём на озеро?", audience: "default"}
+<- {type: "answer", answer: "звучит здорово, посмотрю по погоде",
+    depends_on: "Ходит на озеро только в тёплую погоду без дождя.", ...}
+-> predict {situation: "созвонимся завтра в 15:00?", audience: "default",
+            context: "завтра свободен с 14:00 до 16:00"}
+<- {type: "answer", answer: "давай, в 15:00 норм", depends_on: null, ...}
 ```
 
-Situations and facts go to the persona's LLM backend and are never stored or logged.
+Situations and context go to the persona's LLM backend and are never stored or logged.
+
+### Corrections
+
+When an owner client learns that the owner would have answered or decided differently,
+send a correction episode to `ingest_raw`: the same `situation` the prediction was made
+for, the owner's version in `said` (reply) or `decision`, and `corrects: <prediction_id>`.
+It is derived like any episode of its shape and weighs more. An unknown or expired
+`prediction_id` (older than the 90-day audit retention, or from another persona) is
+ignored, counted in `unknown_predictions`, and the episode counts as an ordinary one.
+
+```
+{"situation": "Call tomorrow at 3?", "said": "can't tomorrow, Thursday?",
+ "audience": "default", "corrects": "adt_..."}
+```
 
 ## `add_claims` (owner)
 
@@ -180,28 +207,31 @@ episodes, <= 2 MB serialized. One shape covers every data source; the domain liv
 `category`:
 
 ```
-Episode = { when?: datetime | {start, end?},  // end >= start
+Episode = { when?: datetime | {start, end?},  // when the owner acted: a moment or a span; end >= start
+            situation_at?: datetime,          // when the situation reached the owner; needs situation
             where?: string <= 100,            // coarse: "home", "online", "work Slack"; never an address
             audience?: string,                // audience name or "default"
-            category: string,                 // required; a path, created if unknown
+            category?: string,                // a path, created if unknown; placed by the server if absent
             situation?: string <= 8000,       // what happened / was offered / was said to the owner
             decision?: string <= 4000,        // what the owner did, in your words
-            said?: string <= 20000 }          // the owner's verbatim words
+            said?: string <= 20000,           // the owner's verbatim words
+            corrects?: string }               // a prediction_id: this is what the owner actually does
 ```
 
 Every episode (and `when`) has `additionalProperties: false` and needs `decision` or
-`said`. Never put names, emails, phone numbers or addresses in any field, and keep names
-out of category paths too. Datetimes are ISO 8601 (10-40 chars), converted to the persona's
-timezone; without an offset they are read in it. An unknown `audience` maps to the default
+`said`; `situation_at` and `corrects` need `situation`. Never put names, emails, phone
+numbers or addresses in any field, and keep names out of category paths too. Datetimes are
+ISO 8601 (10-40 chars), converted to the persona's timezone; without an offset they are
+read in it. An unknown `audience` maps to the default
 audience and is counted in `unknown_audiences`. Validation errors name the episode index
 and field path only.
 
-Shapes:
+Shapes (the `category` in the examples is optional):
 
 | Shape | Fields | Example |
 |---|---|---|
 | statement about self | `said`, no `situation` | `{"category": "food", "said": "I never eat breakfast."}` |
-| chat reply | `situation` = the incoming message(s), `said` = the reply | `{"when": {"start": "2026-10-02T10:00:00+02:00", "end": "2026-10-02T10:04:00+02:00"}, "audience": "colleagues", "category": "communication/chat", "situation": "Can you review this today?", "said": "sure, after lunch"}` |
+| chat reply | `situation` = the incoming message(s), `said` = the reply | `{"situation_at": "2026-10-02T10:00:00+02:00", "when": "2026-10-02T10:04:00+02:00", "audience": "colleagues", "category": "communication/chat", "situation": "Can you review this today?", "said": "sure, after lunch"}` |
 | choice | `situation` + `decision` | `{"when": {"start": "2026-10-02T19:30:00+02:00", "end": "2026-10-02T20:00:00+02:00"}, "where": "online", "category": "work/meetings", "situation": "invite, 12 attendees", "decision": "declined"}` |
 | call | `situation` = what the others said, `said` = the owner's turns | `{"when": "...", "category": "work/calls", "situation": "...", "said": "..."}` |
 
@@ -210,10 +240,23 @@ and `decision` is your description. A `decision` without `situation` is accepted
 self-describing choice such as "watched to the end, 4/5") and goes to the decision pass.
 An episode with both `said` and `decision` is a reply and a decision.
 
-**Intervals.** An interval `when` is the episode's span: a meeting's length, or incoming
-message -> reply (reply latency). Never mix the two meanings in one category (put replies
-under `communication/...`, meetings under `work/meetings`). The episode's timestamp is
-`when` or `when.start`.
+**Text only.** Episodes carry text only: describe images, audio and other media in words
+(a voice message becomes its transcript in `said`, a photo a short description in
+`situation`).
+
+**Time.** Each field has one meaning: `when` is when the owner acted, a moment (reply sent,
+choice made) or a span (a meeting attended, a call); `situation_at` is when the situation
+reached the owner (message received, invitation sent). Spans feed lengths and gaps;
+`when` - `situation_at` is the response latency, in any category. Do not encode latency
+as a `when` span. The episode's timestamp is `when` or `when.start`.
+
+**Placement.** `category` is optional. Without it the server places the episode in an
+existing path, an alias or a new organic category (one batched LLM step). An episode the
+server cannot place as proposed is counted in `unplaced_episodes`: without an LLM step
+(`llm_for_ingest: false`) or without a usable path in the placement output it goes to
+`other`; a proposed new path that fails the guard goes to its deepest existing ancestor,
+else `other`. A placed path over the category limits counts in `unmapped_categories`
+instead. Paths you send are never re-placed.
 
 **Categories.** Paths are normalised (NFKC, lower case, spaces -> `-`; segments of Unicode
 letters, digits, `-`, `_`, <= 40 chars, <= 3 levels), so `Кино/Сериалы` is fine. An unknown
@@ -265,7 +308,10 @@ where you can.
 
 **Counters** in `job_status.counts`: `episodes` (valid episodes received: `total`,
 `statement`, `reply`, `decision`; one episode can be in two classes), `categories_created`,
-`unmapped_categories`, `skipped_seen` (at or below the source watermark),
+`unmapped_categories`, `unplaced_episodes` (uncategorised episodes not placed as proposed: no LLM step, no
+usable path, or a new path that failed the guard; see Placement),
+`corrections` (episodes whose `corrects` matched a prediction), `unknown_predictions`
+(`corrects` IDs ignored as unknown or expired), `skipped_seen` (at or below the source watermark),
 `skipped_saturated` (replies not sent to the LLM because the audience was saturated: 5
 reply calls in a row produced only claims the persona already has), `saturated_audiences`,
 `claims_created`, `claims_updated`, `absorbed`, `dropped_by_guard`,

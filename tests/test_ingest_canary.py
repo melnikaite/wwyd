@@ -301,7 +301,7 @@ def m7c_echo(call):
             "confidence": 0.9,
             "used_claims": [],
             "language": "en",
-            "absent_facts": [],
+            "a_depends_on": "",
             "escalate": "",
             "reason": "",
         }

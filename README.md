@@ -122,7 +122,7 @@ real replies; see [docs/eval.md](docs/eval.md).
   they produce.
 - [docs/eval.md](docs/eval.md): evaluation method and results.
 - [docs/clients.md](docs/clients.md): the contract for MCP client authors (auth, scopes,
-  revocation, tool shapes, needs/facts round trip, error codes, versioning).
+  revocation, tool shapes, `depends_on` and `context`, error codes, versioning).
 
 ## Tools
 

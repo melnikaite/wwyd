@@ -33,6 +33,14 @@ and wheel attached.
    workflow requests what it needs per job (`id-token`, `packages`, `contents: write`); the
    default "read repository contents" setting is enough.
 
+## Versioning rule
+
+Before 1.0, every breaking change to the client contract (tool shapes, field meanings)
+bumps the minor version in `pyproject.toml` (and `src/wwyd/__init__.py`, `uv.lock`) in the
+same change that lands it on `main`, also between releases, so a client's version gate
+on `serverInfo.version` catches it. Additive changes need no bump. 0.1.0 was never
+released; the first release is 0.2.0.
+
 ## Per release
 
 1. Bump `version` in `pyproject.toml` (`uv version X.Y.Z` also updates `uv.lock`).

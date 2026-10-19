@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from wwyd.mcp.caller import current_caller
 from wwyd.mcp.tools._types import Cursor, Name, Paths
@@ -15,21 +15,6 @@ from wwyd.store import audit
 
 if TYPE_CHECKING:
     from wwyd.mcp.server import WwydServer
-
-
-class Fact(BaseModel):
-    """A fact the harness looked up, e.g. after a ``needs`` reply. Used for this call only."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    what: str = Field(max_length=500, description="Copied from the need.")
-    value: str | None = Field(
-        max_length=2000,
-        description="The answer; null means the harness cannot find this out.",
-    )
-    kind: str | None = Field(
-        default=None, max_length=40, description="Optional echo of the need's kind."
-    )
 
 
 def register(server: WwydServer) -> None:
@@ -46,8 +31,13 @@ def register(server: WwydServer) -> None:
         audience: Annotated[
             str, Field(max_length=100, description="Audience name; unknown -> default.")
         ],
-        facts: Annotated[
-            list[Fact] | None, Field(max_length=20, description="Answers to earlier needs.")
+        context: Annotated[
+            str | None,
+            Field(
+                max_length=2000,
+                description="What the client found out, in plain words (e.g. 'free today "
+                "from 19:30'), not raw data. Used for this call only; never stored.",
+            ),
         ] = None,
         kind: Literal["reply", "decision"] = "reply",
         include_private: Annotated[
@@ -56,21 +46,28 @@ def register(server: WwydServer) -> None:
     ) -> dict[str, Any]:
         """Predict what the owner would reply or decide.
 
-        Returns type "answer" (answer, confidence, disclosure to show with it, used_claims),
-        "needs" (facts to look up, each with a kind: calendar.free_busy,
-        contact.relationship or other; treat unknown kinds as other. Call again with
-        `facts` [{what, value}], value null if it cannot be found out; the server keeps no
-        state) or
-        "escalate" with a code: low_confidence, out_of_persona, boundary, rate_limited,
-        spend_cap, llm_unavailable, audience_not_permitted. Situations are sent to the
-        persona's LLM backend and are never stored.
+        Returns type "answer" (answer, depends_on, confidence, disclosure to show with it,
+        used_claims) or "escalate" with a code: low_confidence, out_of_persona, boundary,
+        rate_limited, spend_cap, llm_unavailable, audience_not_permitted. `answer` is
+        always sendable as is in the owner's voice; when the owner's real answer depends
+        on things wwyd cannot know (free time, weather, ...) it stays non-committal and
+        `depends_on` says in plain words what it depends on (null when nothing does).
+        Send `answer` as is, refine it with your own tools, or call again with the same
+        situation and what you found out in `context` for the owner's wording; the server
+        keeps no state. Situations and context are sent to the persona's LLM backend and
+        are never stored.
+
+        Every result carries `prediction_id` (the audit row ID). If the owner would have
+        acted differently, an owner client sends a correction episode: the same
+        situation with the owner's version in `said`/`decision` and `corrects:
+        <prediction_id>`. Unknown or expired IDs are ignored.
         """
         return await run_predict(
             server.conn,
             current_caller(),
             situation=situation,
             audience=audience,
-            facts=[f.model_dump() for f in facts or []],
+            context=context,
             kind=kind,
             include_private=include_private,
         )

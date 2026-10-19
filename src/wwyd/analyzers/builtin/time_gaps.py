@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``time_gaps``: same-day gaps between consecutive non-reply intervals (SPEC §7.2).
+"""``time_gaps``: same-day gaps between consecutive intervals (SPEC §7.2).
+
+Every interval ``when`` of 0–8 h counts, whatever the episode class (D23).
 
 Per local day the intervals are sorted by start; the gap is ``start - max(previous ends)``
 (overlaps count as 0); gaps of 120 min or more are not "between" items. State: ``gap``
@@ -39,7 +41,7 @@ def run(items: Sequence[Item], ctx: Context) -> Output:
     c = Counter()
     days: dict[object, list[Item]] = defaultdict(list)
     for it in items:
-        if not it.episode.is_reply and usable_interval(it):
+        if usable_interval(it):
             days[it.local_start.date()].append(it)  # type: ignore[union-attr]
     for its in days.values():
         its.sort(key=lambda i: i.local_start.astimezone(UTC))  # type: ignore[union-attr]

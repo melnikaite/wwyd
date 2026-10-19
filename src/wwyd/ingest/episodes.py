@@ -3,7 +3,7 @@
 
 A parsed episode lives only in process memory (the job object) and is dropped when the job
 ends (P1). Times are already converted to the persona timezone; audience and category are
-already resolved.
+resolved at preparation (a missing category by the job's placement step, SPEC §4.4).
 """
 
 from __future__ import annotations
@@ -22,12 +22,14 @@ MAX_DECISION = 4000
 MAX_SAID = 20000
 
 _DT = {"type": "string", "minLength": 10, "maxLength": 40}
+# A prediction_id (SPEC §6.5): an audit row ID, ``adt_`` + 16 base32 characters (wwyd.ids).
+PREDICTION_ID = {"type": "string", "maxLength": 20, "pattern": "^adt_[a-z2-7]{16}$"}
 
 EPISODE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["category"],
     "anyOf": [{"required": ["decision"]}, {"required": ["said"]}],
+    "dependentRequired": {"situation_at": ["situation"], "corrects": ["situation"]},
     "properties": {
         "when": {
             "oneOf": [
@@ -40,6 +42,8 @@ EPISODE_SCHEMA: dict[str, Any] = {
                 },
             ]
         },
+        "situation_at": _DT,
+        "corrects": PREDICTION_ID,
         "where": {"type": "string", "minLength": 1, "maxLength": MAX_WHERE},
         "audience": {"type": "string", "minLength": 1, "maxLength": 64},
         "category": {"type": "string", "minLength": 1, "maxLength": 200},
@@ -55,11 +59,15 @@ CLASSES = ("statement", "reply", "decision")
 @dataclass
 class Episode:
     index: int  # position in the submitted batch (progress tracking, SPEC §7.1)
-    category_id: str
-    category: str  # resolved path
+    category_id: str  # "" until resolved (or placed, SPEC §4.4)
+    category: str | None  # resolved path; None until placed when the client sent none
     audience: str | None  # resolved audience name; None when the episode named none
-    start: datetime | None = None  # `when` or `when.start`, in the persona timezone
+    start: datetime | None = None  # `when` or `when.start` (owner acted), persona timezone
     end: datetime | None = None  # `when.end`
+    situation_at: datetime | None = None  # when the situation reached the owner (D23)
+    corrects: str | None = None  # the prediction_id the client sent (in memory only)
+    # Claim IDs the corrected prediction used; None unless ``corrects`` resolved (§7.1).
+    corrected_claims: list[str] | None = None
     where: str | None = None
     situation: str | None = None
     decision: str | None = None
@@ -78,6 +86,11 @@ class Episode:
     @property
     def is_decision(self) -> bool:
         return self.decision is not None and self.situation is not None
+
+    @property
+    def is_correction(self) -> bool:
+        """``corrects`` resolved against this persona's audit rows (SPEC §6.1, D23)."""
+        return self.corrected_claims is not None
 
     @property
     def classes(self) -> tuple[str, ...]:
@@ -100,6 +113,15 @@ class Episode:
             return None
         # Aware datetimes in one ZoneInfo subtract as wall-clock time: go through UTC.
         return (self.end.astimezone(UTC) - self.start.astimezone(UTC)).total_seconds()
+
+    @property
+    def latency_s(self) -> float | None:
+        """Response latency: the owner's action (``when`` / ``when.start``) minus
+        ``situation_at`` (SPEC §6.1). None when either is missing or it is negative."""
+        if self.start is None or self.situation_at is None:
+            return None
+        delta = (self.start.astimezone(UTC) - self.situation_at.astimezone(UTC)).total_seconds()
+        return delta if delta >= 0 else None
 
 
 @dataclass
@@ -157,6 +179,10 @@ def validate_episode(index: int, episode: Any) -> None:
         raise _invalid(index, "", "unknown field")
     if error.validator == "anyOf":
         raise _invalid(index, "", "needs decision or said")
+    if error.validator == "dependentRequired":
+        # The schema's own keys only (situation_at, corrects): no caller-chosen text.
+        field_name = next(k for k in ("situation_at", "corrects") if k in episode)
+        raise _invalid(index, field_name, "needs situation")
     if error.validator == "oneOf":
         path = ".".join(str(p) for p in error.absolute_path)
         # Explain the nested failure without values (an unknown key inside `when`, too).
@@ -189,7 +215,8 @@ def parse_batch(
 ) -> Batch:
     """Validate every episode and build a :class:`Batch`; any invalid episode fails the
     call. ``category`` is normalised (``normalize_category``) but not yet resolved:
-    ``category_id`` is empty until the job resolves it against the tree."""
+    ``category_id`` is empty until the job resolves it against the tree; an episode
+    without one keeps ``category=None`` until placement (SPEC §4.4)."""
     batch = Batch()
 
     def audience(value: str | None) -> str | None:
@@ -204,10 +231,12 @@ def parse_batch(
 
     for i, rec in enumerate(raw):
         validate_episode(i, rec)
-        try:
-            category = normalize_category(rec["category"])
-        except Invalid:
-            raise _invalid(i, "category", "not a valid category path") from None
+        category = None
+        if "category" in rec:
+            try:
+                category = normalize_category(rec["category"])
+            except Invalid:
+                raise _invalid(i, "category", "not a valid category path") from None
         start = end = None
         when = rec.get("when")
         if isinstance(when, str):
@@ -218,6 +247,9 @@ def parse_batch(
                 end = parse_dt(when["end"], tz, i, "when.end")
                 if end < start:
                     raise _invalid(i, "when.end", "end before start")
+        situation_at = None
+        if "situation_at" in rec:
+            situation_at = parse_dt(rec["situation_at"], tz, i, "situation_at")
         batch.episodes.append(
             Episode(
                 index=i,
@@ -230,6 +262,8 @@ def parse_batch(
                 situation=rec.get("situation"),
                 decision=rec.get("decision"),
                 said=rec.get("said"),
+                situation_at=situation_at,
+                corrects=rec.get("corrects"),
             )
         )
     return batch

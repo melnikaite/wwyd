@@ -204,3 +204,15 @@ async def test_words_from_state_behind_approved_claim(conn, user, pid, fake_llm,
     user_msg = _user(fake_llm)
     assert "favourite words: darling, hugs" in user_msg
     assert "favourite phrases:" in user_msg
+
+
+async def test_depends_on_is_not_styled(conn, user, pid, fake_llm, auds):
+    style_claim(conn, pid, auds["family"])
+
+    def handler(call):
+        return {**answer("Let me check.")(call), "a_depends_on": "Agrees if free after 18:00."}
+
+    fake_llm.on("answer", handler)
+    out = await predict(conn, owner(user), situation="dinner?", audience="family")
+    assert out["answer"] == "let me check"
+    assert out["depends_on"] == "Agrees if free after 18:00."

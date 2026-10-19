@@ -3,11 +3,11 @@
 
 from __future__ import annotations
 
-import json
-import math
 import re
 import sqlite3
 from dataclasses import dataclass
+
+from wwyd.store.evidence import context_rank
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ class Claim:
     category: str
     text: str
     confidence: float
-    weight: float  # confidence x evidence weight
+    weight: float  # context rank (store.evidence.context_rank)
 
     @property
     def tokens(self) -> int:
@@ -29,16 +29,6 @@ class Claim:
 
 def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
-
-
-def evidence_weight(confidence: float, evidence: str | None) -> float:
-    """confidence x (1 + log10(1 + total evidence count))."""
-    try:
-        sources = (json.loads(evidence or "{}") or {}).get("sources") or {}
-        total = sum(v for v in sources.values() if isinstance(v, int | float) and v > 0)
-    except (ValueError, AttributeError):
-        total = 0
-    return confidence * (1 + math.log10(1 + total))
 
 
 _BASE = (
@@ -62,7 +52,7 @@ def _claims(rows: list[sqlite3.Row]) -> list[Claim]:
             r["category"],
             r["text"],
             r["confidence"],
-            evidence_weight(r["confidence"], r["evidence"]),
+            context_rank(r["confidence"], r["evidence"]),
         )
         for r in rows
     ]

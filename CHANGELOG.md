@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased
+## [0.2.0] - unreleased
 
-First public release.
+First public release. Version 0.1.0 was never released: it was the version string of
+development builds before the episode and client contract revisions, which changed tool
+shapes (see Changed), so the first release bumps the minor version.
 
 ### Added
 
@@ -30,8 +32,7 @@ First public release.
   consent page, revocation), API keys, scopes `owner`/`read`/`respond:<audiences>`,
   server-rendered sign-in, account and admin pages, setup/invite/reset links, auth
   throttling, `trusted_proxies`, `/healthz`.
-- M3: `predict` with SQL visibility filtering, disclosure, needs round trip and
-  escalation; `get_persona`; `predict` audit log and `list_audit`; OpenAI-compatible LLM
+- M3: `predict` with SQL visibility filtering, disclosure and escalation; `get_persona`; `predict` audit log and `list_audit`; OpenAI-compatible LLM
   client with presets and encrypted per-persona API keys; instance default backend via
   `[llm]` / `WWYD_LLM_*`.
 - M4: `ingest_raw` and `job_status`, in-memory ingest jobs, habit detectors over calendar
@@ -46,11 +47,6 @@ First public release.
   `ghcr.io/melnikaite/wwyd`, GitHub Releases from tags (RELEASING.md).
 - Compaction size budget as per-user limits (`max_claims_per_category`,
   `max_approved_tokens`).
-- `predict` needs carry a machine-readable `kind` (`calendar.free_busy`,
-  `contact.relationship`, `other`; unknown kinds are to be read as `other`).
-- `predict` facts accept `value: null` ("the harness cannot find this out"); the server
-  then answers without it or escalates with `low_confidence` (always when the answer
-  relies on a decision rule), and never asks for it again.
 - Reserved audience alias `default`: every audience-taking tool resolves it to the
   persona's default audience, without a fallback hint. No audience can be named `default`.
 - docs/clients.md: the contract for MCP client authors (auth, scopes, revocation, tool
@@ -93,6 +89,21 @@ First public release.
     `analyzer_min_episodes`, `split_threshold`.
   - Export format: category aliases and labels, analyzers with their state, portable
     keyed-claim keys.
+- M8 (SPEC D23, client contract revision):
+  - Episodes may omit `category`: the server places them into an existing, aliased or new
+    organic category (`unplaced_episodes` counts those that went to `other`).
+  - Episode field `situation_at` (when the situation reached the owner); response latency
+    is `when` − `situation_at` in any category.
+  - `predict` answers come with `depends_on`: one or two plain sentences, from the
+    owner's claims, on what the real answer depends on (time, weather, anything outside
+    the persona); the answer itself is always sendable and never asserts what wwyd cannot
+    know. A client may call again with what it found out in `context`.
+  - Every `predict` result carries `prediction_id`; a correction episode
+    (`corrects: <prediction_id>`) weighs more than an ordinary one and is judged against
+    the claims the prediction used (`corrections`, `unknown_predictions`; migration
+    `0010_corrections` adds `used_claims` to the audit row).
+  - docs: episodes are text only (clients describe media); what never to send is stated as
+    records versus behaviour, so money and health habits are welcome.
 
 ### Changed
 
@@ -109,6 +120,14 @@ First public release.
 - Habit detectors became builtin analyzers whose counters accumulate across jobs, so small
   batches add to a habit until it passes the thresholds.
 - Category paths accept Unicode letters (NFKC, casefolded).
+- **Breaking:** `predict` no longer returns `type: "needs"` and no longer takes `facts`;
+  `depends_on` and `context` replace them (SPEC D23), with no domain vocabulary such as
+  need kinds.
+- **Breaking:** an interval `when` always means the owner's span (a meeting, a call) and
+  feeds lengths and gaps for every episode class; reply latency now comes from
+  `situation_at` instead of an interval on a reply.
+- Before 1.0 every breaking change on `main` bumps the minor version, also between
+  releases (docs/clients.md § Versioning, RELEASING.md).
 
 ### Removed
 
@@ -145,5 +164,5 @@ First public release.
 - The consent page marks self-registered client names as unverified.
 - Identifier guard regexes run in linear time.
 
-[Unreleased]: https://github.com/melnikaite/wwyd/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/melnikaite/wwyd/releases/tag/v0.1.0
+[Unreleased]: https://github.com/melnikaite/wwyd/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/melnikaite/wwyd/releases/tag/v0.2.0

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``time_duration``: histograms of interval durations (SPEC §7.2).
+"""``time_duration``: histograms of interval durations and response latency (SPEC §7.2).
 
-Non-reply intervals (meetings, calls, blocks) feed ``length`` (``<minutes>`` rounded to 5,
-last bucket ``180`` = 180+). Reply episodes with an interval ``when`` (start = message
-received, end = reply sent) feed ``latency`` (``<audience_id>.<1|0>.<edge>``, 1 = received
-Mon–Fri 09:00–18:00). ``days`` (``DD``). Facets: ``length`` and ``latency:<audience_id>``.
+Every interval ``when`` of 0–8 h (meetings, calls, blocks, whatever the episode class)
+feeds ``length`` (``<minutes>`` rounded to 5, last bucket ``180`` = 180+). Every episode
+with ``situation_at`` and a ``when`` at or after it feeds ``latency`` (``when`` −
+``situation_at``, D23; ``<audience_id>.<1|0>.<edge>``, 1 = the situation arrived Mon–Fri
+09:00–18:00 local time). ``days`` (``DD``). Facets: ``length`` and
+``latency:<audience_id>``.
 """
 
 from __future__ import annotations
@@ -36,25 +38,29 @@ WORK_START, WORK_END = 9, 18
 LATENCY_EDGES = (0, 5, 15, 60, 240, 1440)  # minutes; last bucket = more than a day
 LATENCY_WORDS = {5: "5 min", 15: "15 min", 60: "an hour", 240: "4 hours", 1440: "a day"}
 MAX_LATENCY_MINUTES = 14 * 24 * 60
-MIN_SIDE = 10  # minimum replies in/out of work hours to describe that side
+MIN_SIDE = 10  # minimum responses in/out of work hours to describe that side
 
 
 def run(items: Sequence[Item], ctx: Context) -> Output:
     c = Counter()
     for it in items:
-        if it.duration_s is None or it.month is None:
+        if it.month is None:
             continue
-        minutes = it.duration_s / 60
-        if it.episode.is_reply:
-            if not 0 <= minutes <= MAX_LATENCY_MINUTES or it.audience_id == NO_AUDIENCE:
-                continue
-            work = int(it.weekday < 5 and WORK_START <= it.hour < WORK_END)  # type: ignore[operator]
-            edge = LATENCY_EDGES[bucket(minutes, LATENCY_EDGES)]
-            c.add("latency", it.month, f"{it.audience_id}.{work}.{edge}")
-            c.day(it)
-        elif usable_interval(it):
+        counted = False
+        arrived = it.local_situation_at
+        if it.latency_s is not None and arrived is not None and it.audience_id != NO_AUDIENCE:
+            minutes = it.latency_s / 60
+            if minutes <= MAX_LATENCY_MINUTES:
+                work = int(arrived.weekday() < 5 and WORK_START <= arrived.hour < WORK_END)
+                edge = LATENCY_EDGES[bucket(minutes, LATENCY_EDGES)]
+                c.add("latency", it.month, f"{it.audience_id}.{work}.{edge}")
+                counted = True
+        if usable_interval(it):
+            minutes = it.duration_s / 60  # type: ignore[operator]
             rounded = min(round(minutes / LENGTH_STEP) * LENGTH_STEP, LENGTH_MAX)
             c.add("length", it.month, str(rounded))
+            counted = True
+        if counted:
             c.day(it)
     return c.output()
 
@@ -117,18 +123,18 @@ def _render_latency(state: State, aud: str, period, ctx: Context) -> ClaimSpec: 
     p = ctx.scope_path
     if a and b:
         if a[0] == b[0]:
-            text = f"{p}: replies within {a[0]}, in and out of work hours"
+            text = f"{p}: responds within {a[0]}, in and out of work hours"
         else:
-            text = f"{p}: replies within {a[0]} in work hours, within {b[0]} otherwise"
+            text = f"{p}: responds within {a[0]} in work hours, within {b[0]} otherwise"
         share, hits = min(a[1], b[1]), a[2] + b[2]
     elif a:
-        text, share, hits = f"{p}: replies within {a[0]} in work hours", a[1], a[2]
+        text, share, hits = f"{p}: responds within {a[0]} in work hours", a[1], a[2]
     elif b:
-        text, share, hits = f"{p}: replies within {b[0]} outside work hours", b[1], b[2]
+        text, share, hits = f"{p}: responds within {b[0]} outside work hours", b[1], b[2]
     else:
         return spec
     spec.share, stats["hits"] = share, hits
-    spec.text = f"{text} ({pct(share)}% of {n} replies)."
+    spec.text = f"{text} ({pct(share)}% of {n} responses)."
     return spec
 
 
@@ -146,7 +152,7 @@ BUILTIN = Builtin(
     name="time_duration",
     scope_kind="category",
     kind="habit",
-    statement_template="{category}: typical interval lengths; reply latency per audience",
+    statement_template="{category}: typical interval lengths; response latency per audience",
     key_classes={
         "length": (NUMERIC,),
         "latency": (VOCAB, NUMERIC, NUMERIC),

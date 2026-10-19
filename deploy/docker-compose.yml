@@ -7,7 +7,7 @@ name: wwyd
 
 services:
   wwyd:
-    image: ${WWYD_IMAGE:-ghcr.io/melnikaite/wwyd:0.1.0}
+    image: ${WWYD_IMAGE:-ghcr.io/melnikaite/wwyd:0.2.0}
     restart: unless-stopped
     environment:
       WWYD_PUBLIC_URL: https://${WWYD_DOMAIN:?set WWYD_DOMAIN to your domain}

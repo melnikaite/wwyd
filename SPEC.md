@@ -2,7 +2,7 @@
 
 Status: **approved** design (2026-10-18). Key decisions and their reasoning are in §17.
 Revised and approved 2026-10-19: episode records, organic categories, analyzers (D17–D22),
-implemented at M7 (7a–7c).
+implemented at M7 (7a–7c); client contract revision (D23, M8).
 Implementation progress is tracked in §16 and CHANGELOG.md.
 
 wwyd is an MCP server that holds one person's character and ways of acting: how they
@@ -54,7 +54,7 @@ These are the rules the whole design is checked against. Each one has a test (§
 | P3 | **No live data.** An episode may describe live data (a meeting, a mail) for derivation, but none of it is kept. | Free-text fields are never stored, only guarded derived artefacts; `where` is coarse context by contract (never an address). Facts passed to `predict` are used for that call only and never stored. |
 | P4 | **Third parties see only what the owner allowed.** | Claim filtering happens in SQL before the LLM call (§8.3). The prompt is never relied on to hide anything. |
 | P5 | **Answers to third parties are disclosed as automated.** | `predict` always returns a server-built `disclosure` string (EU AI Act Art. 50). |
-| P6 | **Audit without content.** Every `predict` call is logged with time, client, audience, outcome and confidence, never the situation text, facts or answer. | Audit table has no text columns. |
+| P6 | **Audit without content.** Every `predict` call is logged with time, client, audience, outcome and confidence, never the situation text, context or answer. | Audit table has no text columns. |
 
 **Residual risk (P2).** The key filter (§7.2) cannot recognise a name the owner always
 writes in lowercase and uses often (≥ 5 episodes on ≥ 3 days): it can survive as a
@@ -192,6 +192,21 @@ food  travel  money  health  family  hobbies  tech  other
   `new_categories_per_job` (20). Beyond either, the episode maps to the deepest existing
   ancestor of its path, or to `other` when none exists, and is counted in
   `unmapped_categories`.
+- **Placement by the server (D23).** `category` is optional. Episodes without one are
+  placed by the job's first LLM step: batched calls (≤ 50 episodes and ~6000 chars of
+  episode text per call; `situation` and `said` cut to 300 chars, `decision` to 200) see
+  the persona's category paths and descriptions and return, per episode, an existing path
+  or a new one, plus a one-line description for each new path (so placed paths need no
+  separate description call). A returned path goes through the same resolution and limits
+  as a client's path (over a limit it maps like one and counts in `unmapped_categories`).
+  A new path is checked by the full verbatim guard, including the concentrated-word check
+  (§7.7); a description by the guard's parts 1–3, like every category description (the
+  concentrated-word check would reject ordinary words of a sentence in a small batch).
+  An episode is counted in `unplaced_episodes` when the server could not place it as
+  proposed: no LLM step (`llm_for_ingest: false`; it goes to `other`), no usable path in
+  the call's output (`other`), or a new path that fails the guard (the deepest existing
+  ancestor, else `other`). A description that fails is dropped and the path kept. Paths
+  the client sends are never re-placed.
 - **Aliases.** `category_aliases (persona_id, path, category_id)`: after a merge or rename
   the old path keeps routing incoming episodes to the new category.
 - **Placement of derived claims.** A claim derived from an episode lands in the episode's
@@ -229,7 +244,7 @@ food  travel  money  health  family  hobbies  tech  other
 
 ```json
 {
-  "sources": {"statement": 0, "reply": 0, "decision": 3, "analyzer": 212},
+  "sources": {"statement": 0, "reply": 0, "decision": 3, "correction": 1, "analyzer": 212},
   "share": 0.87,
   "period": "2026-09-01..2026-10-31",
   "stats": {"n": 71, "hits": 62, "n_by_month": [40, 31], "hits_by_month": [35, 27]}
@@ -237,7 +252,13 @@ food  travel  money  health  family  hobbies  tech  other
 ```
 
 `sources` count the episodes behind the claim by class (§7.1; `analyzer` = episodes an
-analyzer counted) and are summed on merge; `period` widens. `stats` of a keyed claim holds
+analyzer counted; `correction` = episodes that correct a prediction, counted there instead
+of under their own class, D23) and are summed on merge; `period` widens. The **evidence
+weight** used by contradictions and the size budget is
+`confidence × log(1 + Σ weighted sources)`, where `correction` counts
+`correction_weight` (3) times and every other class once. Context ordering in `predict`
+and `get_persona` uses `confidence × (1 + log10(1 + Σ weighted sources))`, so a claim
+without sources (written by the owner) still ranks by its confidence. `stats` of a keyed claim holds
 the numbers its text was rendered from, as numbers or lists of numbers only (for an LLM
 analyzer `n`, `hits` and their per-month lists over `period`); the
 counters themselves live in `analyzer_state` (§4.6), so a re-run re-renders the keyed claim
@@ -265,7 +286,8 @@ cleared) and count against no budget.
   `expired` (not undoable).
 - `jobs`: `id, persona_id, status (queued|running|done|partial|failed|interrupted),
   created_at, finished_at, counts` (episodes by class, claims created/absorbed/dropped_by_guard,
-  categories created, `unmapped_categories`, analyzer counters, skip counters), `error_code`, `remaining_records` (JSON array of batch indices not yet
+  categories created, `unmapped_categories`, `unplaced_episodes`, `corrections`,
+  `unknown_predictions`, analyzer counters, skip counters), `error_code`, `remaining_records` (JSON array of batch indices not yet
   processed; written when a job ends `partial`). No content.
 - `ingest_sources`: `persona_id, source, last_ts, last_job_at, records_total` — the
   per-source watermark of §7.1 (an owner-chosen slug, the largest processed episode
@@ -282,9 +304,11 @@ cleared) and count against no budget.
   `retired` LLM analyzers.
 - `analyzer_state`: `analyzer_id, month (YYYY-MM), metric, key, value` — numbers only,
   keys filtered (§7.2).
-- `audit`: `id, persona_id, ts, client_name, grant_id|api_key_id, scope, audience_id,
-  audience_fallback (bool), outcome (answer|needs|escalate:<code>), confidence,
-  llm_tokens, latency_ms`. Kept 90 days.
+- `audit`: `id (adt_…), persona_id, ts, client_name, grant_id|api_key_id, scope,
+  audience_id, audience_fallback (bool), outcome (answer|escalate:<code>; `needs` only on
+  rows written before D23), confidence, used_claims (JSON array of claim IDs, no
+  text), llm_tokens, latency_ms`. Kept 90 days. The `id` is returned to the caller as `prediction_id` (§6.5) and is what a
+  correction episode references (D23).
 - Auth tables: `web_sessions, one_time_links, oauth_clients, pending_authorizations,
   oauth_codes, grants, tokens, api_keys` (§9).
 - Limits/usage: `limit_overrides (user_id, set_by admin|user, json)`,
@@ -352,6 +376,10 @@ schema; we use its names where they mean the same thing (`id` prefixes, `text`,
   token by default, so an owner-token auto-responder cannot leak `owner_only` claims.
   `include_private: true` (owner only) adds `owner_only` claims, for drafts the owner will
   read before sending.
+- A `respond` client reads the answer and its `depends_on` (§6.5), which paraphrases the
+  claims applicable to the situation. Those are claims already visible to its audience,
+  so it learns nothing the SQL filter (§8.3) did not let into the context; `owner_only`
+  claims never reach `depends_on` unless the owner asked for them with `include_private`.
 - The admin role grants no persona access. Admin is a web-page role only (§9.6).
 
 ---
@@ -375,14 +403,18 @@ in:  { episodes: Episode[1..1000], llm_for_ingest?: bool,   // batch ≤ 2 MB se
 out: { job_id, accepted: int, estimated_tokens: int, remaining_tokens: int | null }
 
 Episode = { when?: datetime | { start: datetime, end?: datetime },
+                                       // when the owner acted: a moment or a span
+            situation_at?: datetime,   // when the situation reached the owner; needs situation
             where?: string ≤ 100,      // coarse context only: "home", "online", "work Slack"; never an address
             audience?: string,         // audience name or "default"
-            category: string,          // required; a category path, created if unknown (§4.4)
+            category?: string,         // a category path, created if unknown; placed by the server if absent (§4.4)
             situation?: string ≤ 8000, // what happened / was offered / was said to the owner
             decision?: string ≤ 4000,  // what the owner did, described by the client
-            said?: string ≤ 20000 }    // the owner's verbatim words
+            said?: string ≤ 20000,     // the owner's verbatim words
+            corrects?: string }        // a prediction_id (§6.5): this is what the owner actually does
 ```
 Every episode has `additionalProperties: false` and at least one of `decision` / `said`.
+`situation_at` and `corrects` need `situation`.
 An unknown `audience` is mapped to the default audience and counted in the job's
 `unknown_audiences` counter. Shapes (one type for every data source; the domain lives in
 `category`, D17):
@@ -393,10 +425,22 @@ An unknown `audience` is mapped to the default audience and counted in the job's
 - a call: `situation` = what the others said, `said` = the owner's turns.
 
 `situation` may contain others' words; `decision` is written by the client, not the owner.
-Only `said` counts as owner text (stylometry, guard; §7.7). An interval `when` is the
-episode's span: a meeting's length, or incoming message → reply (reply latency). The two
-meanings must not be mixed in one category. An episode's timestamp is `when` or
-`when.start`.
+Only `said` counts as owner text (stylometry, guard; §7.7). Episodes are text only:
+images, audio and other media are described in words by the client (a voice message
+becomes its transcript in `said`, a photo a short description in `situation`).
+
+Time has one meaning per field (D23): `when` is when the owner acted, a moment (reply sent,
+choice made) or a span (a meeting attended, a call); `situation_at` is when the situation
+reached the owner (message received, invitation sent). Spans feed lengths and gaps;
+`when` − `situation_at` is the response latency, in any category. An episode's timestamp
+is `when` or `when.start`.
+
+A **correction** (`corrects`) is the owner saying what they would actually have said or
+done instead of a prediction: `situation` is the situation the prediction was made for,
+`said` / `decision` the owner's version. It is derived like any episode of its shape and
+weighs more (§4.5, §7.6); a `prediction_id` that is unknown, older than the audit
+retention or from another persona is ignored (`unknown_predictions`) and the episode is
+processed as an ordinary one.
 
 `accepted` is the number of valid episodes received. `estimated_tokens` is a conservative
 estimate of the LLM tokens the job will use (0 when no LLM step runs; §7.1); `remaining_tokens` is
@@ -427,8 +471,9 @@ indices (into the original batch) that were not processed, so the harness resend
 those; `retry_after` is the seconds to the daily reset (`rate_limited`) or the month end
 (`spend_cap`). An `interrupted` job is resent in full. Counters include `skipped_seen` (episodes at or below the source watermark),
 `skipped_saturated` (replies skipped by saturation), `saturated_audiences`,
-`categories_created`, `unmapped_categories`, `analyzers_proposed` / `_accepted` /
-`_rejected`, `sandbox_errors` and `skipped_sandbox_budget`.
+`categories_created`, `unmapped_categories`, `unplaced_episodes`, `corrections`,
+`unknown_predictions`, `analyzers_proposed` / `_accepted` / `_rejected`, `sandbox_errors`
+and `skipped_sandbox_budget`.
 
 **`list_sources`** (owner, read-only) — `out: { sources: [{ source, last_ts, last_job_at,
 records_total }] }`. **`reset_source`** (owner) — `in: { source }` → `out: { deleted: bool }`;
@@ -484,28 +529,34 @@ weight, grouped by category, cut at `max_tokens` (estimated as chars/4).
 **`predict`** (owner, respond) — see §8.
 ```
 in:  { situation: string ≤ 8000, audience: string | "default",
-       facts?: [{ what, value: string | null, kind? }] ≤ 20,
+       context?: string ≤ 2000,     // what the client found out; never stored
        kind?: "reply"|"decision", include_private?: bool }
 out: one of
-  { type: "answer",   answer, confidence, disclosure, used_claims: [id], hints: [string] }
-  { type: "needs",    needs: [{ kind, what, why }], used_claims: [id], hints }
+  { type: "answer",   answer, depends_on: string | null, confidence, disclosure,
+                      used_claims: [id], hints: [string] }
   { type: "escalate", escalate: "low_confidence"|"out_of_persona"|"boundary"|
                       "rate_limited"|"spend_cap"|"llm_unavailable"|"audience_not_permitted",
                       reason, hints }
 ```
 `escalate` is a reason code rather than `true`, so `rate_limited` and the rest share one
-field (D6).
+field (D6). Every result also carries `prediction_id` (the audit row's `adt_…` ID, §4.6;
+absent only when no audit row is written). An owner client that learns the owner would
+have answered differently sends a correction episode with `corrects: <prediction_id>`
+(§6.1, D23).
 
-`needs[].kind` is machine-readable so a harness can route the lookup without parsing
-`what`: `calendar.free_busy` (the owner's free/busy time, slots, other calls),
-`contact.relationship` (who the other person is to the owner), `other`. The list is closed
-in the schema today but may grow; clients must treat an unknown kind as `other`.
-
-Reply contract: the harness calls `predict` again with the same situation and
-`facts: [{ what, value }]`, `what` copied from the need (`kind` may be echoed and is used
-only for matching). `value: null` means "the harness cannot find this out": the model then
-answers without that fact or the call escalates with `low_confidence`; it never asks for
-that fact (same `what`, or same non-`other` kind) again.
+**Answer and `depends_on`** (D23). wwyd answers like someone who knows the owner well but
+cannot see their calendar, the weather or anything else outside the persona. `answer` is
+always ready to send in the owner's voice and never asserts what wwyd cannot know (it
+says "let me check and get back to you", not "15:00 works", when it does not know the
+owner's time). `depends_on` is one or two plain sentences, from the owner's applicable
+claims, on what the owner's actual answer depends on ("talks to friends after 18:00 and
+keeps at least 5 minutes between calls"); `null` when nothing outside the persona
+matters. There is no structure in it and no domain vocabulary: the client decides how to
+use it. A simple client sends `answer` as is; a client with its own LLM and tools refines
+the answer from `depends_on`; a client that wants the final wording in the owner's voice
+calls `predict` again with the same situation and what it found out in `context`, as a
+conclusion in plain words ("free today from 19:30"), never raw data such as a schedule.
+The server keeps no state between calls.
 
 ### 6.6 Persona lifecycle and settings (owner)
 - **`export_persona`** → `{ document }` (§4.7). Large personas are still small (budgeted).
@@ -543,14 +594,17 @@ nothing to resume because nothing was saved (P1).
   timezone, resolves audiences and category paths (§4.4) and classifies each episode:
   *statement* (no `situation`), *reply* (`said` + `situation`), *decision* (`decision` +
   `situation`); an episode with both `said` and `decision` is a reply and a decision. New
-  categories get their descriptions in one batched call first (§4.4).
-- **Order and progress.** 1. annotation (§7.3); 2. the LLM passes (§7.6): statements,
-  replies per audience in chronological order, decisions; 3. analyzer authoring (§7.4);
-  4. the analyzers (builtin and active LLM, §7.2) over the *processed* episodes only. Step
-  4 always runs (also with no LLM step, no budget left, or after an LLM error stopped the
-  LLM phase). Every parsed episode keeps its batch index, and each call knows the indices
-  it covers. An episode is processed when every annotation and pass call that contains it
-  has completed; episodes in no such call (every episode when no LLM step runs) are
+  categories get their descriptions in one batched call first (§4.4). A `corrects` ID is
+  resolved against the persona's audit rows here (D23); a resolved episode is also a
+  *correction*, counted in `corrections`.
+- **Order and progress.** 0. placement of episodes without a category (§4.4); 1.
+  annotation (§7.3); 2. the LLM passes (§7.6): statements, replies per audience in
+  chronological order, decisions; 3. analyzer authoring (§7.4); 4. the analyzers (builtin
+  and active LLM, §7.2) over the *processed* episodes only. Step 4 always runs (also with
+  no LLM step, no budget left, or after an LLM error stopped the LLM phase). Every parsed
+  episode keeps its batch index, and each call knows the indices it covers. An episode is
+  processed when every placement, annotation and pass call that contains it has
+  completed; episodes in no such call (every episode when no LLM step runs) are
   processed. Description and authoring calls cover no episodes (authoring sees only
   processed ones). Remaining episodes therefore reach analyzer state only through their
   resend: each episode is counted once across a job and its resends. An `interrupted` job
@@ -602,7 +656,8 @@ that runs over the processed episodes of each job and produces only mergeable co
 
 **Input.** The processed episodes of the job in the analyzer's scope, as JSON (on stdin in
 the sandbox), with host-computed fields: `local_start`, `weekday`, `hour`, `month`,
-`duration_s`, `labels` (§7.3), plus `category`, `audience`, `where` and the text fields. A
+`duration_s` (the span of `when`), `latency_s` (`when` − `situation_at`), `labels` (§7.3),
+plus `category`, `audience`, `where` and the text fields. A
 shipped helper module `wwyd_helpers` (tokenize, sentences, emoji, punctuation, word and
 bigram counting) keeps LLM code short; builtins use the same module.
 
@@ -634,7 +689,7 @@ synthetic test.
 | Builtin | Scope | State | Claim (example) |
 |---|---|---|---|
 | `time_activity` | category | weekday × hour histogram per audience | habit: "No `work/*` episodes on weekends", "Active 08:30–19:00 on weekdays." |
-| `time_duration` | category | histogram of interval durations per audience | habit: "Meetings are typically 25 or 50 min." / style: "Replies within ~4 min." |
+| `time_duration` | category | histogram of span lengths; response latency (`when` − `situation_at`) per audience | habit: "Meetings are typically 25 or 50 min." / style: "Responds within ~4 min." |
 | `time_gaps` | category | same-day gaps between consecutive intervals | habit: "Keeps ≥10 min between calls (87% of 212 gaps)." |
 | `stylometry` | audience | over `said`: length histograms (chars, sentences), share starting lowercase, sentence-ending punctuation (incl. `)))` and none), emoji frequency, word and bigram frequency (`text` keys) | style: "Writes to family in 1–2 short lines, lowercase, no final period." Keyness of the audience vs the owner's overall usage names favourite words. |
 
@@ -720,6 +775,14 @@ Which episodes go to which pass (the token-saving switch):
   annotation and analyzers instead (§7.3, §7.4).
 - The model chooses categories within the episode's subtree or sets `proposed_category`
   (§4.4); labels (§7.3) are passed along.
+- **Corrections** (D23) go to the pass of their shape, marked in the prompt as the owner's
+  own correction of a prediction, and are never skipped by saturation. Their candidates
+  count under `correction` in `sources`. The claims the corrected prediction used (the
+  audit row's `used_claims`, still non-archived) are paired with each candidate derived
+  from the correction and sent to the LLM judge (§10.1) whatever their Jaccard score,
+  kind and category; `contradicts` resolves by evidence weight (§10.2), where the
+  correction weighs `correction_weight` times. `same` merges or absorbs only when kind
+  and category match; across them it is treated as `different`.
 - Results are deduplicated among themselves within a flush window (§7.1), then absorbed
   against existing claims (§10.1); only genuinely new ones become `pending`.
 - With `llm_for_ingest: false` there is no description call, annotation, authoring or LLM
@@ -765,12 +828,11 @@ through it.
    `style` and `boundary` claims for that audience. Capped at a token budget, highest
    confidence × evidence first.
 6. **Answer:** one LLM call with the owner's display name, the audience description, the
-   claims (with IDs), the facts and the situation. For `kind: reply`, the approved
+   claims (with IDs), the client's `context` and the situation. For `kind: reply`, the approved
    stylometry claims visible to the resolved audience also contribute explicit
    parameters: typical length, lowercase-start share, ending punctuation, emoji habits,
    favourite words and phrases (D22). The model returns strict JSON:
-   `{"type":"answer","answer","confidence","used_claims","language"}` or
-   `{"type":"needs","needs":[{"kind","what","why"}]}` or
+   `{"type":"answer","answer","depends_on","confidence","used_claims","language"}` or
    `{"type":"escalate","escalate":"out_of_persona"|"boundary","reason"}`.
 7. **Post-process:** drop `used_claims` IDs not in the context; `confidence <
    escalate_below` (default 0.6) → `escalate: "low_confidence"`; add the `disclosure`;
@@ -781,9 +843,10 @@ through it.
    p90 length, ask once to shorten (counts against limits), else keep it. Typos are never
    injected.
 
-`needs` lets a decision rule ask the harness for facts: "free slots on Tuesday ≥ 20 min with
-10 min buffers", why: "decision_rule clm_…". The harness looks them up and calls again with
-`facts`. The server keeps no state between the two calls.
+`depends_on` is how a decision rule reaches the client: the rule "accepts a call only with
+5 minutes free before and after" becomes "agrees if 14:55–15:25 is free; otherwise offers
+the nearest slot with the same margin" for this situation. It is not styled (§8.1 step
+8) and is cut to 400 chars.
 
 ### 8.2 Disclosure
 Server-built, localised by the answer's language, e.g. en: "This is {owner}'s
@@ -936,8 +999,8 @@ persona's timezone (in-process scheduler, no cron), and on `compact`. Every writ
 - **approved + approved:** a `proposed` merge the owner approves via `review_claims`.
 
 ### 10.2 Contradictions
-Pairs judged `contradicts`: the higher evidence weight (`confidence × log(1 + Σ sources)`)
-wins; on a tie, the newer `last_evidence_at` wins. The loser is
+Pairs judged `contradicts`: the higher evidence weight (`confidence × log(1 + Σ weighted
+sources)`, §4.5) wins; on a tie, the newer `last_evidence_at` wins. The loser is
 archived with `superseded_by`. If the loser is owner-approved, it becomes a `proposed`
 change instead.
 
@@ -1183,6 +1246,11 @@ Each ends with tests passing and a short demo.
      Demo: a chat export yields a style profile and a reply draft that follows it.
    - **7c:** annotation, LLM analyzers and the hypothesis loop. Demo: a film-watching log
      yields an accepted analyzer with a pending claim, plus a retired hypothesis.
+8. **Client contract revision** (D23): optional `category` with server placement,
+   `situation_at`, `prediction_id` and correction episodes, `depends_on` and `context`
+   instead of `needs` and `facts`, a minor version bump for breaking changes. Demo:
+   uncategorised episodes land in organic categories; a correction of a prediction
+   supersedes the claim that produced it; a reply draft comes with `depends_on`.
 
 Outward-facing steps (GitHub repo, PyPI, container registry, domains, OAuth app
 registrations) wait for the maintainer's go-ahead each time.
@@ -1192,7 +1260,8 @@ registrations) wait for the maintainer's go-ahead each time.
 ## 17. Decision log
 
 Design decisions taken when this spec was approved (2026-10-18), with the reasoning.
-D16 is a later revision; D17–D22 are the 2026-10-19 revision (approved the same day).
+D16 is a later revision; D17–D22 are the 2026-10-19 revision (approved the same day); D23
+is the client contract revision of the same day.
 
 **D1. Visibility is `owner_only | shared`.** `audiences` already says where a claim
 applies, and a claim is never fed to an audience it does not apply to, so a separate
@@ -1303,6 +1372,38 @@ ignore "write briefly"; explicit parameters and a few code rules (lowercase star
 period, one shorten re-ask) are reliable and testable. Typos are never injected: they would
 imitate the owner's mistakes, not their style.
 
+**D23. Client contract revision (2026-10-19, M8).** Feedback from the first client after
+the move to episodes: anything that makes a client know wwyd's domains, or invent its own,
+works against one generic model for every area of life.
+- *Optional category.* Requiring `category` made every client invent a taxonomy, which
+  small local models do badly. The server already has an LLM for derivation, so it places
+  uncategorised episodes into the same organic tree (§4.4) under the same limits and guard.
+- *`situation_at`.* An interval used to mean either a span or reply latency, told apart by
+  the episode's shape, so a call (situation + said) with a span was misread as latency.
+  Each time field now has one meaning: `when` is the owner's action, `situation_at` the
+  arrival of the situation, and latency becomes general (replies, invitations, any
+  category).
+- *Corrections.* The owner correcting a prediction is the most informative signal there
+  is, but it could only arrive as an unlinked sample. `prediction_id` (the audit row ID,
+  which already existed and carries no text) lets an episode reference the prediction; the
+  audit row gains the used claim IDs, so the correction is judged against exactly the
+  claims that misled, and it weighs more than a fresh sample.
+- *Versioning.* Before 1.0 every breaking change on `main` bumps the minor version, also
+  between releases, so a client's version gate catches it. 0.1.0 was never released; the
+  first release is 0.2.0.
+- *`depends_on` instead of `needs`.* Asking the client for facts made both sides share
+  a domain vocabulary (`needs[].kind`, then category hints, conditions and slots: each
+  one formalised a piece of the world) and gave no answer in the owner's voice until a
+  second call. Between two LLM agents the generic interface is plain language: wwyd always
+  returns a sendable answer that asserts nothing it cannot know, plus one or two sentences
+  on what the real answer depends on, and the client resolves them with whatever it has.
+  `facts: [{what, value}]` becomes a single `context` string for a client that wants the
+  final wording in the owner's voice.
+- *Exclusions* are stated in the storage model's terms: behaviour and preferences from any
+  area of life (money, health included) are welcome, including thresholds the owner
+  applies; records about the owner (diagnoses, balances, amounts, account data) are not
+  (`docs/ecosystem.md` §5).
+
 ### Implementation notes
 
 Deviations and details recorded while implementing M2–M6:
@@ -1323,7 +1424,8 @@ Deviations and details recorded while implementing M2–M6:
 - **HTTP 402** from the LLM backend maps to `spend_cap`.
 - **Self-service resets** do not show the admin-reset notice on the account page.
 - **`/healthz`** is an unauthenticated liveness endpoint that does not touch the DB.
-- **Answer shape.** The answer call's JSON has an `absent_facts: [{kind, what, why}]` field
+- **Answer shape** (until D23; the answer call now returns `depends_on`, see the M8
+  notes). The answer call's JSON has an `absent_facts: [{kind, what, why}]` field
   (replacing `needs`) that the model fills first: the facts the applicable decision rules
   need but `facts` lacks. The name sorts before `answer` on purpose, since some backends'
   JSON grammars emit keys alphabetically and the field only helps if it is generated
@@ -1336,10 +1438,10 @@ Deviations and details recorded while implementing M2–M6:
   call is `null` also becomes `low_confidence`: only decision rules ask for facts, and
   small models otherwise confidently decline ("not possible tomorrow") without the fact.
 - **Prompt layout for latency.** The answer system prompt (instructions, worked examples,
-  schema) is static and byte-identical across calls; owner, audience, claims, facts and
+  schema) is static and byte-identical across calls; owner, audience, claims, context and
   the situation follow in the user message, so a llama.cpp-style prompt prefix cache
   covers the long part. Claims are shown under short labels (`c1`, `c2`, …) and mapped back
-  to IDs in post-processing (`used_claims`, `needs[].why`): claim IDs cost ~10 output
+  to IDs in post-processing (`used_claims`): claim IDs cost ~10 output
   tokens each, and output tokens dominate latency on small local models.
 
 Deviations and details recorded while implementing M7:
@@ -1363,8 +1465,9 @@ Deviations and details recorded while implementing M7:
   keys `mon`…`sun`; `time_activity` stores `wd_hour` and `audience_weekday` (whole hours) to
   stay within 200 keys per metric and month; every builtin has a `days` metric for the
   period. Facets: `time_activity` `:hours`, `:slots`, `:weekends`; `time_duration`
-  `:length`, `:latency:<audience_id>`; `time_gaps` none. An interval on a reply is
-  received → replied (latency); other intervals of 0–8 h feed lengths and gaps; gaps are
+  `:length`, `:latency:<audience_id>`; `time_gaps` none. Since D23 latency comes from
+  `situation_at` and every interval of 0–8 h, whatever the episode class, feeds lengths
+  and gaps (before D23 an interval on a reply was read as received → replied); gaps are
   computed within one job. Evidence is replaced from state on every run. Weakening: a
   pending claim is archived (applied `decay` change, reason `analyzer_weakened`); an
   approved one keeps its text and gets one proposed archive; an owner-edited text is never
@@ -1412,3 +1515,39 @@ Deviations and details recorded while implementing M7:
   analyzer's state (adding would double-count); unknown builtins and scopes are skipped and
   counted; new LLM analyzers beyond `max_analyzers` are skipped. Category paths in the
   schema accept Unicode; the importer requires normalised paths.
+
+Deviations and details recorded while implementing M8:
+
+- **Placement in the job.** The client's paths are still resolved in `submit`; episodes
+  without a category are placed by the job (the `place` purpose), before annotation. Their
+  annotation and pass calls are planned after placement. Placement creates categories
+  through its own resolver, whose `new_categories_per_job` allowance is what the client's
+  paths left; it records its own `category_create` change with the `job_id` (a job can
+  have two), whatever ended the LLM phase. The system prompt is static; the category list
+  and the episodes are in the user message.
+- **Estimate for unplaced episodes.** `estimated_tokens` includes the place calls and,
+  for the episodes still to be placed, stand-in pass calls: all of an audience's unplaced
+  episodes in one category, decisions always included (never left to annotation), and
+  each stand-in call charged the full category list on top. Their annotation is not
+  estimated. The stand-in calls also keep those episodes pending, so an LLM error during
+  placement leaves them in `remaining_records`.
+- **Placement counters.** A path or description failing the guard counts in
+  `dropped_by_guard` too; a failing path, a missing or invalid placement and
+  `llm_for_ingest: false` count in `unplaced_episodes`. A placed path that hits
+  `max_categories` / `new_categories_per_job` maps like a client path and counts in
+  `unmapped_categories` only. The concentrated-word check ignores the words of existing
+  category paths. A description that fails is dropped (empty description), the path kept.
+- **Corrections.** A correction episode that has a `decision` goes to the decision pass
+  whatever its category's size (corrections bypass the `analyzer_min_episodes` rule). Its
+  candidates keep the corrected prediction's claim IDs in memory; after the candidate is
+  stored (created or absorbed into an existing claim), each (stored claim, used claim)
+  pair is forced into the job's compaction run and judged even across kinds and
+  categories, as long as both claims are pending or approved. The marker line is the
+  first line of the user message (`passes.CORRECTION_MARKER`).
+- **Evidence weight.** `store/evidence.py` holds both formulas of §4.5 over the same
+  weighted sources: the evidence weight for compaction and the context rank for `predict`
+  and `get_persona`. `correction_weight` is an instance
+  threshold (`WWYD_CORRECTION_WEIGHT`, ≥ 1, default 3).
+- **Latency texts.** `time_duration` renders "responds within …" (`… of N responses`);
+  the work-hours side is decided by the local `situation_at`. Analyzer items and the
+  sandbox input carry `latency_s`.

@@ -753,6 +753,16 @@ class CategoryResolver:
             )
         return FALLBACK_CATEGORY
 
+    def known(self, path: str) -> bool:
+        """``path`` resolves without creating anything (an existing path or an alias)."""
+        return path in self.ids or self._route_alias(path) in self.ids
+
+    def fallback(self, path: str | None = None) -> tuple[str, str]:
+        """``(category_id, path)`` of the deepest existing ancestor of ``path``, else of
+        ``other``; nothing is counted (placement counts ``unplaced_episodes`` itself)."""
+        found = self._fallback(path) if path else self._fallback(FALLBACK_CATEGORY)
+        return self.ids[found], found
+
     def resolve(self, path: str) -> tuple[str, str]:
         """``path`` (already normalised) -> ``(category_id, resolved path)``. Counts an
         episode mapped elsewhere because of a limit in ``unmapped``."""

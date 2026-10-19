@@ -32,7 +32,7 @@ All your data lives in one folder (the *data folder*): `~/.wwyd` on your compute
    > To run the latest source code instead of the PyPI release:
    > `uvx --from git+https://github.com/melnikaite/wwyd wwyd`
 
-   *What you should see:* a line `wwyd 0.1.0 listening on http://127.0.0.1:8740` and a line
+   *What you should see:* a line `wwyd 0.2.0 listening on http://127.0.0.1:8740` and a line
    `Open this link to create the admin account: http://127.0.0.1:8740/setup?t=…`.
    *If you don't:* see [F](#f-troubleshooting).
 
@@ -51,12 +51,12 @@ All your data lives in one folder (the *data folder*): `~/.wwyd` on your compute
 2. Run:
 
    ```sh
-   docker run -d --name wwyd -v wwyd-data:/data -p 127.0.0.1:8740:8740 ghcr.io/melnikaite/wwyd:0.1.0
+   docker run -d --name wwyd -v wwyd-data:/data -p 127.0.0.1:8740:8740 ghcr.io/melnikaite/wwyd:0.2.0
    ```
 
    Images are published for linux/amd64 and linux/arm64 with tags `X.Y.Z`, `X.Y` and
    `latest`. To build from source instead:
-   `docker build -t wwyd:local https://github.com/melnikaite/wwyd.git#v0.1.0` and use
+   `docker build -t wwyd:local https://github.com/melnikaite/wwyd.git#v0.2.0` and use
    `wwyd:local` as the image name.
 
 3. Run `docker logs wwyd`.

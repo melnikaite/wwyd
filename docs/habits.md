@@ -44,11 +44,16 @@ the same state as one full job (tested). An `interrupted` job ran no analyzers.
 is read in it. `weekday`, `hour`, `month` and the day come from the local start. Durations
 are computed on UTC instants, so a DST switch never adds or removes an hour (subtracting
 two aware datetimes with the same `ZoneInfo` would give wall-clock time instead).
+`latency_s` is `when` (or `when.start`) − `situation_at`, also on UTC instants; it is null
+when either is missing or the difference is negative. Analyzers (and the sandbox input)
+see `local_start`, `weekday`, `hour`, `month`, `duration_s`, `latency_s`, `labels`,
+`tags`, `category`, `audience`, `where` and the text fields.
 
 **Intervals.** An episode with `start` and `end` is an interval. Intervals of 0 minutes or
 longer than 8 hours (all-day blocks) are ignored by `time_duration` (lengths) and
-`time_gaps`. A *reply* episode (`said` + `situation`) with an interval `when` is read as
-"message received at start, reply sent at end" and feeds reply latency instead.
+`time_gaps`. Every interval counts, whatever the episode class: `when` is always when the
+owner acted (D23), so a call (`situation` + `said`) with a span is a span. Response
+latency comes only from `situation_at`.
 
 **Confidence** is `min(0.95, 0.35 + 0.6 × share × min(1, samples / 150))`.
 
@@ -111,27 +116,28 @@ local across 2026-10-25.
 
 ## time_duration
 
-**Scope** category. **State:** `length` = `<minutes>` (numeric), non-reply interval length
-rounded to 5 min, `180` = 180+; `latency` = `<audience_id>.<1|0>.<edge>` (vocab, numeric,
-numeric) for reply intervals, `1` when the message came in Mon–Fri 09:00–18:00, edges 0, 5,
-15, 60, 240, 1440 min (latencies over 14 days and replies without an audience are
+**Scope** category. **State:** `length` = `<minutes>` (numeric), interval length (any
+episode class) rounded to 5 min, `180` = 180+; `latency` = `<audience_id>.<1|0>.<edge>`
+(vocab, numeric, numeric) for every episode with `latency_s` (`when` − `situation_at`),
+`1` when the situation arrived Mon–Fri 09:00–18:00 local time (`situation_at`), edges 0,
+5, 15, 60, 240, 1440 min (latencies over 14 days and episodes without an audience are
 ignored); `days`.
 
 - Facet `length` (old `meeting_length`): the most common bucket holds ≥ 0.75 →
   *"work/meetings: typically 25 min (80% of 212)."*; else the top two together →
   *"work/meetings: typically 25 or 50 min (100% of 84)."*
 - Facet `latency:<audience_id>` (style, applies to that audience only; old
-  `reply_latency`): per side with ≥ 10 replies, the smallest edge with a cumulative share
-  ≥ 0.75: *"communication/style: replies within 5 min in work hours (100% of 30
-  replies)."*, *"… within 15 min in work hours, within 4 hours otherwise (…)"*, or one side.
+  `reply_latency`): per side with ≥ 10 responses, the smallest edge with a cumulative share
+  ≥ 0.75: *"communication/style: responds within 5 min in work hours (100% of 30
+  responses)."*, *"… within 15 min in work hours, within 4 hours otherwise (…)"*, or one side.
 
 **Test:** the 6-week synthetic calendar gives *"typically 25 or 50 min (100% of 84)"*;
-30 replies after 3 minutes give the latency text above with audience `work-chat`.
+30 replies with `situation_at` 3 minutes before `when` give the latency text above with audience `work-chat`.
 
 ## time_gaps
 
 **Scope** category. **State:** `gap` = `<edge>` (numeric, edges 0, 5, 10, 15, 30, 60 min);
-`days`. Per local day, non-reply intervals sorted by start; gap = start − latest end so far
+`days`. Per local day, intervals of any episode class sorted by start; gap = start − latest end so far
 (overlap = 0); gaps of 120 min or more are not "between" items. Gaps are computed within
 one job: two intervals of one day sent in different jobs add no gap.
 

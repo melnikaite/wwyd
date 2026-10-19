@@ -129,7 +129,7 @@ async def test_fallback_hint_names_default_only_for_owner(conn, user, pid, fake_
             "confidence": 0.9,
             "used_claims": [],
             "language": "en",
-            "absent_facts": [],
+            "a_depends_on": "",
             "escalate": "",
             "reason": "",
         },

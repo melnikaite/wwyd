@@ -72,6 +72,8 @@ class Thresholds:
 
     analyzer_min_episodes: int = 100
     split_threshold: int = 20
+    # How many times a correction episode counts in the evidence weight (SPEC §4.5, D23).
+    correction_weight: float = 3.0
 
 
 _thresholds = Thresholds()
@@ -108,14 +110,18 @@ class Config:
     # accept plain-http redirect URIs on non-loopback hosts (LAN deployments).
     allow_insecure_redirects: bool = True
     # Instance thresholds, not limits (SPEC §11): ``analyzer_min_episodes`` /
-    # ``WWYD_ANALYZER_MIN_EPISODES`` and ``split_threshold`` / ``WWYD_SPLIT_THRESHOLD``.
+    # ``WWYD_ANALYZER_MIN_EPISODES``, ``split_threshold`` / ``WWYD_SPLIT_THRESHOLD`` and
+    # ``correction_weight`` / ``WWYD_CORRECTION_WEIGHT`` (SPEC §4.5).
     analyzer_min_episodes: int = 100
     split_threshold: int = 20
+    correction_weight: float = 3.0
 
     def __post_init__(self) -> None:
         for name in ("analyzer_min_episodes", "split_threshold"):
             if getattr(self, name) < 1:
                 raise ConfigError(f"{name} must be at least 1")
+        if not math.isfinite(self.correction_weight) or self.correction_weight < 1:
+            raise ConfigError("correction_weight must be a finite number >= 1")
         if not isinstance(self.allow_insecure_redirects, bool):
             self.allow_insecure_redirects = _as_bool(
                 self.allow_insecure_redirects, "[auth] allow_insecure_redirects"
@@ -139,7 +145,7 @@ class Config:
 
     @property
     def thresholds(self) -> Thresholds:
-        return Thresholds(self.analyzer_min_episodes, self.split_threshold)
+        return Thresholds(self.analyzer_min_episodes, self.split_threshold, self.correction_weight)
 
     @property
     def public_host(self) -> str:
@@ -324,6 +330,11 @@ def load_config(**overrides: Any) -> Config:
             values[key] = int(values[key])
         except (TypeError, ValueError):
             raise ConfigError(f"{key} must be an integer") from None
+    if "correction_weight" in values:
+        try:
+            values["correction_weight"] = float(values["correction_weight"])
+        except (TypeError, ValueError):
+            raise ConfigError("correction_weight must be a number") from None
     values.setdefault("limits", load_limits(limits_table))
     values.setdefault("llm", load_llm(llm_table))
     return Config(**values)

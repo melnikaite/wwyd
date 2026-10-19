@@ -137,12 +137,38 @@ async def _judge(run: Run, pairs: list[Pair], rows: dict[str, sqlite3.Row]) -> d
     return verdicts
 
 
+def _add_forced(
+    run: Run, forced: Sequence[Pair], pairs: dict[Pair, float], rows: dict[str, sqlite3.Row]
+) -> set[Pair]:
+    """Add the forced pairs (SPEC §7.6: a correction's claim and a claim the corrected
+    prediction used) whose claims are both still live; they always go to the judge."""
+    ids = {i for pair in forced for i in pair}
+    live = {r["id"]: r for r in run.live_rows(claim_ids=list(ids))} if ids else {}
+    must: set[Pair] = set()
+    for a, b in forced:
+        if a == b or a not in live or b not in live:
+            continue
+        rows[a], rows[b] = live[a], live[b]
+        pair = (a, b) if a < b else (b, a)
+        pairs.setdefault(pair, 0.0)
+        must.add(pair)
+    return must
+
+
 async def run_pairs(
-    run: Run, *, claim_ids: Sequence[str] | None, dedupe: bool, contradictions: bool
+    run: Run,
+    *,
+    claim_ids: Sequence[str] | None,
+    dedupe: bool,
+    contradictions: bool,
+    forced: Sequence[Pair] = (),
 ) -> None:
     pairs, rows = _collect_pairs(run, claim_ids)
+    must = _add_forced(run, forced, pairs, rows)
 
     def sure(p: Pair) -> bool:
+        if p in must:
+            return False
         return pairs[p] >= DUPLICATE_JACCARD and not polarity_differs(
             rows[p[0]]["text"], rows[p[1]]["text"]
         )
@@ -158,10 +184,16 @@ async def run_pairs(
             run.skipped_pairs += len(borderline)
     for pair in sorted(verdicts, key=lambda p: -pairs[p]):
         a, b = rows[pair[0]], rows[pair[1]]
+        if verdicts[pair] == "same" and pair in must and not _same_scope(a, b):
+            continue  # a forced pair across kinds or categories: "different" (§7.6)
         if verdicts[pair] == "same" and dedupe:
             _same(run, a, b)
         elif verdicts[pair] == "contradicts" and contradictions:
             _contradicts(run, a, b)
+
+
+def _same_scope(a: sqlite3.Row, b: sqlite3.Row) -> bool:
+    return a["kind"] == b["kind"] and a["category_id"] == b["category_id"]
 
 
 def _same(run: Run, a: sqlite3.Row, b: sqlite3.Row) -> None:

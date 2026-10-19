@@ -21,10 +21,17 @@ async def compact(conn: sqlite3.Connection, persona_id: str, **kwargs: Any) -> d
 
 
 async def run_after_job(
-    conn: sqlite3.Connection, persona_id: str, claim_ids: Sequence[str], *, job_id: str
+    conn: sqlite3.Connection,
+    persona_id: str,
+    claim_ids: Sequence[str],
+    *,
+    job_id: str,
+    forced_pairs: Sequence[tuple[str, str]] = (),
 ) -> dict[str, Any]:
     """Dedupe and resolve contradictions for the claims an ingest job created or touched;
     every change carries ``job_id``. Returns counts by op plus ``skipped_pairs``.
+    ``forced_pairs`` (a correction's claims and the claims the corrected prediction used,
+    SPEC §7.6) go to the LLM judge whatever their similarity and category.
 
     With the persona setting ``llm_for_ingest`` off, the LLM judge is not called and
     borderline pairs are counted as skipped."""
@@ -41,6 +48,7 @@ async def run_after_job(
         claim_ids=list(claim_ids),
         job_id=job_id,
         use_llm=use_llm,
+        forced_pairs=forced_pairs,
     )
     counts: dict[str, Any] = dict(Counter(c["op"] for c in result["changes"]))
     if result["skipped_pairs"]:

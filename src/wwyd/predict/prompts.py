@@ -42,26 +42,16 @@ Situation: Привет! Поедешь с нами в Прагу на выхо�
 Answer: {"categories": ["travel", "money"]}
 """
 
-NEED_KINDS = ["calendar.free_busy", "contact.relationship", "other"]
+# The model fills "a_depends_on" before committing to "answer": some backends' JSON grammars
+# emit keys in alphabetical order, so the key must sort before "answer". Post-processing
+# maps it to the public ``depends_on`` (SPEC §6.5, D23).
+DEPENDS_KEY = "a_depends_on"
 
 ANSWER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "absent_facts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                # Keys in alphabetical order: some backends' grammars emit them that way.
-                "properties": {
-                    "kind": {"type": "string", "enum": NEED_KINDS},
-                    "what": {"type": "string"},
-                    "why": {"type": "string"},
-                },
-                "required": ["kind", "what", "why"],
-                "additionalProperties": False,
-            },
-        },
-        "type": {"type": "string", "enum": ["answer", "needs", "escalate"]},
+        DEPENDS_KEY: {"type": "string"},
+        "type": {"type": "string", "enum": ["answer", "escalate"]},
         "answer": {"type": "string"},
         "confidence": {"type": "number"},
         "used_claims": {"type": "array", "items": {"type": "string"}},
@@ -70,7 +60,7 @@ ANSWER_SCHEMA: dict[str, Any] = {
         "reason": {"type": "string"},
     },
     "required": [
-        "absent_facts",
+        DEPENDS_KEY,
         "type",
         "answer",
         "confidence",
@@ -83,44 +73,38 @@ ANSWER_SCHEMA: dict[str, Any] = {
 }
 
 # The system prompt is static and byte-identical across calls, and everything that varies
-# (owner, audience, claims, facts, situation) goes in the user message after it, so the
+# (owner, audience, claims, context, situation) goes in the user message after it, so the
 # backend's prompt prefix cache covers the long part. Claims are labelled c1, c2, ... in
 # the prompt (short labels cost far fewer output tokens than claim IDs); the examples use
 # other letters so an ID copied from an example never matches a real claim.
 ANSWER_SYSTEM = """You predict what a specific person (the owner) would do or reply in a
 situation. You only know the owner through the claims listed in the input; each claim has
 a label in square brackets. Act exactly as the owner would, following their style and
-boundaries. Do not invent facts about the owner, their schedule or their plans.
+boundaries. You know the owner well but cannot see their calendar, free time, location,
+the weather, prices or anything else outside the claims.
 
 Work in two steps.
 
-Step 1, "absent_facts" (always first). For every claim of kind decision_rule that applies
-to the situation, check whether each condition of the rule can be checked from the Facts
-block of the input. The situation text only says what the other person wants; it is never
-evidence of the owner's calendar, free time, prices or plans. A rule about meetings, calls,
-slots, buffers or availability can only be checked from facts such as the owner's free
-slots or other calls. A fact in the Facts block counts as given in any wording: if it
-answers the rule's condition (for example free slots that cover the requested time), the
-condition is checked. When the Facts block is not "none", the caller has already looked
-facts up for this situation: use them, and list only facts that are still missing. List
-every fact the rule needs that the Facts block does not
-contain, with "kind", "what" (the fact to look up, specific to the situation's date and
-time) and "why" ("decision_rule" and the claim label). "kind" is "calendar.free_busy" for
-the owner's free or busy time, slots and other calls; "contact.relationship" for who the
-other person is to the owner (colleague, client, friend, family); "other" for anything
-else. A fact given as "not available" cannot be looked up: never list it again; decide
-without it, and if the rule cannot be applied without it, give type "answer" with
-confidence 0.3 or less. If no decision rule applies, or all its facts are given, use [].
+Step 1, "a_depends_on" (always first). Decide whether the owner's real answer depends on
+things you cannot know, for example a decision rule about time, slots or buffers. If it
+does, write in one or two plain sentences, from the owner's applicable claims, what it
+depends on, applied to this situation ("agrees if 14:55-15:25 is free; otherwise offers
+the nearest slot with the same margin"). Write it in the language of the answer. Use ""
+when nothing outside the claims matters. The Context block is what the caller already
+found out for this situation: when it settles the question, use it in the answer and
+leave "a_depends_on" empty or say what still matters.
 
 Step 2, "type":
-- If "absent_facts" is not empty, the type is "needs". Do not answer, do not ask the other
-  person for details, do not escalate: the caller will look up the facts and ask again.
-- "answer": you can predict the reply or decision. Write it in "answer" as the owner would
-  write it (their language, tone and length; for kind "reply" the actual message text, for
-  kind "decision" a short statement of what the owner decides). Put the labels of the
-  claims you relied on in "used_claims", your confidence (0 to 1) that this is what the
-  owner would really do in "confidence", and the ISO 639-1 code of the answer's language
-  in "language". Reply in the language of the situation unless a claim says otherwise.
+- "answer": write in "answer" what the owner would send, ready to send as is (their
+  language, tone and length; for kind "reply" the actual message text, for kind
+  "decision" a short statement of what the owner decides). Never assert what you cannot
+  know: when the answer depends on such things and the Context block does not settle
+  them, stay non-committal in the owner's voice ("let me check and get back to you",
+  "evening works for me?"). Put the labels of the claims you relied on in "used_claims",
+  your confidence (0 to 1) that this is what the owner would really do in "confidence",
+  and the ISO 639-1 code of the answer's language in "language". Reply in the language of
+  the situation unless a claim says otherwise. A non-empty "a_depends_on" is no reason to
+  escalate.
 - "escalate": set "escalate" to "boundary" only when a claim of kind boundary says the
   owner would not handle this automatically, or "out_of_persona" when no claim is about
   the topic of the situation. Style claims only say how the owner writes, not what they
@@ -130,98 +114,67 @@ Fill fields that do not apply to the chosen type with "" , 0 or [].
 
 Example 1
 Claims:
-[a1] (style, communication/style) Short, no greeting, answers within minutes.
-[a2] (decision_rule, work/meetings) Accepts a meeting only with a free slot of at least
-20 minutes and 10 minutes of buffer around it.
-Facts: none
+[d1] (style, communication/style) Пишет коротко и дружелюбно, без приветствий.
+[d2] (decision_rule, work/meetings) Соглашается на созвон, только если до и после него
+есть хотя бы 5 свободных минут.
+Context: none
 Kind: reply
-Situation: Can we sync for 30 min on Tuesday afternoon?
-Output: {"absent_facts": [{"kind": "calendar.free_busy", "what": "owner's free slots on
-Tuesday afternoon of at least 30 minutes with 10 minute buffers", "why": "decision_rule
-a2"}], "type": "needs", "answer": "", "confidence": 0, "used_claims": ["a2"],
-"language": "en", "escalate": "", "reason": ""}
+Situation: созвонимся завтра в 15:00?
+Output: {"a_depends_on": "Согласится, если завтра свободно с 14:55 до 15:25; иначе
+предложит ближайшее время с тем же запасом.", "type": "answer", "answer": "гляну
+календарь и отпишусь", "confidence": 0.8, "used_claims": ["d1", "d2"], "language": "ru",
+"escalate": "", "reason": ""}
 
 Example 2
 Claims:
 [a1] (style, communication/style) Short, no greeting, answers within minutes.
 [a2] (decision_rule, work/meetings) Accepts a meeting only with a free slot of at least
 20 minutes and 10 minutes of buffer around it.
-Facts:
-- free slots on Tuesday afternoon: 14:00-15:30
+Context: free on Tuesday from 14:00 to 15:30
 Kind: reply
 Situation: Can we sync for 30 min on Tuesday afternoon?
-Output: {"absent_facts": [], "type": "answer", "answer": "Tue 14:10 works.",
+Output: {"a_depends_on": "", "type": "answer", "answer": "Tue 14:10 works.",
 "confidence": 0.8, "used_claims": ["a1", "a2"], "language": "en", "escalate": "",
 "reason": ""}
 
 Example 3
 Claims:
-[d1] (style, communication/style) Пишет коротко и дружелюбно, без приветствий.
-[d2] (decision_rule, work/meetings) Соглашается на созвон, только если в календаре есть
-свободное окно от 20 минут и 10 минут запаса до и после других звонков.
-Facts: none
-Kind: reply
-Situation: Созвонимся в среду в 11:00? Нужно обсудить договор.
-Output: {"absent_facts": [{"kind": "calendar.free_busy", "what": "свободные окна владельца
-в среду около 11:00 и звонки до и после", "why": "decision_rule d2"}], "type": "needs",
-"answer": "", "confidence": 0, "used_claims": ["d2"], "language": "ru", "escalate": "",
-"reason": ""}
-
-Example 4
-Claims:
 [b1] (style, communication/style) Пишет неформально, на «ты», коротко, часто без
 заглавных букв.
 [b2] (preference, travel) Любит короткие поездки на выходные, если дорога меньше 4 часов.
-Facts: none
+Context: none
 Kind: reply
 Situation: Привет! Поедешь с нами в Прагу на выходные? На поезде 3,5 часа.
-Output: {"absent_facts": [], "type": "answer", "answer": "о, давай! во сколько
+Output: {"a_depends_on": "", "type": "answer", "answer": "о, давай! во сколько
 выезжаем?", "confidence": 0.75, "used_claims": ["b1", "b2"], "language": "ru",
 "escalate": "", "reason": ""}
 
-Example 5
+Example 4
 Claims:
 [s1] (boundary, communication/boundaries) Never discusses salary in writing.
-Facts: none
+Context: none
 Kind: reply
 Situation: Hey, what's your salary at the new job?
-Output: {"absent_facts": [], "type": "escalate", "answer": "", "confidence": 0,
+Output: {"a_depends_on": "", "type": "escalate", "answer": "", "confidence": 0,
 "used_claims": ["s1"], "language": "en", "escalate": "boundary", "reason": "salary is
 never discussed in writing"}
 
-Example 6
+Example 5
 Claims:
 [a1] (style, communication/style) Short, no greeting, answers within minutes.
 [a2] (decision_rule, work/meetings) Accepts a meeting only with a free slot of at least
 20 minutes and 10 minutes of buffer around it.
-Facts: none
+Context: none
 Kind: reply
 Situation: Which laptop should I buy for my son?
-Output: {"absent_facts": [], "type": "escalate", "answer": "", "confidence": 0,
+Output: {"a_depends_on": "", "type": "escalate", "answer": "", "confidence": 0,
 "used_claims": [], "language": "en", "escalate": "out_of_persona", "reason": "no claim
 covers buying advice"}
-
-Example 7
-Claims:
-[a1] (style, communication/style) Short, no greeting, answers within minutes.
-[a2] (decision_rule, work/meetings) Accepts a meeting only with a free slot of at least
-20 minutes and 10 minutes of buffer around it.
-Facts:
-- owner's free slots on Tuesday afternoon: not available
-Kind: decision
-Situation: Can we sync for 30 min on Tuesday afternoon?
-Output: {"absent_facts": [], "type": "answer", "answer": "Would check the calendar before
-agreeing to Tuesday afternoon.", "confidence": 0.2, "used_claims": ["a2"], "language":
-"en", "escalate": "", "reason": ""}
 """
 
 
 def claim_line(label: str, claim: Any) -> str:
     return f"[{label}] ({claim.kind}, {claim.category}) {claim.text}"
-
-
-def _value(value: str | None) -> str:
-    return "not available" if value is None else value
 
 
 def route_user(categories: list[tuple[str, str]], situation: str) -> str:
@@ -235,22 +188,18 @@ def answer_user(
     audience: str,
     audience_description: str,
     claims: list[str],
-    facts: list[dict[str, str | None]],
+    context: str | None,
     kind: str,
     situation: str,
     style: str | None = None,
 ) -> str:
     claim_block = "\n".join(claims) if claims else "(none)"
-    fact_block = (
-        "\n" + "\n".join(f"- {f['what']}: {_value(f.get('value'))}" for f in facts)
-        if facts
-        else " none"
-    )
+    context_text = (context or "").strip() or "none"
     audience_line = f"{audience} ({audience_description})" if audience_description else audience
     return (
         f"Owner: {owner}\n"
         f"Talking to: {audience_line}\n"
         f"Claims:\n{claim_block}\n"
-        f"Facts:{fact_block}\n"
+        f"Context: {context_text}\n"
         f"Kind: {kind}\n" + (f"{style}\n" if style else "") + f"Situation: {situation}"
     )

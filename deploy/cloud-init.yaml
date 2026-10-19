@@ -15,9 +15,9 @@ write_files:
       # ---- change these ----
       WWYD_DOMAIN=wwyd.example.com
       # Image to run (pin a version; see https://github.com/melnikaite/wwyd/releases).
-      WWYD_IMAGE=ghcr.io/melnikaite/wwyd:0.1.0
+      WWYD_IMAGE=ghcr.io/melnikaite/wwyd:0.2.0
       # Build from source instead: set WWYD_IMAGE=wwyd:local; WWYD_SOURCE is then built on the VM.
-      WWYD_SOURCE=https://github.com/melnikaite/wwyd.git#v0.1.0
+      WWYD_SOURCE=https://github.com/melnikaite/wwyd.git#v0.2.0
   - path: /opt/wwyd/docker-compose.yml
     content: |
       # wwyd + Caddy (automatic HTTPS). Usage:
@@ -29,7 +29,7 @@ write_files:
       
       services:
         wwyd:
-          image: ${WWYD_IMAGE:-ghcr.io/melnikaite/wwyd:0.1.0}
+          image: ${WWYD_IMAGE:-ghcr.io/melnikaite/wwyd:0.2.0}
           restart: unless-stopped
           environment:
             WWYD_PUBLIC_URL: https://${WWYD_DOMAIN:?set WWYD_DOMAIN to your domain}

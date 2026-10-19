@@ -90,7 +90,8 @@ AUTHOR_SCHEMA: dict[str, Any] = {
 
 HELPER_API = """Input: stdin holds JSON {"episodes": [...]}; each episode has
 local_start (ISO datetime or null), weekday (0 = Monday), hour, month ("YYYY-MM" or null),
-duration_s (or null), labels ({"decision": "accepted|declined|other", "situation": ...}),
+duration_s (or null; the span of when), latency_s (or null; when minus situation_at),
+labels ({"decision": "accepted|declined|other", "situation": ...}),
 tags (list), category, audience, where, situation, decision, said (strings or null).
 Output: print ONE JSON object {"n": {month: {"_": count}}, "hits": {month: {"_": count}}}
 and optionally "base_n" / "base_hits" (the base rate to beat). n = episodes the hypothesis
@@ -282,6 +283,7 @@ def samples(items: Sequence[Item]) -> list[dict[str, Any]]:
         row: dict[str, Any] = {
             "local_start": it.local_start.isoformat() if it.local_start else None,
             "duration_s": it.duration_s,
+            "latency_s": it.latency_s,
             "category": ep.category,
             "audience": ep.audience,
             "labels": dict(ep.labels),

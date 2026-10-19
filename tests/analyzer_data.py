@@ -67,17 +67,18 @@ def meetings(
 def replies(
     category_id: str, days: list[date], audience: str, *, latency_min=3, hour=10, tz=BERLIN
 ) -> list[Episode]:
+    """Replies sent ``latency_min`` after the message arrived (``situation_at``, D23)."""
     eps = []
     for i, d in enumerate(days):
-        start = datetime(d.year, d.month, d.day, hour, 0, tzinfo=tz)
+        arrived = datetime(d.year, d.month, d.day, hour, 0, tzinfo=tz)
         eps.append(
             Episode(
                 index=1000 + i,
                 category_id=category_id,
                 category="communication/style",
                 audience=audience,
-                start=start,
-                end=start + timedelta(minutes=latency_min),
+                start=arrived + timedelta(minutes=latency_min),
+                situation_at=arrived,
                 situation="asked something",
                 said="sure, will do",
             )

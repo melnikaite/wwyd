@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import json
-import math
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -14,6 +12,7 @@ from typing import Any
 from wwyd.db import transaction
 from wwyd.errors import Conflict
 from wwyd.store import changes
+from wwyd.store.evidence import evidence_weight as weight_of
 
 STEPS = (
     "dedupe",
@@ -27,9 +26,8 @@ STEPS = (
 
 
 def evidence_weight(row: sqlite3.Row) -> float:
-    """``confidence × log(1 + Σ sources)`` (SPEC §10.2)."""
-    sources = json.loads(row["evidence"] or "{}").get("sources", {})
-    return row["confidence"] * math.log1p(sum(sources.values()))
+    """``confidence × log(1 + Σ weighted sources)`` (SPEC §4.5, §10.2)."""
+    return weight_of(row["confidence"], row["evidence"])
 
 
 def _archived_by(plan: dict[str, Any]) -> list[str]:
@@ -135,6 +133,7 @@ async def compact(
     claim_ids: Sequence[str] | None = None,
     job_id: str | None = None,
     use_llm: bool = True,
+    forced_pairs: Sequence[tuple[str, str]] = (),
 ) -> dict[str, Any]:
     """Run the requested steps. With ``apply=False`` nothing is written and the LLM judge
     is not called (it would record usage); borderline pairs are counted in ``judge_pending``
@@ -149,6 +148,7 @@ async def compact(
             claim_ids=claim_ids,
             dedupe="dedupe" in wanted,
             contradictions="contradictions" in wanted,
+            forced=forced_pairs,
         )
     maintenance.run_steps(run, wanted)
     await categories.run_steps(run, wanted)

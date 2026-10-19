@@ -72,7 +72,7 @@ def test_ground_truth_meetings_and_replies(conn, pid):
             "communication/style: none on weekends (0 of 30 episodes)."
         ),
         f"builtin:time_duration:{style}:latency:{aud}": (
-            "communication/style: replies within 5 min in work hours (100% of 30 replies)."
+            "communication/style: responds within 5 min in work hours (100% of 30 responses)."
         ),
     }
     assert all(r["status"] == "pending" for r in claims.values())

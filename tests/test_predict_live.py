@@ -16,14 +16,14 @@ async def test_live_predict_localai(conn, user, pid):
     out = await predict(
         conn, owner(user), situation="Can we do a 30 minute call on Tuesday?", audience="everyone"
     )
-    assert out["type"] in ("answer", "needs", "escalate")
+    assert out["type"] in ("answer", "escalate")
     if out["type"] == "escalate":
         assert out["escalate"] != "llm_unavailable", out
     if out["type"] == "answer":
         assert out["disclosure"]
 
 
-async def test_live_needs_round_trip(conn, user, pid):
+async def test_live_depends_on_and_context(conn, user, pid):
     seed(
         conn,
         pid,
@@ -38,11 +38,10 @@ async def test_live_needs_round_trip(conn, user, pid):
     )
     situation = "Can you join a call tomorrow at 3pm?"
     first = await predict(conn, owner(user), situation=situation, audience="everyone")
-    assert first["type"] == "needs", first
-    assert first["needs"] and all(n["what"] for n in first["needs"])
-    facts = [
-        {"what": "free slots tomorrow", "value": "14:00-16:00"},
-        {"what": "other calls tomorrow", "value": "none between 13:00 and 17:00"},
-    ]
-    second = await predict(conn, owner(user), situation=situation, audience="everyone", facts=facts)
+    assert first["type"] == "answer", first
+    assert first["depends_on"], first
+    context = "free tomorrow from 14:00 to 16:00, no other calls between 13:00 and 17:00"
+    second = await predict(
+        conn, owner(user), situation=situation, audience="everyone", context=context
+    )
     assert second["type"] == "answer", second

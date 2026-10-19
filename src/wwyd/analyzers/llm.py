@@ -68,6 +68,7 @@ def episode_json(item: Item, path: str) -> dict[str, Any]:
         "hour": item.hour,
         "month": item.month,
         "duration_s": item.duration_s,
+        "latency_s": item.latency_s,
         "labels": dict(ep.labels),
         "tags": list(ep.tags),
         "category": path,

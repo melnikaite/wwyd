@@ -42,6 +42,7 @@ OUTPUT_TOKENS = {
     "annotate": 1200,
     "author_analyzers": 4000,
     "word_usage": 300,
+    "place": 1500,
 }
 MAX_CLAIMS_PER_CALL = 8
 MAX_DESCRIPTION_CHARS = 200
@@ -210,6 +211,13 @@ ALLOWED_KINDS = {
 # (timestamp, prompt segment, class, batch index, episode category)
 Item = tuple[datetime | None, str, str, int, str]
 
+# The marker line of a correction's own call (SPEC §7.6, D23): in the user message, so the
+# system prompts stay static.
+CORRECTION_MARKER = (
+    "CORRECTION: the owner corrected a prediction about them. The episode below is what "
+    "the owner actually says or does in this situation; weigh it as the owner's own word.\n"
+)
+
 
 @dataclass
 class Candidate:
@@ -221,6 +229,9 @@ class Candidate:
     sources: dict[str, int]
     period: str | None
     proposed_category: str | None = None
+    # Claim IDs a corrected prediction used: each is judged against this candidate once it
+    # is stored (SPEC §7.6, D23). In memory only.
+    judge_with: tuple[str, ...] = ()
 
     def as_item(self) -> dict[str, Any]:
         evidence: dict[str, Any] = {"sources": dict(self.sources)}
@@ -255,8 +266,11 @@ class Call:
     allowed: frozenset[str] = frozenset()
     # describe_categories: path -> category ID of the categories to describe.
     targets: dict[str, str] = field(default_factory=dict)
-    # annotate: what the call labels (an ``annotate.Annotation``; in memory only).
+    # annotate: what the call labels (an ``annotate.Annotation``); place: the episodes it
+    # places (in memory only).
     meta: Any = None
+    # A correction's own call: the claim IDs the corrected prediction used (D23).
+    corrected_claims: tuple[str, ...] | None = None
 
     @property
     def estimated_tokens(self) -> int:
@@ -297,7 +311,7 @@ def subtree(categories: dict[str, str], roots: Iterable[str]) -> frozenset[str]:
     )
 
 
-def _category_list(categories: dict[str, str], allowed: Iterable[str]) -> str:
+def category_list(categories: dict[str, str], allowed: Iterable[str]) -> str:
     return "\n".join(
         f"- {path}: {categories[path]}" if categories.get(path) else f"- {path}"
         for path in sorted(allowed)
@@ -332,8 +346,12 @@ def build_calls(
     """All pass calls for a batch, in order: statements, replies per audience, decisions.
 
     Decisions only for categories with fewer than ``decision_min_episodes`` episodes in the
-    batch; larger ones are left to annotation and analyzers (SPEC §7.6)."""
+    batch; larger ones are left to annotation and analyzers (SPEC §7.6). A correction (D23)
+    goes to the pass of its shape alone in its own call, marked in the prompt, whatever its
+    category's size; its candidates count under ``correction``. Every episode must have a
+    category (placement runs first)."""
     calls: list[Call] = []
+    own: dict[str, list[tuple[Item, str, Any]]] = defaultdict(list)
 
     def emit(
         purpose: str,
@@ -344,6 +362,7 @@ def build_calls(
         audiences: str | list[str],
         *,
         numbered: bool = False,
+        correction: tuple[str, ...] | None = None,
     ) -> None:
         for chunk in _chunked_items(items):
             cats = Counter(it[4] for it in chunk)
@@ -354,15 +373,22 @@ def build_calls(
             calls.append(
                 Call(
                     purpose,
-                    system.replace("{categories}", _category_list(categories, allowed)),
-                    header + "\n".join(segs),
+                    system.replace("{categories}", category_list(categories, allowed)),
+                    (CORRECTION_MARKER if correction is not None else "")
+                    + header
+                    + "\n".join(segs),
                     schema,
                     audiences,
-                    {purpose_class[purpose]: len(chunk)},
+                    {
+                        ("correction" if correction is not None else purpose_class[purpose]): len(
+                            chunk
+                        )
+                    },
                     _month_period(it[0] for it in chunk),
                     frozenset(it[3] for it in chunk),
                     default_category=cats.most_common(1)[0][0],
                     allowed=allowed,
+                    corrected_claims=correction,
                 )
             )
 
@@ -373,6 +399,7 @@ def build_calls(
     for ep in batch.episodes:
         if ep.is_statement:
             seg = f"NOTE: {_one_line(ep.said or '')}{_label_note(ep)}"
+            # A correction always has a situation (SPEC §6.1): never a statement.
             groups[(ep.audience or "", ep.category)].append(
                 (ep.start, seg, "statement", ep.index, ep.category)
             )
@@ -392,9 +419,11 @@ def build_calls(
         if ep.is_reply:
             context = _one_line(ep.situation or "")[:CONTEXT_CHARS]
             seg = f"OTHER: {context}\nOWNER: {_one_line(ep.said or '')}{_label_note(ep)}"
-            replies[ep.audience or default_audience].append(
-                (ep.start, seg, "reply", ep.index, ep.category)
-            )
+            item = (ep.start, seg, "reply", ep.index, ep.category)
+            if ep.is_correction:
+                own["replies"].append((item, ep.audience or default_audience, ep))
+            else:
+                replies[ep.audience or default_audience].append(item)
     for audience in sorted(replies):
         emit(
             "replies",
@@ -404,19 +433,33 @@ def build_calls(
             f"Audience: {audience}\n",
             [audience],
         )
+    for item, audience, ep in own["replies"]:
+        emit(
+            "replies",
+            REPLIES_SYSTEM,
+            REPLIES_SCHEMA,
+            [item],
+            f"Audience: {audience}\n",
+            [audience],
+            correction=tuple(ep.corrected_claims),
+        )
 
     # (c) Decisions, per audience and category, only for small categories.
     per_category = Counter(ep.category for ep in batch.episodes)
     decisions: dict[tuple[str, str], list[Item]] = defaultdict(list)
     for ep in batch.episodes:
-        if ep.decision is None or per_category[ep.category] >= decision_min_episodes:
+        if ep.decision is None:
+            continue
+        if not ep.is_correction and per_category[ep.category] >= decision_min_episodes:
             continue
         where = f" ({_one_line(ep.where)})" if ep.where else ""
         situation = f"SITUATION{where}: {_one_line(ep.situation)} " if ep.situation else ""
         seg = f"{situation}CHOICE: {_one_line(ep.decision)}{_label_note(ep)}"
-        decisions[(ep.audience or "", ep.category)].append(
-            (ep.start, seg, "decision", ep.index, ep.category)
-        )
+        item = (ep.start, seg, "decision", ep.index, ep.category)
+        if ep.is_correction:
+            own["decisions"].append((item, ep.audience or "", ep))
+        else:
+            decisions[(ep.audience or "", ep.category)].append(item)
     for (audience, category), items in sorted(decisions.items()):
         emit(
             "decisions",
@@ -426,6 +469,17 @@ def build_calls(
             (f"Audience: {audience}\n" if audience else "") + f"Category: {category}\n",
             [audience] if audience else "all",
             numbered=True,
+        )
+    for item, audience, ep in own["decisions"]:
+        emit(
+            "decisions",
+            DECISIONS_SYSTEM,
+            DECISIONS_SCHEMA,
+            [item],
+            (f"Audience: {audience}\n" if audience else "") + f"Category: {item[4]}\n",
+            [audience] if audience else "all",
+            numbered=True,
+            correction=tuple(ep.corrected_claims),
         )
     return calls
 
@@ -540,6 +594,7 @@ def to_candidates(
                 sources=dict(call.sources),
                 period=call.period,
                 proposed_category=proposed,
+                judge_with=call.corrected_claims or (),
             )
         )
     return out
@@ -606,6 +661,7 @@ def dedupe(candidates: list[Candidate], counts: DeriveCounts) -> list[Candidate]
                 other.period = _widen(other.period, cand.period)
                 other.confidence = max(other.confidence, cand.confidence)
                 other.proposed_category = other.proposed_category or cand.proposed_category
+                other.judge_with = tuple(dict.fromkeys(other.judge_with + cand.judge_with))
                 counts.deduplicated += 1
                 break
         else:

@@ -45,6 +45,10 @@ class Item:
     day: str | None  # DD
     duration_s: float | None  # wall time on UTC instants: correct across DST
     audience_id: str  # audience ID, or "_" when the episode named none
+    # ``when`` (or ``when.start``) minus ``situation_at`` on UTC instants (D23); None when
+    # either is missing or it is negative.
+    latency_s: float | None = None
+    local_situation_at: datetime | None = None  # ``situation_at`` in the persona timezone
 
 
 def _local(dt: datetime, tz: tzinfo) -> datetime:
@@ -55,6 +59,7 @@ def host_fields(ep: Episode, tz: tzinfo, audience_ids: Mapping[str, str]) -> Ite
     aud = audience_ids.get(ep.audience, NO_AUDIENCE) if ep.audience else NO_AUDIENCE
     if ep.start is None:
         return Item(ep, None, None, None, None, None, None, aud)
+    arrived = _local(ep.situation_at, tz) if ep.situation_at is not None else None
     start = _local(ep.start, tz)
     duration = None
     if ep.end is not None:
@@ -69,6 +74,8 @@ def host_fields(ep: Episode, tz: tzinfo, audience_ids: Mapping[str, str]) -> Ite
         f"{start.day:02d}",
         duration,
         aud,
+        ep.latency_s,
+        arrived,
     )
 
 

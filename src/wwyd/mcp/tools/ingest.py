@@ -32,19 +32,22 @@ def register(server: WwydServer) -> None:
                 max_length=MAX_EPISODES,
                 description=(
                     "1-1000 episodes, <= 2 MB serialized. Each episode is {when?: datetime | "
-                    "{start, end?}, where? (coarse context such as home, online, work Slack; "
-                    "<= 100, never an address), audience? (audience name or default), "
-                    "category (required; a path such as hobbies/films, created if unknown), "
-                    "situation? (what happened or was said to the owner, <= 8000), decision? "
-                    "(what the owner did, described by you, <= 4000), said? (the owner's "
-                    "verbatim words, <= 20000)}, with decision or said. Shapes: statement "
-                    "about self = said only; chat reply = situation + said; choice = "
-                    "situation + decision; call = situation (others) + said (owner). An "
-                    "interval when is the span (meeting length, or incoming message -> "
-                    "reply); never mix both meanings in one category. No other fields are "
-                    "accepted: never put names, emails, phones or addresses in any field or "
-                    "category path. Datetimes are ISO 8601; without an offset they are read "
-                    "in the persona's timezone."
+                    "{start, end?} (when the owner acted: a moment such as a reply sent, or a "
+                    "span such as a meeting attended), situation_at? (datetime the situation "
+                    "reached the owner, e.g. message received; needs situation), where? "
+                    "(coarse context such as home, online, work Slack; <= 100, never an "
+                    "address), audience? (audience name or default), category? (a path such "
+                    "as hobbies/films, created if unknown; omit it and the server places the "
+                    "episode), situation? (what happened or was said to the owner, <= 8000), "
+                    "decision? (what the owner did, described by you, <= 4000), said? (the "
+                    "owner's verbatim words, <= 20000), corrects? (a prediction_id from "
+                    "predict: this episode is what the owner actually says or does instead; "
+                    "needs situation)}, with decision or said. Shapes: statement about self "
+                    "= said only; chat reply = situation + said; choice = situation + "
+                    "decision; call = situation (others) + said (owner). Response latency is "
+                    "when minus situation_at. No other fields are accepted: never put names, "
+                    "emails, phones or addresses in any field or category path. Datetimes "
+                    "are ISO 8601; without an offset they are read in the persona's timezone."
                 ),
             ),
         ],
@@ -73,6 +76,9 @@ def register(server: WwydServer) -> None:
         out ends partial with remaining_records to resend. Unknown category paths are
         created (limits: max_categories, new_categories_per_job; beyond them an episode
         goes to the closest existing ancestor or other, counted in unmapped_categories).
+        Episodes without a category are placed by the server's LLM (to other without an
+        LLM step; counted in unplaced_episodes when not placed). A corrects ID that is
+        unknown or older than 90 days is ignored (unknown_predictions).
         Raw episodes are never stored. Derived claims land as pending for review_claims;
         analyzers update their keyed claims instead of duplicating them.
         """
@@ -91,7 +97,8 @@ def register(server: WwydServer) -> None:
         """Status of an ingest job: queued | running | done | partial | failed | interrupted,
         progress 0..1, counts (episodes by class: total, statement, reply, decision;
         claims_created, claims_updated, absorbed, dropped_by_guard, unknown_audiences,
-        categories_created, unmapped_categories, skipped_seen, skipped_saturated,
+        categories_created, unmapped_categories, unplaced_episodes, corrections,
+        unknown_predictions, skipped_seen, skipped_saturated,
         saturated_audiences, llm_calls, analyzer counters, ...) and error_code when it did
         not finish.
         partial: stopped by the daily token limit (rate_limited), the spend cap (spend_cap)

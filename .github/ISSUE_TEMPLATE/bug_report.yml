@@ -30,7 +30,7 @@ body:
     id: version
     attributes:
       label: wwyd version or commit
-      placeholder: 0.1.0 / abc1234
+      placeholder: 0.2.0 / abc1234
     validations:
       required: true
   - type: input

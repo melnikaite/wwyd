@@ -30,6 +30,7 @@ Purpose = Literal[
     "word_usage",
     "category_merge",
     "category_split",
+    "place",
 ]
 
 

@@ -3,14 +3,16 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from wwyd.db import transaction
 from wwyd.errors import Invalid
 from wwyd.ids import format_ts, new_id, now_iso, parse_ts
-from wwyd.store.common import check_limit, decode_cursor, encode_cursor
+from wwyd.store.common import check_limit, decode_cursor, dumps, encode_cursor
 
 RETENTION_DAYS = 90
 OUTCOMES = (
@@ -37,9 +39,12 @@ def record(
     audience_id: str | None = None,
     audience_fallback: bool = False,
     confidence: float | None = None,
+    used_claims: Sequence[str] = (),
     llm_tokens: int = 0,
     latency_ms: int = 0,
 ) -> str:
+    """Write one audit row and return its ID (the caller's ``prediction_id``, D23).
+    ``used_claims`` holds claim IDs only, never text."""
     if outcome not in OUTCOMES:
         raise ValueError(f"unknown audit outcome {outcome!r}")
     grant_id = subject_id if subject_id and subject_id.startswith("grt_") else None
@@ -48,8 +53,8 @@ def record(
     with transaction(conn):
         conn.execute(
             "INSERT INTO audit(id, persona_id, ts, client_name, grant_id, api_key_id, scope,"
-            " audience_id, audience_fallback, outcome, confidence, llm_tokens, latency_ms)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " audience_id, audience_fallback, outcome, confidence, used_claims, llm_tokens,"
+            " latency_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 audit_id,
                 persona_id,
@@ -62,11 +67,37 @@ def record(
                 int(audience_fallback),
                 outcome,
                 None if confidence is None else round(float(confidence), 3),
+                dumps([c for c in dict.fromkeys(used_claims) if c.startswith("clm_")]),
                 max(0, int(llm_tokens)),
                 max(0, int(latency_ms)),
             ),
         )
     return audit_id
+
+
+def lookup_prediction(
+    conn: sqlite3.Connection,
+    persona_id: str,
+    prediction_id: str,
+    *,
+    days: int = RETENTION_DAYS,
+    now: datetime | None = None,
+) -> list[str] | None:
+    """The claim IDs a prediction used, or None when ``prediction_id`` is not an audit row
+    of this persona within the retention window (a correction then counts as an ordinary
+    episode, SPEC §6.1)."""
+    cutoff = format_ts((now or datetime.now(UTC)) - timedelta(days=days))
+    row = conn.execute(
+        "SELECT used_claims FROM audit WHERE id = ? AND persona_id = ? AND ts >= ?",
+        (prediction_id, persona_id, cutoff),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        ids = json.loads(row["used_claims"] or "[]")
+    except ValueError:
+        return []
+    return [c for c in ids if isinstance(c, str)]
 
 
 def list_audit(
@@ -128,6 +159,7 @@ def list_audit(
                 "audience_fallback": bool(r["audience_fallback"]),
                 "outcome": r["outcome"],
                 "confidence": r["confidence"],
+                "used_claims": json.loads(r["used_claims"] or "[]"),
                 "llm_tokens": r["llm_tokens"],
                 "latency_ms": r["latency_ms"],
             }
