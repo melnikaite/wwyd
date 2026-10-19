@@ -7,12 +7,14 @@ name: wwyd
 
 services:
   wwyd:
-    image: ${WWYD_IMAGE:-ghcr.io/melnikaite/wwyd:latest}
+    image: ${WWYD_IMAGE:-ghcr.io/melnikaite/wwyd:0.1.0}
     restart: unless-stopped
     environment:
       WWYD_PUBLIC_URL: https://${WWYD_DOMAIN:?set WWYD_DOMAIN to your domain}
       # Trust X-Forwarded-For only from the proxy network below (Caddy).
       WWYD_TRUSTED_PROXIES: 172.30.87.0/24
+      # Multi-user instance: only allow public LLM base URLs for personas (SSRF guard).
+      # WWYD_LLM_ALLOW_PRIVATE_BASE_URLS: "false"
     volumes:
       - wwyd-data:/data
     networks: [proxy]

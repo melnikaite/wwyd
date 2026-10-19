@@ -56,11 +56,10 @@ Requires [uv](https://docs.astral.sh/uv/). Step-by-step instructions for every s
 ### HTTP server
 
 ```sh
-git clone https://github.com/melnikaite/wwyd.git
-cd wwyd
-uv sync
-uv run wwyd            # http://127.0.0.1:8740, MCP endpoint /mcp
+uvx wwyd               # http://127.0.0.1:8740, MCP endpoint /mcp
 ```
+
+From source: `git clone https://github.com/melnikaite/wwyd.git && cd wwyd && uv sync && uv run wwyd`.
 
 On first start wwyd prints a one-time link (`/setup?t=...`) to create the admin account.
 `wwyd invite` prints an invite link for another user, `wwyd reset-password <login>` a
@@ -78,13 +77,13 @@ and OAuth grants can be revoked there; revocation is effective on the next reque
 ### stdio
 
 ```sh
-uv run wwyd stdio --user you@example.com
+uvx wwyd stdio --user you@example.com
 ```
 
 Serves one user's persona with owner scope, no OAuth. Usually the MCP client starts it:
 
 ```sh
-claude mcp add wwyd -- uv run --project /path/to/wwyd wwyd stdio --user you@example.com
+claude mcp add wwyd -- uvx wwyd stdio --user you@example.com
 ```
 
 or, in Claude Desktop's `claude_desktop_config.json`:
@@ -93,8 +92,8 @@ or, in Claude Desktop's `claude_desktop_config.json`:
 {
   "mcpServers": {
     "wwyd": {
-      "command": "uv",
-      "args": ["run", "--project", "/path/to/wwyd", "wwyd", "stdio", "--user", "you@example.com"]
+      "command": "uvx",
+      "args": ["wwyd", "stdio", "--user", "you@example.com"]
     }
   }
 }
@@ -175,6 +174,9 @@ The `[llm]` table has `base_url`, `model`, `api_key`, `price_in_per_m` and
 `price_out_per_m` (USD per million tokens). Unset values keep the built-in LocalAI default
 (`http://127.0.0.1:1240/v1`, `qwen3-vl-8b-instruct`). Each persona can override the backend
 in its settings. The API key is never logged.
+`allow_private_base_urls` (`WWYD_LLM_ALLOW_PRIVATE_BASE_URLS`, default `true`): when
+`false`, a persona's own `base_url` must resolve to public addresses only (SSRF guard; the
+instance backend is exempt). Set it to `false` on multi-user hosted instances.
 
 ```toml
 public_url = "https://wwyd.example.com"
@@ -195,6 +197,10 @@ price_out_per_m = 0.8
 
 Data lives in `~/.wwyd/` (`wwyd.db`, `secret.key`, optional `wwyd.toml`). Set
 `WWYD_DATA_DIR` to use another directory.
+
+The secret key encrypts stored LLM API keys. Supply it with `WWYD_SECRET_KEY` (the Fernet
+key itself) or `WWYD_SECRET_KEY_FILE` (a path); otherwise `<data dir>/secret.key` is
+generated on first start, and a backup of the data directory then includes the key.
 
 ## Development
 

@@ -32,7 +32,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/melnikaite/wwyd"
-Repository = "https://github.com/melnikaite/wwyd"
+Source = "https://github.com/melnikaite/wwyd"
 Issues = "https://github.com/melnikaite/wwyd/issues"
 Changelog = "https://github.com/melnikaite/wwyd/blob/main/CHANGELOG.md"
 

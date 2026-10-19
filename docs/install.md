@@ -29,7 +29,7 @@ All your data lives in one folder (the *data folder*): `~/.wwyd` on your compute
 
 2. **Start wwyd:** run `uvx wwyd`
 
-   > Not on PyPI yet. Until it is, run it from a copy of the source code:
+   > To run the latest source code instead of the PyPI release:
    > `uvx --from git+https://github.com/melnikaite/wwyd wwyd`
 
    *What you should see:* a line `wwyd 0.1.0 listening on http://127.0.0.1:8740` and a line
@@ -51,11 +51,13 @@ All your data lives in one folder (the *data folder*): `~/.wwyd` on your compute
 2. Run:
 
    ```sh
-   docker run -d --name wwyd -v wwyd-data:/data -p 127.0.0.1:8740:8740 ghcr.io/melnikaite/wwyd:latest
+   docker run -d --name wwyd -v wwyd-data:/data -p 127.0.0.1:8740:8740 ghcr.io/melnikaite/wwyd:0.1.0
    ```
 
-   > No published image yet. Until there is one, build it from the source first:
-   > `docker build -t ghcr.io/melnikaite/wwyd:latest https://github.com/melnikaite/wwyd.git#main`
+   Images are published for linux/amd64 and linux/arm64 with tags `X.Y.Z`, `X.Y` and
+   `latest`. To build from source instead:
+   `docker build -t wwyd:local https://github.com/melnikaite/wwyd.git#v0.1.0` and use
+   `wwyd:local` as the image name.
 
 3. Run `docker logs wwyd`.
 
@@ -96,6 +98,18 @@ wwyd needs very little: 1 CPU and 1 GB RAM is enough.
 The files on the VM live in `/opt/wwyd` (`docker-compose.yml`, `Caddyfile`, `.env`). The
 same compose file works on any Linux server with Docker: copy `deploy/` there and run
 `WWYD_DOMAIN=wwyd.example.com docker compose up -d`.
+
+**Notes for hosted instances:**
+
+- **Several users?** Set `WWYD_LLM_ALLOW_PRIVATE_BASE_URLS=false` (or
+  `allow_private_base_urls = false` under `[llm]` in `wwyd.toml`). Then a user's own LLM
+  address must be a public one, so nobody can make the server call machines on its private
+  network. The instance's default LLM backend is not affected.
+- **Behind your own reverse proxy** (Caddy or nginx in front of `uvx wwyd`, without the
+  compose file): set `WWYD_TRUSTED_PROXIES` to the proxy's address (e.g. `127.0.0.1`).
+  Otherwise every client appears to come from the proxy's IP, and the per-IP sign-in
+  throttles act for everyone at once (wwyd logs a one-time warning). The compose file
+  already sets this for its own network.
 
 ## D. Connecting your AI apps
 
@@ -182,6 +196,10 @@ and plan list must be rechecked before relying on this section).
 read stored LLM API keys) and optional `wwyd.toml`. Stop wwyd first, or copy all
 `wwyd.db*` files together.
 
+`secret.key` is in the backup unless you supply the key yourself with `WWYD_SECRET_KEY`
+(the key itself) or `WWYD_SECRET_KEY_FILE` (a path to it). In that case back up the key
+separately: without it, stored LLM API keys cannot be read.
+
 - A: copy the folder `~/.wwyd` somewhere safe.
 - B: `docker run --rm -v wwyd-data:/data -v "$PWD":/backup alpine tar czf /backup/wwyd-backup.tgz -C /data .`
 - C: on the VM, `cd /opt/wwyd && sudo docker compose stop wwyd`, then
@@ -193,11 +211,14 @@ You can also export your persona at any time with the `export_persona` tool.
 **Update:**
 
 - A: `uvx wwyd@latest` (uvx otherwise keeps a cached version).
-- B: `docker pull ghcr.io/melnikaite/wwyd:latest`, then `docker rm -f wwyd` and repeat B.2.
+- B: `docker pull ghcr.io/melnikaite/wwyd:<new version>`, then `docker rm -f wwyd` and
+  repeat B.2 with the new version.
   Your data stays in the volume.
-- C: `cd /opt/wwyd && sudo docker compose pull && sudo docker compose up -d` (while the
-  image is built from source: `sudo sh -c 'set -a; . ./.env; docker build -t wwyd:local "$WWYD_SOURCE"'`
-  then `sudo docker compose up -d`).
+- C: set the new version in `WWYD_IMAGE` in `/opt/wwyd/.env`, then
+  `cd /opt/wwyd && sudo docker compose pull && sudo docker compose up -d`. (Built from
+  source with `WWYD_IMAGE=wwyd:local`: update `WWYD_SOURCE`, run
+  `sudo sh -c 'set -a; . ./.env; docker build -t wwyd:local "$WWYD_SOURCE"'`, then
+  `sudo docker compose up -d`.)
 
 Database changes are applied automatically when wwyd starts. Back up before updating.
 

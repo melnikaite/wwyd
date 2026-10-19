@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - unreleased
+
+First public release.
+
 ### Added
 
 - SQLite store in WAL mode with plain SQL migrations applied on start.
@@ -38,5 +42,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - M6: limits and usage (rate limits, spend cap, LLM concurrency), `wwyd eval`, Dockerfile,
   `deploy/` (docker-compose with Caddy, cloud-init), docs/install.md, docs/ecosystem.md,
   docs/eval.md.
+- Release automation: PyPI package `wwyd` (`uvx wwyd`), multi-arch container image
+  `ghcr.io/melnikaite/wwyd`, GitHub Releases from tags (RELEASING.md).
+- Compaction size budget as per-user limits (`max_claims_per_category`,
+  `max_approved_tokens`).
 
-[Unreleased]: https://github.com/melnikaite/wwyd/commits/main
+### Security
+
+- Client ID metadata document fetches are pinned to the validated IP (no DNS rebinding).
+- `[llm] allow_private_base_urls` / `WWYD_LLM_ALLOW_PRIVATE_BASE_URLS`: SSRF guard for a
+  persona's own LLM `base_url` (the instance backend is exempt).
+- LLM backend errors are reported generically; a stored API key is not reused when the
+  backend host changes.
+- Secret key from `WWYD_SECRET_KEY` / `WWYD_SECRET_KEY_FILE`; the key file is created
+  atomically.
+- Request body caps (64 KB for forms and OAuth, `/mcp` sized to the batch limit) and
+  bounded tool parameters.
+- Throttling: the token endpoint is keyed per client and IP and applies only to known
+  clients; stale tokens no longer count toward the `/mcp` bearer throttle; IPv6 clients
+  are throttled per /64; when every `X-Forwarded-For` hop is trusted, the peer address is
+  used.
+- Password reset can disconnect all apps and API keys, invalidates other reset links, and
+  is throttled per login.
+- `respond` tokens are revoked when their audience is deleted or renamed.
+- The consent page marks self-registered client names as unverified.
+- Identifier guard regexes run in linear time.
+
+[Unreleased]: https://github.com/melnikaite/wwyd/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/melnikaite/wwyd/releases/tag/v0.1.0

@@ -17,6 +17,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # --- runtime stage: plain slim Python, no uv, no build tools ---
 FROM python:3.13-slim-bookworm
+LABEL org.opencontainers.image.title="wwyd" \
+      org.opencontainers.image.source="https://github.com/melnikaite/wwyd" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later"
 RUN groupadd --system --gid 10001 wwyd \
  && useradd --system --uid 10001 --gid wwyd --home-dir /data --shell /usr/sbin/nologin wwyd \
  && mkdir -p /data && chown wwyd:wwyd /data && chmod 700 /data

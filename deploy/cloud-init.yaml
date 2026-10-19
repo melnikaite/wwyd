@@ -14,9 +14,10 @@ write_files:
     content: |
       # ---- change these ----
       WWYD_DOMAIN=wwyd.example.com
-      # Image to run. Until a published image exists, it is built from source on the VM.
-      WWYD_IMAGE=wwyd:local
-      WWYD_SOURCE=https://github.com/melnikaite/wwyd.git#main
+      # Image to run (pin a version; see https://github.com/melnikaite/wwyd/releases).
+      WWYD_IMAGE=ghcr.io/melnikaite/wwyd:0.1.0
+      # Build from source instead: set WWYD_IMAGE=wwyd:local; WWYD_SOURCE is then built on the VM.
+      WWYD_SOURCE=https://github.com/melnikaite/wwyd.git#v0.1.0
   - path: /opt/wwyd/docker-compose.yml
     content: |
       # wwyd + Caddy (automatic HTTPS). Usage:
@@ -28,12 +29,14 @@ write_files:
       
       services:
         wwyd:
-          image: ${WWYD_IMAGE:-ghcr.io/melnikaite/wwyd:latest}
+          image: ${WWYD_IMAGE:-ghcr.io/melnikaite/wwyd:0.1.0}
           restart: unless-stopped
           environment:
             WWYD_PUBLIC_URL: https://${WWYD_DOMAIN:?set WWYD_DOMAIN to your domain}
             # Trust X-Forwarded-For only from the proxy network below (Caddy).
             WWYD_TRUSTED_PROXIES: 172.30.87.0/24
+            # Multi-user instance: only allow public LLM base URLs for personas (SSRF guard).
+            # WWYD_LLM_ALLOW_PRIVATE_BASE_URLS: "false"
           volumes:
             - wwyd-data:/data
           networks: [proxy]
@@ -99,7 +102,7 @@ runcmd:
   - apt-get update
   - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   - systemctl enable --now docker
-  # Build the image from source (skip if WWYD_IMAGE points at a published image).
+  # Build the image from source only when WWYD_IMAGE=wwyd:local (default: pull the published image).
   - >-
     sh -c 'set -a; . /opt/wwyd/.env; if [ "$WWYD_IMAGE" = "wwyd:local" ];
     then docker build -t wwyd:local "$WWYD_SOURCE"; fi'
