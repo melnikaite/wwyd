@@ -12,19 +12,26 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from wwyd.errors import Invalid
 from wwyd.ingest.guard import BatchGuard
-from wwyd.ingest.records import Batch
+from wwyd.ingest.records import Batch, Decision, Message
 from wwyd.store.common import KINDS, MAX_TEXT, check_category_path, normalize_text, parent_path
 
 CHUNK_CHARS = 2500
+# Token estimate per call (SPEC §7.1): (chars of system + user) / CHARS_PER_TOKEN plus a
+# fixed output allowance per purpose. A conservative estimate, not a bound: the job stops
+# before a call whose estimate does not fit the remaining daily budget, so the cap can be
+# overrun by at most one call's actual excess over its estimate.
+CHARS_PER_TOKEN = 3  # conservative for Cyrillic and most non-English text
+OUTPUT_TOKENS = {"style": 800, "notes": 1000, "decisions": 1000}
 MAX_CLAIMS_PER_CALL = 8
 DEDUPE_JACCARD = 0.6
+SATURATION_CALLS = 5  # consecutive style calls of one audience with nothing new (§7.1)
 SINGLE_DECISION_CONFIDENCE = 0.3
 RULE_CONFIDENCE = 0.6
 
@@ -156,6 +163,10 @@ DEFAULT_CATEGORY = {
 }
 
 
+# (timestamp, prompt segment, record type, batch indices of the records in the segment)
+Item = tuple[datetime | None, str, str, tuple[int, ...]]
+
+
 @dataclass
 class Candidate:
     kind: str
@@ -193,6 +204,12 @@ class Call:
     audiences: str | list[str]
     sources: dict[str, int]
     period: str | None
+    records: frozenset[int] = frozenset()  # batch indices covered by this call
+
+    @property
+    def estimated_tokens(self) -> int:
+        chars = len(self.system) + len(self.user)
+        return -(-chars // CHARS_PER_TOKEN) + OUTPUT_TOKENS.get(self.purpose, 1000)
 
 
 @dataclass
@@ -220,22 +237,26 @@ def build_calls(batch: Batch, categories: dict[str, str]) -> list[Call]:
     calls: list[Call] = []
 
     # Style: owner messages with the preceding non-owner message, and owner call turns.
-    per_audience: dict[str, list[tuple[datetime, str, str]]] = defaultdict(list)
+    per_audience: dict[str, list[Item]] = defaultdict(list)
     threads: dict[tuple[str, str], list] = defaultdict(list)
     for m in batch.messages:
         threads[(m.audience, m.thread)].append(m)
     for (audience, _), msgs in threads.items():
         msgs.sort(key=lambda m: (m.ts, m.position if m.position is not None else 0))
-        context: str | None = None
+        context: Message | None = None
+        waiting: list[int] = []  # all non-owner messages since the last owner message
         for m in msgs:
             if not m.from_owner:
-                context = m.text
+                context = m
+                waiting.append(m.index)
                 continue
             seg = (
-                f"OTHER: {_one_line(context)}\n" if context else ""
+                f"OTHER: {_one_line(context.text)}\n" if context else ""
             ) + f"OWNER: {_one_line(m.text)}"
-            per_audience[audience].append((m.ts, seg, "message"))
-            context = None
+            # The whole run of waiting messages shares the reply's fate (processed or
+            # remaining): the reply-latency detector pairs the first of them with it.
+            per_audience[audience].append((m.ts, seg, "message", (m.index, *waiting)))
+            context, waiting = None, []
     for t in batch.transcripts:
         context = None
         for speaker, text in t.turns:
@@ -245,54 +266,61 @@ def build_calls(batch: Batch, categories: dict[str, str]) -> list[Call]:
             seg = (
                 f"OTHER: {_one_line(context)}\n" if context else ""
             ) + f"OWNER: {_one_line(text)}"
-            per_audience[t.audience].append((t.ts, seg, "call_transcript"))
+            per_audience[t.audience].append((t.ts, seg, "call_transcript", (t.index,)))
             context = None
     system = STYLE_SYSTEM.replace("{categories}", cat_list)
     for audience in sorted(per_audience):
         items = sorted(per_audience[audience], key=lambda x: x[0])
         for chunk in _chunked_items(items):
             sources: dict[str, int] = defaultdict(int)
-            for _, _, kind in chunk:
+            for _, _, kind, _ in chunk:
                 sources[kind] += 1
             calls.append(
                 Call(
                     "style",
                     system,
-                    f"Audience: {audience}\n" + "\n".join(seg for _, seg, _ in chunk),
+                    f"Audience: {audience}\n" + "\n".join(seg for _, seg, _, _ in chunk),
                     STYLE_SCHEMA,
                     [audience],
                     dict(sources),
-                    _month_period(ts for ts, _, _ in chunk),
+                    _month_period(it[0] for it in chunk),
+                    _indices(chunk),
                 )
             )
 
     if batch.notes:
         system = NOTES_SYSTEM.replace("{categories}", cat_list)
-        items = [(n.ts, f"NOTE: {_one_line(n.text)}", "note") for n in batch.notes]
+        items = [(n.ts, f"NOTE: {_one_line(n.text)}", "note", (n.index,)) for n in batch.notes]
         for chunk in _chunked_items(items):
             calls.append(
                 Call(
                     "notes",
                     system,
-                    "\n".join(seg for _, seg, _ in chunk),
+                    "\n".join(seg for _, seg, _, _ in chunk),
                     NOTES_SCHEMA,
                     "all",
                     {"note": len(chunk)},
-                    _month_period(ts for ts, _, _ in chunk),
+                    _month_period(it[0] for it in chunk),
+                    _indices(chunk),
                 )
             )
 
-    by_audience: dict[str | None, list] = defaultdict(list)
+    by_audience: dict[str | None, list[Decision]] = defaultdict(list)
     for d in batch.decisions:
         by_audience[d.audience].append(d)
     system = DECISIONS_SYSTEM.replace("{categories}", cat_list)
     for audience in sorted(by_audience, key=lambda a: a or ""):
         items = [
-            (d.ts, f"SITUATION: {_one_line(d.situation)} CHOICE: {_one_line(d.choice)}", "decision")
+            (
+                d.ts,
+                f"SITUATION: {_one_line(d.situation)} CHOICE: {_one_line(d.choice)}",
+                "decision",
+                (d.index,),
+            )
             for d in by_audience[audience]
         ]
         for chunk in _chunked_items(items):
-            lines = [f"{i}. {seg}" for i, (_, seg, _) in enumerate(chunk, start=1)]
+            lines = [f"{i}. {it[1]}" for i, it in enumerate(chunk, start=1)]
             calls.append(
                 Call(
                     "decisions",
@@ -301,22 +329,27 @@ def build_calls(batch: Batch, categories: dict[str, str]) -> list[Call]:
                     DECISIONS_SCHEMA,
                     [audience] if audience else "all",
                     {"decision": len(chunk)},
-                    _month_period(ts for ts, _, _ in chunk),
+                    _month_period(it[0] for it in chunk),
+                    _indices(chunk),
                 )
             )
     return calls
 
 
-def _chunked_items(items: list[tuple[Any, str, str]]) -> list[list[tuple[Any, str, str]]]:
-    out: list[list[tuple[Any, str, str]]] = []
-    current: list[tuple[Any, str, str]] = []
+def _indices(chunk: list[Item]) -> frozenset[int]:
+    return frozenset(i for it in chunk for i in it[3])
+
+
+def _chunked_items(items: list[Item]) -> list[list[Item]]:
+    out: list[list[Item]] = []
+    current: list[Item] = []
     size = 0
-    for ts, seg, kind in items:
+    for ts, seg, kind, indices in items:
         seg = seg[:CHUNK_CHARS]
         if current and size + len(seg) + 1 > CHUNK_CHARS:
             out.append(current)
             current, size = [], 0
-        current.append((ts, seg, kind))
+        current.append((ts, seg, kind, indices))
         size += len(seg) + 1
     if current:
         out.append(current)
@@ -450,20 +483,16 @@ def dedupe(candidates: list[Candidate], counts: DeriveCounts) -> list[Candidate]
     return [c for c, _ in kept]
 
 
-async def derive(
-    calls: list[Call],
-    complete: Callable[[Call], Awaitable[Any]],
-    categories: dict[str, str],
-    guard: BatchGuard,
-    counts: DeriveCounts,
-    on_progress: Callable[[], None] | None = None,
-) -> list[Candidate]:
-    """Run the calls one by one; LLM errors (SpendCap, RateLimited, LLMUnavailable)
-    propagate to the job."""
-    candidates: list[Candidate] = []
-    for call in calls:
-        data = await complete(call)
-        candidates.extend(to_candidates(call, data, categories, guard, counts))
-        if on_progress is not None:
-            on_progress()
-    return dedupe(candidates, counts)
+def same_claim(a: Candidate, b: Candidate) -> bool:
+    """The within-job duplicate test of :func:`dedupe` (kind, category, audiences, text)."""
+    if (a.kind, a.category, json.dumps(a.audiences)) != (
+        b.kind,
+        b.category,
+        json.dumps(b.audiences),
+    ):
+        return False
+    if normalize_text(a.text) == normalize_text(b.text):
+        return True
+    ta, tb = _tokens(a.text), _tokens(b.text)
+    union = ta | tb
+    return bool(union) and len(ta & tb) / len(union) >= DEDUPE_JACCARD

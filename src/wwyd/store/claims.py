@@ -586,6 +586,15 @@ def _add_one(
     return "created", claim_id
 
 
+def known_claim(
+    conn: sqlite3.Connection, persona_id: str, kind: str, category_id: str, text: str
+) -> bool:
+    """True if ``add_claims`` would not create a new claim for this text: it would be
+    absorbed into a pending/approved claim or dropped against a rejected one (§10.1
+    similarity, no LLM judge). Used by ingest saturation (§7.1)."""
+    return _absorb_target(conn, persona_id, kind, category_id, text) is not None
+
+
 def _absorb_target(
     conn: sqlite3.Connection, persona_id: str, kind: str, category_id: str, text: str
 ) -> sqlite3.Row | None:

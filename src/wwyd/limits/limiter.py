@@ -322,6 +322,25 @@ class Limiter:
                 limit="llm_tokens_per_day",
             )
 
+    def remaining_tokens(self, user_id: str, persona_id: str) -> int | None:
+        """Tokens left today under ``llm_tokens_per_day`` (None: unlimited); 0 when the
+        spend cap is reached."""
+        if self.spend_state(user_id, persona_id)["spend_capped"]:
+            return 0
+        cap = self.effective_limits(user_id)["llm_tokens_per_day"]
+        if cap is None:
+            return None
+        used = self._get(user_id, "llm_tokens_in") + self._get(user_id, "llm_tokens_out")
+        return max(0, int(cap - used))
+
+    def secs_to_reset(self, error_code: str) -> int | None:
+        """``retry_after`` for a budget stop: the daily reset or the month end."""
+        if error_code == "rate_limited":
+            return self._secs_to_midnight()
+        if error_code == "spend_cap":
+            return self._secs_to_month_end()
+        return None
+
     def record_llm_usage(
         self,
         user_id: str,

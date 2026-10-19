@@ -32,6 +32,8 @@ OWNER_TOOLS = {
     "update_settings",
     "ingest_raw",
     "job_status",
+    "list_sources",
+    "reset_source",
     "list_audit",
     "get_persona",
     "predict",

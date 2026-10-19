@@ -223,9 +223,14 @@ cleared) and count against no budget.
   expired), reason, job_id, payload` (before/after snapshots of the claims touched; these
   are derived claims, never raw input). Purge turns the entries for that claim into
   `expired` (not undoable).
-- `jobs`: `id, persona_id, status (queued|running|done|failed|interrupted), created_at,
-  finished_at, counts` (records by type, claims created/absorbed/dropped_by_guard),
-  `error_code`. No content.
+- `jobs`: `id, persona_id, status (queued|running|done|partial|failed|interrupted),
+  created_at, finished_at, counts` (records by type, claims created/absorbed/dropped_by_guard,
+  skip counters), `error_code`, `remaining_records` (JSON array of batch indices not yet
+  processed; written when a job ends `partial`). No content.
+- `ingest_sources`: `persona_id, source, last_ts, last_job_at, records_total` — the
+  per-source watermark of §7.1 (an owner-chosen slug, the largest processed record
+  timestamp, when a job last ended for it, and how many records it has processed in
+  total). No content.
 - `audit`: `id, persona_id, ts, client_name, grant_id|api_key_id, scope, audience_id,
   audience_fallback (bool), outcome (answer|needs|escalate:<code>), confidence,
   llm_tokens, latency_ms`. Kept 90 days.
@@ -293,7 +298,7 @@ schema; we use its names where they mean the same thing (`id` prefixes, `text`,
 All tools return structured JSON (`structuredContent` plus a text mirror). Errors use MCP
 tool errors with a stable `code` (`not_found`, `forbidden`, `invalid`, `rate_limited`,
 `spend_cap`, `too_large`, `conflict`). Pagination: `limit` (default 50, max 200) and an
-opaque `cursor`. 25 tools; read-only resources are a later option.
+opaque `cursor`. 27 tools; read-only resources are a later option.
 
 Shapes below are abbreviated JSON Schema. `?` marks optional fields.
 
@@ -302,8 +307,9 @@ Shapes below are abbreviated JSON Schema. `?` marks optional fields.
 **`ingest_raw`** (owner) — accepts a batch, returns at once, derives in the background, then
 drops the input.
 ```
-in:  { records: Record[1..1000], llm_for_ingest?: bool }      // batch ≤ 2 MB serialized
-out: { job_id, accepted: int }
+in:  { records: Record[1..1000], llm_for_ingest?: bool,      // batch ≤ 2 MB serialized
+       source?: slug }                                      // [a-z0-9][a-z0-9_-]{0,39}
+out: { job_id, accepted: int, estimated_tokens: int, remaining_tokens: int | null }
 
 Record = one of
   { type: "message", from_owner: bool, audience?: string, text: string ≤ 4000,
@@ -321,6 +327,12 @@ Record = one of
 Every record object has `additionalProperties: false`. An unknown `audience` is mapped to
 the default audience and counted in the job's `unknown_audiences` counter.
 
+`accepted` is the number of valid records received. `estimated_tokens` is a conservative
+estimate of the LLM tokens the job will use (0 when no LLM step runs; §7.1); `remaining_tokens` is
+what is left of today's `llm_tokens_per_day` for the user (0 when the spend cap is reached,
+`null` when unlimited). With `source`, records already covered by that source's watermark
+are skipped (§7.1).
+
 **`add_claims`** (owner) — claims derived elsewhere (a local model, another AI's memory).
 ```
 in:  { claims: [{ kind, category, text, audiences?: "all"|string[] = "all",
@@ -334,7 +346,20 @@ Claims land as `pending`; `status: "approved"` is honoured for owner callers. Wi
 `absorb`, a claim that restates an existing one strengthens it instead (§10).
 `origin` is `added`. Text passes the verbatim guard's regex part (no emails, phones, URLs).
 
-**`job_status`** (owner) — `in: { job_id }` → `out: { status, progress: 0..1, counts, error_code? }`.
+**`job_status`** (owner) — `in: { job_id }` → `out: { status, progress: 0..1, counts,
+error_code?, remaining_records?: int[], retry_after?: int }`. `status` is `queued |
+running | done | partial | failed | interrupted`. `partial`: the job stopped early on the
+daily token limit (`rate_limited`), the spend cap (`spend_cap`) or LLM unavailability
+(`llm_unavailable`) after storing everything derived so far and running the detectors on
+the processed records; `remaining_records` lists the
+indices (into the original batch) that were not processed, so the harness resends exactly
+those; `retry_after` is the seconds to the daily reset (`rate_limited`) or the month end
+(`spend_cap`). An `interrupted` job is resent in full. Counters include `skipped_seen` (records at or below the source watermark),
+`skipped_saturated` (style records skipped by saturation) and `saturated_audiences`.
+
+**`list_sources`** (owner, read-only) — `out: { sources: [{ source, last_ts, last_job_at,
+records_total }] }`. **`reset_source`** (owner) — `in: { source }` → `out: { deleted: bool }`;
+drops that watermark so the next batch with this `source` is processed in full.
 
 ### 6.2 Claims
 - **`list_claims`** — `in: { category?, kind?, audience?, status?: status|"any" = "approved",
@@ -430,6 +455,46 @@ the records on an in-memory queue and returns. One worker per persona (limit
 On restart, `running`/`queued` jobs become `interrupted` and the harness resends; there is
 nothing to resume because nothing was saved (P1).
 
+- **Order and progress.** The LLM calls run first, in order (style per audience,
+  chronological within an audience; notes; decisions); the code detectors run last, always
+  (also with no LLM step, no budget left, or after an LLM error stopped the LLM phase), over
+  the *processed* records only. Every parsed record keeps its batch index, and each call
+  knows the indices it covers. A record is processed when every call that contains it has
+  completed; records in no call (calendar events, trailing unanswered non-owner messages,
+  every record when no LLM step runs) are processed. A style segment covers the owner's
+  message and every non-owner message waiting before it in the thread, so a reply-latency
+  pair is processed or remaining as a whole. Remaining records therefore reach the habit
+  stats only through their resend: each record is counted once across a job and its
+  resends. An `interrupted` job ran no detectors and is resent in full.
+- **Flush.** Candidates are deduplicated within a window and stored with absorb
+  (`origin: derived`) every 20 LLM calls and once more when the job ends, including when an
+  LLM error ends it; duplicates across windows are left to absorb and compaction.
+  Compaction runs on all touched claims whatever the outcome.
+- **Budget.** Each call's cost is estimated as (chars of system + user) / 3 (conservative
+  for Cyrillic and most non-English text) plus a fixed output allowance per purpose. This
+  is a conservative estimate, not a bound: the job stops before a call whose estimate does
+  not fit, so the daily cap can be overrun by at most one call's actual excess. Before each call the job compares the
+  estimate with what is left of today's token budget and with the spend state, besides the
+  limiter's own check; a call that would not fit is not started. The job then ends
+  `partial` (`rate_limited` / `spend_cap`) with `remaining_records`; so does an LLM error
+  raised by the backend (`llm_unavailable` included). A batch submitted with no budget
+  left is still accepted: detectors run and the job ends `partial` before the first call.
+  `failed` is kept for real errors.
+- **Saturation (style only).** When 5 consecutive style calls of one audience produce no
+  new candidate (each was a duplicate of one derived earlier in the job or of an existing
+  pending/approved/rejected claim: same kind and category, equal normalised text or FTS +
+  token Jaccard ≥ 0.6, no LLM judge), the audience's remaining style calls are skipped.
+  Their records count as processed (`skipped_saturated`, `saturated_audiences`). Notes and
+  decisions are never skipped.
+- **Source watermark.** With `source`, records whose timestamp (`ts`, `start` for
+  calendar events) is ≤ the stored `last_ts` are dropped before derivation
+  (`skipped_seen`); records without a timestamp are never skipped. When the job ends: `done`
+  → `last_ts` = the largest processed timestamp; `partial` → the largest processed
+  timestamp strictly below the earliest remaining record's timestamp (so resending the
+  remaining records is not skipped); `failed`/`interrupted` leave it alone. It never moves
+  backwards. `records_total` adds the processed records. Only timestamps and counts are
+  stored.
+
 ### 7.2 Habit detectors (code, statistics)
 Habits nobody puts into words are computed in code. Each detector has a stable `key`, a
 minimum sample size, and produces at most one or two claims with numbers in `evidence`.
@@ -460,8 +525,9 @@ are honoured.
 - **Notes:** extracted into claims of any kind.
 - **Decisions:** extracted into `decision_rule` claims when the same pattern shows up at
   least twice in the batch; single decisions become low-confidence `preference` claims.
-- Results from all chunks are first deduplicated among themselves, then absorbed against
-  existing claims (§10.1); only genuinely new ones become `pending`.
+- Results are deduplicated among themselves within a flush window (§7.1), then absorbed
+  against existing claims (§10.1); only genuinely new ones become `pending`. Style calls of
+  an audience stop early once it is saturated (§7.1).
 - With `llm_for_ingest: false` only the code detectors run.
 
 ### 7.4 Verbatim guard
@@ -711,8 +777,13 @@ lower the effective value, never raise it.
   return a `rate_limited` error with `retry_after`.
 - **Spend:** cost per call is taken from the backend's reported cost when it returns one
   (OpenRouter), otherwise from per-1M-token prices configured on the backend. Reaching the
-  cap stops LLM calls for the persona (`escalate: "spend_cap"`, ingest jobs fail with
-  `spend_cap`) and sets a flag shown on the account page and in `get_settings`.
+  cap stops LLM calls for the persona (`escalate: "spend_cap"`, ingest jobs end `partial`
+  with `spend_cap`) and sets a flag shown on the account page and in `get_settings`.
+- **Ingest and the token budget.** The token budget is checked before every LLM call of an
+  ingest job, and a job that runs out stops `partial` with `remaining_records` (§7.1)
+  instead of failing. The default byte limit (20 MB/day) is far above what 500 000
+  tokens/day can derive (a 2 MB batch of messages is roughly 1M tokens), so harnesses
+  should size batches from `ingest_raw`'s `estimated_tokens` and `remaining_tokens`.
 - **Usage counters** per user per day (calls per tool, LLM tokens in/out, cost, ingest
   bytes and records) are kept for future billing and shown to the admin.
 
@@ -907,6 +978,23 @@ mid-price OpenRouter model, chosen at M3.
 changes are approved or dismissed with their `chg_…` IDs, which keeps the tool count at 25.
 
 **D15. Container images** will be published to GitHub Container Registry at M6.
+
+**D16. Ingest jobs stop `partial` and persist progress (2026-10-19).** A large batch can
+cost more tokens than a day's budget; failing it threw away everything derived so far.
+Jobs now flush candidates every 20 calls and on the way out, and report which batch
+indices were not processed. A job is accepted even with no budget left (detectors still
+run, the harness gets `remaining_records` and `retry_after`) rather than rejected, so one
+resend loop handles every case. Only indices, timestamps and counts are stored (P1): the
+remaining records are resent by the harness, never kept by the server. Saturation is
+style-only because style repeats across thousands of messages, while each note and
+decision can carry a rule seen nowhere else; it uses the cheap absorb similarity (no LLM
+judge) so it costs no tokens. Detectors run after the LLM phase and only over processed
+records, so a partial job plus the resend of its remaining records adds every record to
+the habit stats exactly once (running them first would count the resent ones twice). The
+token estimate uses 3 chars per token and is called conservative, not an upper bound:
+tokenisation varies by model and language, and the one-call overrun it allows is small.
+The per-source watermark lets a harness re-export
+incrementally without re-deriving what was already seen.
 
 ### Implementation notes
 

@@ -110,6 +110,7 @@ class Message:
     ts: datetime
     thread: str
     position: int | None = None
+    index: int = -1  # position in the submitted batch (progress tracking, SPEC §7.1)
 
 
 @dataclass
@@ -117,6 +118,7 @@ class Transcript:
     audience: str
     ts: datetime
     turns: list[tuple[str, str]] = field(default_factory=list)  # (speaker, text)
+    index: int = -1
 
 
 @dataclass
@@ -127,6 +129,7 @@ class Event:
     response: str
     recurring: bool = False
     online: bool = False
+    index: int = -1
 
 
 @dataclass
@@ -135,12 +138,14 @@ class Decision:
     choice: str
     audience: str | None  # None: no audience given, the rule applies to all
     ts: datetime | None = None
+    index: int = -1
 
 
 @dataclass
 class Note:
     text: str
     ts: datetime | None = None
+    index: int = -1
 
 
 @dataclass
@@ -154,6 +159,38 @@ class Batch:
     notes: list[Note] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
     unknown_audiences: int = 0
+
+    def _lists(self) -> list[list[Any]]:
+        return [self.messages, self.transcripts, self.events, self.decisions, self.notes]
+
+    def stamps(self) -> dict[int, datetime | None]:
+        """Batch index -> record timestamp (``start`` for events; None when absent)."""
+        out: dict[int, datetime | None] = {}
+        for items in self._lists():
+            for r in items:
+                out[r.index] = r.start if isinstance(r, Event) else r.ts
+        return out
+
+    def drop_seen(self, last_ts: datetime) -> int:
+        """Drop records with a timestamp <= ``last_ts`` (source watermark); returns how many.
+        Records without a timestamp are kept."""
+        dropped = 0
+        for items in self._lists():
+            kept = [
+                r
+                for r in items
+                if (ts := (r.start if isinstance(r, Event) else r.ts)) is None or ts > last_ts
+            ]
+            dropped += len(items) - len(kept)
+            items[:] = kept
+        return dropped
+
+    def subset(self, exclude: set[int]) -> Batch:
+        """A view without the records at ``exclude`` (shares record objects)."""
+        out = Batch(counts=dict(self.counts), unknown_audiences=self.unknown_audiences)
+        for src, dst in zip(self._lists(), out._lists(), strict=True):
+            dst.extend(r for r in src if r.index not in exclude)
+        return out
 
     def clear(self) -> None:
         self.messages.clear()
@@ -222,6 +259,7 @@ def parse_batch(
                     ts=parse_dt(rec["ts"], tz, i, "ts"),
                     thread=rec["thread"],
                     position=rec.get("position"),
+                    index=i,
                 )
             )
         elif kind == "call_transcript":
@@ -230,6 +268,7 @@ def parse_batch(
                     audience=audience(rec.get("audience")),
                     ts=parse_dt(rec["ts"], tz, i, "ts"),
                     turns=[(t["speaker"], t["text"]) for t in rec["turns"]],
+                    index=i,
                 )
             )
         elif kind == "calendar_event":
@@ -245,6 +284,7 @@ def parse_batch(
                     response=rec["response"],
                     recurring=rec.get("recurring", False),
                     online=rec.get("online", False),
+                    index=i,
                 )
             )
         elif kind == "decision":
@@ -254,10 +294,15 @@ def parse_batch(
                     choice=rec["choice"],
                     audience=audience(rec["audience"]) if "audience" in rec else None,
                     ts=parse_dt(rec["ts"], tz, i, "ts") if "ts" in rec else None,
+                    index=i,
                 )
             )
         else:
             batch.notes.append(
-                Note(text=rec["text"], ts=parse_dt(rec["ts"], tz, i, "ts") if "ts" in rec else None)
+                Note(
+                    text=rec["text"],
+                    ts=parse_dt(rec["ts"], tz, i, "ts") if "ts" in rec else None,
+                    index=i,
+                )
             )
     return batch

@@ -170,14 +170,20 @@ async def test_decisions_rules_and_singles(client, fake_llm):
     assert single["category"] == "travel" and single["proposed_category"] == "travel/flights"
 
 
-async def test_spend_cap_fails_job(client, fake_llm):
+async def test_spend_cap_ends_job_partial(client, conn, fake_llm):
     def boom(call):
         raise SpendCap("monthly spend cap reached")
 
     fake_llm.on("style", boom)
-    _, status = await run(client, messages("work-slack"))
-    assert status["status"] == "failed" and status["error_code"] == "spend_cap"
-    assert status["counts"]["claims_created"] == 3  # detectors ran before the LLM
+    _, status = await run(client, calendar() + messages("work-slack"))
+    assert status["status"] == "partial" and status["error_code"] == "spend_cap"
+    # Detectors ran on the processed records only: the calendar, not the messages.
+    keys = {r[0] for r in conn.execute("SELECT key FROM claims WHERE key IS NOT NULL")}
+    assert keys and not any(":work-slack" in k for k in keys)
+    assert status["retry_after"] > 0
+    # Every owner reply and its context message is still to be resent.
+    n = len(calendar())
+    assert status["remaining_records"] == list(range(n, n + 100))
 
 
 async def test_invalid_records_rejected_without_echo(client):

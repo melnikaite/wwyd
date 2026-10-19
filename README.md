@@ -125,7 +125,7 @@ real replies; see [docs/eval.md](docs/eval.md).
 
 ## Tools
 
-25 tools. Scopes per [SPEC.md §5](SPEC.md#5-scopes-and-who-sees-what): a client only sees
+27 tools. Scopes per [SPEC.md §5](SPEC.md#5-scopes-and-who-sees-what): a client only sees
 the tools its scope allows.
 
 | Tool | Scope | Purpose |
@@ -134,6 +134,8 @@ the tools its scope allows.
 | `get_persona` | owner, read | Persona summary for personalising a harness |
 | `ingest_raw` | owner | Submit raw records; derives claims in a background job |
 | `job_status` | owner | Progress and counts of an ingest job |
+| `list_sources` | owner | Per-source ingest watermarks |
+| `reset_source` | owner | Forget one source's watermark |
 | `add_claims` | owner | Add claims (statements about the owner) |
 | `list_claims` | owner | List claims with filters |
 | `search_claims` | owner | Full-text search over claims |

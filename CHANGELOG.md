@@ -55,6 +55,19 @@ First public release.
   persona's default audience, without a fallback hint. No audience can be named `default`.
 - docs/clients.md: the contract for MCP client authors (auth, scopes, revocation, tool
   shapes, error codes, versioning).
+- Ingest jobs flush derived claims every 20 LLM calls and when they end; a job stopped by
+  the daily token limit, the spend cap or an unavailable LLM ends `partial` and
+  `job_status` lists `remaining_records` (batch indices to resend) and `retry_after`.
+  Habit detectors now run after the LLM phase, over the processed records only, so a
+  resend counts each record once.
+- `ingest_raw` returns `estimated_tokens` (a conservative estimate) and
+  `remaining_tokens`; a call whose estimate does not fit the remaining daily budget is not
+  started.
+- Style saturation: once 5 style calls in a row of one audience add nothing new, the
+  audience's remaining style chunks are skipped (`skipped_saturated`,
+  `saturated_audiences`). Notes and decisions are never skipped.
+- `ingest_raw` optional `source` with a per-source timestamp watermark
+  (`skipped_seen`); new owner tools `list_sources` and `reset_source` (27 tools).
 
 ### Changed
 
@@ -63,6 +76,9 @@ First public release.
   categories.
 - The `unknown category` error of `add_claims` points to `list_categories` and
   `upsert_category`.
+- Ingest jobs no longer fail with `spend_cap` / `rate_limited` / `llm_unavailable` after
+  the detectors ran: they end `partial` and keep the claims derived so far (migration
+  `0007_ingest_progress`).
 
 ### Fixed
 

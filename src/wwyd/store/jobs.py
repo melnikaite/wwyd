@@ -11,7 +11,8 @@ from wwyd.errors import NotFound
 from wwyd.ids import new_id, now_iso
 from wwyd.store.common import dumps
 
-STATUSES = ("queued", "running", "done", "failed", "interrupted")
+STATUSES = ("queued", "running", "done", "partial", "failed", "interrupted")
+FINAL = ("done", "partial", "failed", "interrupted")
 
 
 def create_job(conn: sqlite3.Connection, persona_id: str, counts: dict[str, Any]) -> str:
@@ -31,7 +32,9 @@ def update_job(
     progress: float | None = None,
     counts: dict[str, Any] | None = None,
     error_code: str | None = None,
+    remaining_records: list[int] | None = None,
 ) -> None:
+    """Update the given fields; ``remaining_records`` holds batch indices only (P1)."""
     sets: list[str] = []
     args: list[Any] = []
     if status is not None:
@@ -40,7 +43,7 @@ def update_job(
         if status == "running":
             sets.append("started_at = ?")
             args.append(now_iso())
-        elif status in ("done", "failed", "interrupted"):
+        elif status in FINAL:
             sets.append("finished_at = ?")
             args.append(now_iso())
     if progress is not None:
@@ -52,6 +55,9 @@ def update_job(
     if error_code is not None:
         sets.append("error_code = ?")
         args.append(error_code)
+    if remaining_records is not None:
+        sets.append("remaining_records = ?")
+        args.append(dumps(sorted(int(i) for i in remaining_records)))
     if sets:
         conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id = ?", (*args, job_id))
 
@@ -72,6 +78,8 @@ def get_job(conn: sqlite3.Connection, persona_id: str, job_id: str) -> dict[str,
     }
     if row["error_code"]:
         out["error_code"] = row["error_code"]
+    if row["remaining_records"] is not None and row["status"] == "partial":
+        out["remaining_records"] = json.loads(row["remaining_records"])
     return out
 
 

@@ -177,3 +177,47 @@ unknown one maps to the default audience and is counted in the job's `unknown_au
 
 `thread` only pairs a message from someone else with the owner's reply (to learn response
 times) and is discarded with the batch.
+
+The call returns `{job_id, accepted, estimated_tokens, remaining_tokens}`. `accepted` is
+the number of valid records received. `estimated_tokens` is a conservative estimate of the
+LLM tokens the job will spend (0 when no LLM step runs); the job stops before a call whose
+estimate does not fit, so the daily cap can be overrun by at most one call's actual excess.
+`remaining_tokens` is what is left of today's `llm_tokens_per_day` (`null` when unlimited, 0 when the spend cap is reached). The
+daily byte limit (20 MB by default) is far above what 500 000 tokens a day can derive (a
+2 MB message batch is roughly 1M tokens), so size batches so that `estimated_tokens` fits
+`remaining_tokens`.
+
+**Partial jobs and resending.** `job_status` returns `status: queued | running | done |
+partial | failed | interrupted`. A job stopped by the daily token limit (`error_code:
+rate_limited`), the spend cap (`spend_cap`) or an unavailable LLM (`llm_unavailable`) ends
+`partial`: everything derived so far is stored, and `remaining_records` lists the indices
+(into the batch you sent) that were not processed. Keep the batch until the job ends, then
+resend exactly those records, after `retry_after` seconds when it is given (daily reset or
+month end):
+
+```
+out = ingest_raw({records, source})
+loop: s = job_status({job_id})  until s.status not in (queued, running)
+if s.status == "partial":
+    wait s.retry_after (if any); ingest_raw({records: [records[i] for i in s.remaining_records], source})
+```
+
+Habit detectors run last, over the processed records only, so resending
+`remaining_records` counts each record once. `failed` means a real error (do not blindly
+resend); `interrupted` (server restart) means resend the whole batch.
+
+**Incremental sync with `source`.** Pass an owner-chosen slug (`[a-z0-9][a-z0-9_-]{0,39}`,
+e.g. `telegram`, `gcal`). The server keeps per source the largest processed record
+timestamp; records with a timestamp (`ts`, or `start` for calendar events) at or below it
+are skipped. Records without a timestamp are never skipped. After a `partial` job the
+watermark stays below the earliest remaining record, so resending `remaining_records` is
+not skipped. `list_sources` returns `{sources: [{source, last_ts, last_job_at,
+records_total}]}`; `reset_source {source}` forgets one watermark (for a re-export from
+scratch). Send records in chronological order where you can.
+
+**Counters** in `job_status.counts`: `records` (valid records received, by type),
+`skipped_seen` (at or below the source watermark), `skipped_saturated` (style records not
+sent to the LLM because the audience was saturated: 5 style calls in a row produced only
+claims the persona already has), `saturated_audiences`, `claims_created`,
+`claims_updated`, `absorbed`, `dropped_by_guard`, `dropped_previously_rejected`,
+`dropped_invalid`, `unknown_audiences`, `llm_calls`, `llm_calls_failed`.
