@@ -82,3 +82,19 @@ def fake_llm() -> Iterator[Any]:
     set_llm_factory(fake.for_persona)
     yield fake
     set_llm_factory(None)
+
+
+@pytest.fixture(autouse=True)
+def no_live_llm(request, monkeypatch):
+    """Outside ``-m llm`` the default backend points at a closed port, so a test that
+    forgets ``fake_llm`` fails the same way locally as in CI instead of reaching LocalAI."""
+    if request.node.get_closest_marker("llm") or request.node.get_closest_marker("real_presets"):
+        return
+    from dataclasses import replace
+
+    from wwyd.llm import presets
+
+    closed = replace(presets._DEFAULT_INSTANCE, base_url="http://127.0.0.1:9/v1")
+    monkeypatch.setattr(presets, "_DEFAULT_INSTANCE", closed)
+    monkeypatch.setattr(presets, "_instance", closed)
+    monkeypatch.setitem(presets.PRESETS, "localai", ("http://127.0.0.1:9/v1", closed.model))

@@ -48,7 +48,10 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["llm: needs a live LLM backend (skipped by default)"]
+markers = [
+    "llm: needs a live LLM backend (skipped by default)",
+    "real_presets: keep the built-in LLM presets instead of the closed-port stand-in",
+]
 addopts = "-m 'not llm'"
 
 [tool.ruff]

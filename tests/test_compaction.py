@@ -136,7 +136,7 @@ async def test_pending_near_rejected_is_dropped(conn, pid):
     cl.review_claims(conn, pid, reject=[r])
     # Inserted directly (bypassing add_claims' negative memory), as an older job might have.
     p, _ = add(conn, pid, "Different text first.")
-    set_cols(conn, p, text="Always answers calls on weekends, no delay.")
+    set_cols(conn, p, text="Always answers calls on weekends, without any delay.")
     res = await compact(conn, pid, apply=True, steps=["dedupe"])
     assert res["changes"][0]["reason"] == "previously_rejected"
     assert get(conn, pid, p)["status"] == "archived"

@@ -189,6 +189,7 @@ async def test_spend_cap_blocks_before_call(conn, user, pid, backend, openrouter
 # --- settings, presets, encryption ---------------------------------------------------------
 
 
+@pytest.mark.real_presets
 def test_instance_default_and_override(conn, pid):
     try:
         assert instance_backend().base_url == "http://127.0.0.1:1240/v1"
