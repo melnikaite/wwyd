@@ -7,9 +7,9 @@
 
 ## Status
 
-**Pre-alpha.** All six milestones of the [roadmap in SPEC.md §16](SPEC.md#16-milestones)
-are implemented: store and CRUD, HTTP with OAuth 2.1 and API keys, `predict`, ingest with
-habit detectors, compaction, limits and packaging. No release has been published yet;
+**Pre-alpha.** All seven milestones of the [roadmap in SPEC.md §16](SPEC.md#16-milestones)
+are implemented: store and CRUD, HTTP with OAuth 2.1 and API keys, `predict`, ingest,
+compaction, limits and packaging, and episodes with organic categories and analyzers. No release has been published yet;
 interfaces and the database schema may still change without notice.
 
 ## What it is
@@ -118,21 +118,22 @@ real replies; see [docs/eval.md](docs/eval.md).
 - [docs/install.md](docs/install.md): installation and connecting AI apps.
 - [docs/ecosystem.md](docs/ecosystem.md): what a harness sends to `ingest_raw` and how it
   uses `predict`.
-- [docs/habits.md](docs/habits.md): the habit detectors and the claims they produce.
+- [docs/habits.md](docs/habits.md): the analyzers (builtin and LLM-written) and the claims
+  they produce.
 - [docs/eval.md](docs/eval.md): evaluation method and results.
 - [docs/clients.md](docs/clients.md): the contract for MCP client authors (auth, scopes,
   revocation, tool shapes, needs/facts round trip, error codes, versioning).
 
 ## Tools
 
-27 tools. Scopes per [SPEC.md §5](SPEC.md#5-scopes-and-who-sees-what): a client only sees
+30 tools. Scopes per [SPEC.md §5](SPEC.md#5-scopes-and-who-sees-what): a client only sees
 the tools its scope allows.
 
 | Tool | Scope | Purpose |
 |---|---|---|
 | `predict` | owner, respond | How would the owner reply or act in this situation |
 | `get_persona` | owner, read | Persona summary for personalising a harness |
-| `ingest_raw` | owner | Submit raw records; derives claims in a background job |
+| `ingest_raw` | owner | Submit episodes; derives claims in a background job |
 | `job_status` | owner | Progress and counts of an ingest job |
 | `list_sources` | owner | Per-source ingest watermarks |
 | `reset_source` | owner | Forget one source's watermark |
@@ -148,9 +149,12 @@ the tools its scope allows.
 | `list_categories` | owner | List categories |
 | `upsert_category` | owner | Create or update a category |
 | `merge_categories` | owner | Merge one category into another |
-| `compact` | owner | Dedupe, contradictions, decay, size budget (dry run by default) |
+| `compact` | owner | Dedupe, contradictions, decay, size budget, category merge/split (dry run by default) |
 | `list_changes` | owner | Change log |
 | `undo_change` | owner | Undo a change |
+| `list_analyzers` | owner | List analyzers |
+| `get_analyzer` | owner | One analyzer with its source and state keys |
+| `update_analyzer` | owner | Enable, disable or retire an analyzer |
 | `list_audit` | owner | Audit log of `predict` calls (no text) |
 | `export_persona` | owner | Export the persona as `persona.v1.json` |
 | `import_persona` | owner | Import a persona (replace or merge) |

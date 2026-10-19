@@ -8,8 +8,11 @@ episodes are held only by the :class:`Job` object and are released in ``finally`
 happens (P1). Nothing here logs episode content, prompts or replies.
 
 Order inside a job: preparation (in ``submit``: times, audiences, categories, classes;
-then the category description call) -> [M7c: annotation] -> the LLM passes -> [M7c:
-analyzer authoring] -> the analyzers over the processed episodes (always) -> watermark.
+then the category description call) -> annotation (§7.3) -> the LLM passes (rebuilt with
+the labels) -> analyzer authoring and the hypothesis test (§7.4) -> the analyzers over the
+processed episodes (always; builtin, then active LLM analyzers in the sandbox) -> word usage
+notes (§7.2) -> watermark. Authoring and usage-note calls cover no episodes: when they do
+not fit the budget they are skipped with a counter instead of making the job ``partial``.
 
 Derived candidates are flushed to the store every ``FLUSH_EVERY`` LLM calls and when the
 job ends, so a job stopped by the token budget, the spend cap or an unavailable backend
@@ -30,12 +33,17 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from wwyd import compact
-from wwyd.analyzers import run_analyzers
+from wwyd.analyzers import authoring, run_analyzers
+from wwyd.analyzers import llm as llm_analyzers
+from wwyd.analyzers.builtin.base import host_fields
+from wwyd.analyzers.word_usage import write_notes
 from wwyd.config import thresholds
 from wwyd.db import transaction
 from wwyd.errors import Invalid, LLMUnavailable, RateLimited, SpendCap, TooLarge, WwydError
-from wwyd.ingest import passes
+from wwyd.ingest import annotate, passes
 from wwyd.ingest.episodes import Batch, parse_batch
+from wwyd.ingest.guard import BatchGuard
+from wwyd.ingest.rare import RareWords
 from wwyd.limits import get_limiter
 from wwyd.llm import get_llm
 from wwyd.store import claims as claim_store
@@ -55,6 +63,7 @@ MAX_EPISODES = 1000
 MAX_BYTES = 2 * 1024 * 1024
 ADD_CHUNK = 200  # store.claims.add_claims accepts at most 200 items per call
 FLUSH_EVERY = 20  # LLM calls between two flushes of derived candidates (SPEC §7.1)
+AUTHORING_ESTIMATE = 8000  # tokens per authoring call in ``estimated_tokens`` (rough)
 
 __all__ = ["mark_interrupted", "submit", "wait"]
 
@@ -130,6 +139,14 @@ def _categories(conn: sqlite3.Connection, persona_id: str) -> dict[str, str]:
     }
 
 
+def _annotate_call(
+    system: str, user: str, schema: dict[str, Any], records: set[int], meta: Any
+) -> passes.Call:
+    return passes.Call(
+        "annotate", system, user, schema, "all", {}, None, frozenset(records), meta=meta
+    )
+
+
 def submit(
     conn: sqlite3.Connection,
     user_id: str,
@@ -190,6 +207,13 @@ def submit(
         "dropped_invalid": 0,
         "llm_calls": 0,
         "llm_calls_failed": 0,
+        "annotation_calls": 0,
+        "labels_created": 0,
+        "analyzers_proposed": 0,
+        "analyzers_accepted": 0,
+        "analyzers_rejected": 0,
+        "sandbox_errors": 0,
+        "skipped_sandbox_budget": 0,
     }
     limits = limiter.effective_limits(user_id)
     with transaction(conn):
@@ -209,14 +233,29 @@ def submit(
         counts["unmapped_categories"] = resolver.unmapped
         job_store.update_job(conn, job_id, counts=counts)
     calls: list[passes.Call] = []
+    authoring_estimate = 0
     if use_llm:
         describe = passes.describe_call(resolver.created)
-        calls = ([describe] if describe else []) + passes.build_calls(
-            batch,
-            _categories(conn, persona_id),
-            default_audience=persona["default_audience"],
-            decision_min_episodes=thresholds().analyzer_min_episodes,
+        min_eps = thresholds().analyzer_min_episodes
+        eligible = annotate.eligible_categories(conn, persona_id, batch, min_eps)
+        annotation = annotate.plan(
+            batch, eligible, annotate.load_vocabulary(conn, persona_id), _annotate_call
         )
+        calls = (
+            ([describe] if describe else [])
+            + annotation
+            + passes.build_calls(
+                batch,
+                _categories(conn, persona_id),
+                default_audience=persona["default_audience"],
+                decision_min_episodes=min_eps,
+            )
+        )
+        # One authoring call per category large enough (§7.4); a rough allowance.
+        per_cat: dict[str, int] = {}
+        for ep in batch.episodes:
+            per_cat[ep.category_id] = per_cat.get(ep.category_id, 0) + 1
+        authoring_estimate = AUTHORING_ESTIMATE * sum(n >= min_eps for n in per_cat.values())
     limiter.record_ingest(user_id, persona_id, len(episodes), nbytes)
     job = Job(job_id, user_id, persona_id, conn, use_llm, batch, counts, source=source)
     job.calls, job.stamps = calls, batch.stamps()
@@ -230,7 +269,7 @@ def submit(
     return {
         "job_id": job_id,
         "accepted": len(episodes),
-        "estimated_tokens": sum(c.estimated_tokens for c in calls),
+        "estimated_tokens": sum(c.estimated_tokens for c in calls) + authoring_estimate,
         "remaining_tokens": limiter.remaining_tokens(user_id, persona_id),
     }
 
@@ -325,26 +364,67 @@ async def _derive(job: Job) -> None:
     assert batch is not None
     persona = _persona(conn, pid)
     touched: list[str] = []
+    guard: BatchGuard | None = None
+    rare: RareWords | None = None
     try:
         calls = job.calls
         for call in calls:
             for i in call.records:
                 job.pending[i] = job.pending.get(i, 0) + 1
         job_store.update_job(conn, job.job_id, progress=1 / (len(calls) + 2), counts=counts)
-        # [M7c] Annotation (SPEC §7.3) goes here, before the passes; its calls cover the
-        # episodes they label.
-        # LLM phase: the description call, then the passes (§7.6). An LLM error stops this
-        # phase only.
+        if job.use_llm:
+            vocabulary = {
+                persona["display_name"],
+                *persona["audiences"],
+                *guard_vocabulary(conn, pid),
+            }
+            guard = passes.guard_for(batch, vocabulary)
+            rare = RareWords(batch.episodes)
+        # LLM phase: the description call and annotation (§7.3), then the passes (§7.6),
+        # rebuilt so that their prompts carry the labels. An LLM error stops this phase.
+        first = [c for c in calls if c.purpose in ("describe_categories", "annotate")]
+        old_passes = [c for c in calls if c.purpose not in ("describe_categories", "annotate")]
         if calls:
+            assert guard is not None and rare is not None
+            labeler = annotate.Labeler(conn, pid, guard, rare, annotate.load_vocabulary(conn, pid))
             try:
-                await _llm_calls(job, persona, touched)
+                if first:
+                    await _llm_calls(job, persona, touched, first, guard, labeler)
+                new_passes = old_passes
+                if any(c.purpose == "annotate" for c in first):
+                    new_passes = passes.build_calls(
+                        batch,
+                        _categories(conn, pid),
+                        default_audience=persona["default_audience"],
+                        decision_min_episodes=thresholds().analyzer_min_episodes,
+                    )
+                    for call in old_passes:
+                        for i in call.records:
+                            job.pending[i] -= 1
+                    for call in new_passes:
+                        for i in call.records:
+                            job.pending[i] = job.pending.get(i, 0) + 1
+                    job.calls = first + new_passes
+                if new_passes:
+                    await _llm_calls(job, persona, touched, new_passes, guard, labeler)
             except (SpendCap, RateLimited, LLMUnavailable) as exc:
                 job.stopped_by = exc
-        # [M7c] Analyzer authoring (SPEC §7.4) goes here; it sees processed episodes only.
+            finally:
+                lc = labeler.counts
+                counts["labels_created"] += lc.labels_created
+                counts["labels_dropped"] = counts.get("labels_dropped", 0) + lc.labels_dropped
+                counts["dropped_by_guard"] += lc.dropped_by_guard
+                counts["dropped_invalid"] += lc.invalid
+                counts["llm_calls_failed"] += lc.failed_calls
+
+        processed = batch.subset(set(job.remaining())) if job.stopped_by else batch
+        # Analyzer authoring and the hypothesis loop (§7.4), on processed episodes only.
+        if job.use_llm and job.stopped_by is None:
+            assert guard is not None and rare is not None
+            await _author(job, persona, processed, guard, rare)
 
         # The analyzers (always), over the processed episodes only: remaining episodes
         # reach analyzer state through their resend, so each is counted once.
-        processed = batch.subset(set(job.remaining())) if job.stopped_by else batch
         touched.extend(
             run_analyzers(
                 conn,
@@ -355,9 +435,42 @@ async def _derive(job: Job) -> None:
                 job_id=job.job_id,
             )
         )
+        touched.extend(
+            await llm_analyzers.run_active(
+                conn,
+                persona_id=pid,
+                user_id=job.user_id,
+                episodes=processed.episodes,
+                tz=persona["tz"],
+                counts=counts,
+                job_id=job.job_id,
+                guard=guard,
+            )
+        )
+        if job.use_llm and job.stopped_by is None:
+            assert guard is not None and rare is not None
+            touched.extend(
+                await write_notes(
+                    conn,
+                    persona_id=pid,
+                    user_id=job.user_id,
+                    episodes=processed.episodes,
+                    counts=counts,
+                    guard=guard,
+                    rare=rare,
+                    llm=get_llm(conn, pid),
+                    limiter=get_limiter(conn),
+                    job_id=job.job_id,
+                )
+            )
+        job_store.update_job(conn, job.job_id, counts=counts)
         if job.stopped_by is not None:
             raise job.stopped_by
     finally:
+        if guard is not None:
+            guard.clear()
+        if rare is not None:
+            rare.clear()
         if touched:
             # The claims are stored; a compaction problem must not fail the job (compaction
             # also runs on demand). Type only in the log: messages could quote claim text.
@@ -370,13 +483,42 @@ async def _derive(job: Job) -> None:
                 log.warning("compaction after job %s failed: %s", job.job_id, type(exc).__name__)
 
 
-async def _llm_calls(job: Job, persona: dict[str, Any], touched: list[str]) -> None:
+async def _author(
+    job: Job, persona: dict[str, Any], processed: Batch, guard: BatchGuard, rare: RareWords
+) -> None:
+    """One authoring round per triggered category (§7.4); needs the sandbox."""
+    conn, pid, counts = job.conn, job.persona_id, job.counts
+    items = [host_fields(ep, persona["tz"], {}) for ep in processed.episodes]
+    cats = authoring.triggered(items, thresholds().analyzer_min_episodes)
+    if not cats:
+        return
+    runner = llm_analyzers.SandboxRunner(conn, job.user_id, counts)
+    if not runner.available():
+        counts["sandbox_unavailable"] = counts.get("sandbox_unavailable", 0) + len(cats)
+        return
+    limiter = get_limiter(conn)
+    ctx = authoring.RoundContext(
+        conn, pid, job.user_id, counts, guard, rare, get_llm(conn, pid), limiter, runner
+    )
+    paths = {ep.category_id: ep.category for ep in processed.episodes}
+    max_analyzers = limiter.effective_limits(job.user_id).get("max_analyzers")
+    for cat_id in cats:
+        await authoring.author_round(ctx, cat_id, paths[cat_id], items, max_analyzers)
+    items.clear()
+
+
+async def _llm_calls(
+    job: Job,
+    persona: dict[str, Any],
+    touched: list[str],
+    calls: list[passes.Call],
+    guard: BatchGuard,
+    labeler: annotate.Labeler,
+) -> None:
     """Run the calls in order with budget checks, saturation and periodic flushes."""
     conn, pid, counts = job.conn, job.persona_id, job.counts
     assert job.batch is not None
     category_ids = category_ids_by_path(conn, pid)
-    vocabulary = {persona["display_name"], *persona["audiences"], *guard_vocabulary(conn, pid)}
-    guard = passes.guard_for(job.batch, vocabulary)
     llm = get_llm(conn, pid)
     limiter = get_limiter(conn)
     derive_counts = passes.DeriveCounts()
@@ -385,6 +527,7 @@ async def _llm_calls(job: Job, persona: dict[str, Any], touched: list[str]) -> N
     saturated: set[str] = set()
     skipped: set[int] = set()
     total = len(job.calls)
+    offset = len(job.calls) - len(calls)
 
     def finish(call: passes.Call) -> None:
         for i in call.records:
@@ -405,7 +548,7 @@ async def _llm_calls(job: Job, persona: dict[str, Any], touched: list[str]) -> N
         job_store.update_job(conn, job.job_id, counts=counts)
 
     try:
-        for n, call in enumerate(job.calls, start=1):
+        for n, call in enumerate(calls, start=1):
             audience = call.audiences[0] if call.purpose == "replies" else None
             if audience is not None and audience in saturated:
                 skipped.update(call.records)
@@ -427,6 +570,14 @@ async def _llm_calls(job: Job, persona: dict[str, Any], touched: list[str]) -> N
                 user=call.user,
                 schema=call.schema,
             )
+            if call.purpose == "annotate":
+                counts["annotation_calls"] += 1
+                with transaction(conn):
+                    labeler.apply(call.meta, result.data)
+                del result
+                finish(call)
+                job_store.update_job(conn, job.job_id, progress=(offset + n + 1) / (total + 2))
+                continue
             if call.purpose == "describe_categories":
                 described = passes.to_descriptions(call, result.data, guard, derive_counts)
                 del result
@@ -446,13 +597,12 @@ async def _llm_calls(job: Job, persona: dict[str, Any], touched: list[str]) -> N
             finish(call)
             if n % FLUSH_EVERY == 0:
                 flush()
-            job_store.update_job(conn, job.job_id, progress=(n + 1) / (total + 2))
+            job_store.update_job(conn, job.job_id, progress=(offset + n + 1) / (total + 2))
     finally:
         try:
             counts["skipped_saturated"] += len(skipped)
             flush()
         finally:
-            guard.clear()
             counts["dropped_by_guard"] += derive_counts.dropped_by_guard
             counts["dropped_invalid"] += derive_counts.invalid
             counts["llm_calls_failed"] += derive_counts.failed_calls

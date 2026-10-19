@@ -55,7 +55,15 @@ async def run(client, episodes, **kw):
     return out["job_id"], await call(client, "job_status", {"job_id": out["job_id"]})
 
 
+def quiet_m7c(fake_llm):
+    """Annotation, authoring and usage notes answer with nothing (tested elsewhere)."""
+    fake_llm.on("annotate", {"labels": [], "tags": []})
+    fake_llm.on("author_analyzers", {"hypotheses": []})
+    fake_llm.on("word_usage", {"note": ""})
+
+
 async def test_llm_passes_and_counts(client, conn, fake_llm):
+    quiet_m7c(fake_llm)
     fake_llm.on("replies", style_reply())
     fake_llm.on("statements", style_reply("Drinks only black coffee in the morning.", "food"))
     episodes = (
@@ -215,6 +223,7 @@ async def test_spend_cap_ends_job_partial(client, conn, fake_llm):
     def boom(call):
         raise SpendCap("monthly spend cap reached")
 
+    quiet_m7c(fake_llm)
     fake_llm.on("replies", boom)
     _, status = await run(client, calendar() + messages("work-slack"))
     assert status["status"] == "partial" and status["error_code"] == "spend_cap"

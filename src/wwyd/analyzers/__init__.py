@@ -6,9 +6,9 @@ Scope design (docs/habits.md): builtin rows are created lazily, one per (name, e
 A category-scoped builtin sees the job's processed episodes whose category is exactly its
 category (not the subtree), so every episode is counted by exactly one row per builtin and
 the claim lands in the episode's own category. Audience-scoped builtins (stylometry, M7b)
-get the episodes of one audience. LLM analyzers (M7c) are bound to a subtree and run in the
-sandbox; :func:`_run_llm_analyzers` is their hook and shares the validate → filter → merge
-path of :func:`_apply_output`.
+get the episodes of one audience. LLM analyzers are bound to a subtree and run in the sandbox
+(:mod:`wwyd.analyzers.llm`, awaited by the ingest job after :func:`run_analyzers`); they
+share the validate → filter → merge path of :meth:`_Run.apply_output`.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from collections.abc import Mapping, Sequence
 from datetime import tzinfo
 
 from wwyd.analyzers.builtin import BUILTINS, Builtin, Context, Item, host_fields
+from wwyd.analyzers.builtin.base import NO_AUDIENCE
 from wwyd.analyzers.claims import claim_key, upsert_keyed
 from wwyd.analyzers.contract import ContractError, Output, validate_output
 from wwyd.analyzers.keyfilter import TEXT, KeyFilter, TextStats
@@ -138,7 +139,15 @@ class _Run:
         if row["status"] != "active":
             self.bump("analyzers_skipped_disabled")
             return
-        ctx = Context(row["id"], builtin.scope_kind, scope_id, scope_path, self.tz, self.audiences)
+        ctx = Context(
+            row["id"],
+            builtin.scope_kind,
+            scope_id,
+            scope_path,
+            self.tz,
+            self.audiences,
+            conn=self.conn,
+        )
         try:
             output = builtin.run(items, ctx)
         except Exception:  # noqa: BLE001 - shipped code, but never let it end the job
@@ -181,13 +190,6 @@ class _Run:
         return first
 
 
-def _run_llm_analyzers(run: _Run, items: Sequence[Item]) -> None:
-    """Hook for active LLM analyzers (M7c): for each ``active`` ``origin = 'llm'`` row, feed
-    the processed episodes of its category subtree (host fields included) to the sandbox
-    and pass the parsed result to :meth:`_Run.apply_output` with the analyzer's declared key
-    classes; then render its ``anl:<id>`` claim. Nothing to do until M7c."""
-
-
 def run_analyzers(
     conn: sqlite3.Connection,
     *,
@@ -197,7 +199,7 @@ def run_analyzers(
     counts: dict[str, int],
     job_id: str | None = None,
 ) -> set[str]:
-    """Run the builtin (and active LLM) analyzers over the processed episodes of a job,
+    """Run the builtin analyzers over the processed episodes of a job,
     merge their state and re-render their keyed claims; returns the touched claim IDs."""
     for name in _COUNTERS:
         counts.setdefault(name, 0)
@@ -211,11 +213,17 @@ def run_analyzers(
     }
     by_category: dict[str, list[Item]] = defaultdict(list)
     by_audience: dict[str, list[Item]] = defaultdict(list)
+    default = conn.execute(
+        "SELECT id FROM audiences WHERE persona_id = ? AND is_default = 1", (persona_id,)
+    ).fetchone()
     for it in items:
         if it.episode.category_id in categories:
             by_category[it.episode.category_id].append(it)
-        if it.audience_id in run.audiences.values():
-            by_audience[it.audience_id].append(it)
+        # Audience-scoped builtins (style) read an episode that names no audience as one
+        # for the default audience, like the reply pass does (SPEC §7.6).
+        aud_id = it.audience_id if it.audience_id != NO_AUDIENCE else (default and default["id"])
+        if aud_id in run.audiences.values():
+            by_audience[aud_id].append(it)
     names = {v: k for k, v in run.audiences.items()}
     for builtin in BUILTINS.values():
         if builtin.scope_kind == "category":
@@ -239,5 +247,4 @@ def run_analyzers(
                     claim_category_id=claim_cat,
                     items=by_audience[aud_id],
                 )
-    _run_llm_analyzers(run, items)
     return run.touched

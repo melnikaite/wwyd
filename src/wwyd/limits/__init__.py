@@ -20,6 +20,7 @@ __all__ = [
     "estimate_cost",
     "get_gate",
     "get_limiter",
+    "sandbox_concurrency",
 ]
 
 # sqlite3.Connection does not support weak references; keyed by id() and holding the conn
@@ -59,3 +60,8 @@ def get_gate(defaults: LimitDefaults | None = None) -> LLMGate:
         d = defaults or _defaults
         _gate = LLMGate(d.llm_concurrency, d.llm_queue_timeout_s, d.llm_call_timeout_s)
     return _gate
+
+
+def sandbox_concurrency() -> int:
+    """The instance's ``sandbox_concurrency`` (global, SPEC §11)."""
+    return _defaults.sandbox_concurrency

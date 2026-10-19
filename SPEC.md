@@ -1,8 +1,8 @@
 # wwyd — "what would you do"
 
 Status: **approved** design (2026-10-18). Key decisions and their reasoning are in §17.
-Revised and approved 2026-10-19: episode records, organic categories, analyzers (D17–D22);
-code follows at M7 and implements the typed records of the 2026-10-18 design until then.
+Revised and approved 2026-10-19: episode records, organic categories, analyzers (D17–D22),
+implemented at M7 (7a–7c).
 Implementation progress is tracked in §16 and CHANGELOG.md.
 
 wwyd is an MCP server that holds one person's character and ways of acting: how they
@@ -60,7 +60,9 @@ These are the rules the whole design is checked against. Each one has a test (§
 writes in lowercase and uses often (≥ 5 episodes on ≥ 3 days): it can survive as a
 stylometry or analyzer state key. Mitigations: every derived claim starts `pending` for
 owner review, `get_analyzer` shows every state key, and the canary suite includes a
-lowercase-but-concentrated name (§13). Category paths are client-supplied labels like
+lowercase-but-concentrated name (§13). The same limit applies to the concentrated-word
+check on derived texts (§7.7): a lowercase name used often and on ≥ 3 days passes it.
+Category paths are client-supplied labels like
 audience names: they pass the guard's regex part, and keeping names out of them is the
 client's job (§4.4).
 
@@ -216,7 +218,7 @@ food  travel  money  health  family  hobbies  tech  other
 | `status` | `pending \| approved \| rejected \| archived` | `archived` is added for compaction |
 | `confidence` | 0..1 | |
 | `evidence` | object | aggregate only, see below |
-| `key` | string, nullable | stable key of an analyzer's claim: `builtin:<name>:<scope_id>` (builtin, §7.2) or `anl:<id>` (LLM analyzer, §7.4); unique per persona among non-archived claims |
+| `key` | string, nullable | stable key of an analyzer's claim: `builtin:<name>:<scope_id>[:<facet>]` (builtin, §7.2; a facet when one builtin renders several statements) or `anl:<id>` (LLM analyzer, §7.4); unique per persona among non-archived claims |
 | `origin` | `derived \| added \| imported \| owner` | |
 | `proposed_category` | path, nullable | |
 | `superseded_by` | `clm_…`, nullable | set on the loser of a contradiction |
@@ -229,14 +231,15 @@ food  travel  money  health  family  hobbies  tech  other
 {
   "sources": {"statement": 0, "reply": 0, "decision": 3, "analyzer": 212},
   "share": 0.87,
-  "period": "2026-04..2026-10",
-  "stats": {"n": {"2026-09": 40, "2026-10": 31}, "hits": {"2026-09": 35, "2026-10": 27}}
+  "period": "2026-09-01..2026-10-31",
+  "stats": {"n": 71, "hits": 62, "n_by_month": [40, 31], "hits_by_month": [35, 27]}
 }
 ```
 
 `sources` count the episodes behind the claim by class (§7.1; `analyzer` = episodes an
 analyzer counted) and are summed on merge; `period` widens. `stats` of a keyed claim holds
-the numbers its text was rendered from (for an LLM analyzer, `n` and `hits` per month); the
+the numbers its text was rendered from, as numbers or lists of numbers only (for an LLM
+analyzer `n`, `hits` and their per-month lists over `period`); the
 counters themselves live in `analyzer_state` (§4.6), so a re-run re-renders the keyed claim
 by code and never duplicates it. LLM-derived claims have `sources` and `period` only.
 
@@ -565,7 +568,10 @@ nothing to resume because nothing was saved (P1).
   started. The job then ends `partial` (`rate_limited` / `spend_cap`) with
   `remaining_records`; so does an LLM error raised by the backend (`llm_unavailable`
   included). A batch submitted with no budget left is still accepted: analyzers run and the
-  job ends `partial` before the first call. `failed` is kept for real errors. Sandbox time
+  job ends `partial` before the first call. Authoring and word-usage calls cover no
+  episodes, so one that does not fit or fails is skipped (`skipped_llm_budget`,
+  `authoring_failed`, `word_usage_failed`) and the job goes on. `failed` is kept for real
+  errors. Sandbox time
   has its own daily budget (§7.5); running out of it skips LLM analyzers for the rest of
   the job (`skipped_sandbox_budget`) without ending it `partial`.
 - **Saturation (replies only).** When 5 consecutive reply calls of one audience produce no
@@ -588,7 +594,10 @@ that runs over the processed episodes of each job and produces only mergeable co
 (D19). Two origins:
 - **builtin** — shipped, trusted code; runs natively in the host process. Rows are created
   lazily, one per (name, scope) the first time a job has episodes for that scope; they do
-  not count against `max_analyzers`.
+  not count against `max_analyzers`. A category-scoped builtin reads the episodes of exactly
+  its category (not the subtree), so each episode is counted once per builtin; an
+  audience-scoped one reads one audience, and episodes naming no audience count for the
+  default audience.
 - **llm** — written by the LLM (§7.4); runs only in the sandbox (§7.5).
 
 **Input.** The processed episodes of the job in the analyzer's scope, as JSON (on stdin in
@@ -726,7 +735,10 @@ stored, and dropped (counted as `dropped_by_guard`) if it contains:
    or a name: contains a digit or mixed case, or is capitalised in a non-initial position,
    and is not in the persona's own vocabulary (audience names, seeded and owner-created
    category names (§4.4), display name) or a small built-in list (weekdays, months,
-   languages).
+   languages);
+4. for label and tag names, analyzer sources and statements and word-usage notes also: a
+   word of the batch that occurs in < 5 episodes or on < 3 days (it may be a lowercase
+   name; residual risk in §2).
 
 Owner text is `said`; `situation`, `decision` and `where` are non-owner text (`decision`
 is the client's description, not the owner's words). The guard is deliberately crude and
@@ -1329,3 +1341,74 @@ Deviations and details recorded while implementing M2–M6:
   covers the long part. Claims are shown under short labels (`c1`, `c2`, …) and mapped back
   to IDs in post-processing (`used_claims`, `needs[].why`): claim IDs cost ~10 output
   tokens each, and output tokens dominate latency on small local models.
+
+Deviations and details recorded while implementing M7:
+
+- **Preparation at submit.** Episode categories are resolved and created in `submit`, in
+  the job row's transaction, because `estimated_tokens` depends on the call list. The
+  `category_create` change carries the `job_id`. The description call is the job's first
+  LLM call: budgeted, it covers no episodes, never overwrites a non-empty description
+  (≤ 200 chars, guarded); a backend error ends the job `partial` with the categories kept.
+- **Episode classes.** `decision` without `situation` (a self-describing choice) goes to
+  the decision pass; with `said` it is also a statement. The job counter `episodes` is
+  `{total, statement, reply, decision}`. Pass grouping: statements and decisions by
+  (audience, category), replies by audience with the reply's `situation` cut to 600 chars.
+- **Category creation.** All-or-nothing per path (missing parents and leaf together). A
+  path matching the guard's regex part is never created (counted unmapped), nor one an
+  alias would push deeper than 3 levels. Normalisation trims whitespace around segments;
+  an invalid path is rejected, never truncated. A model-chosen category outside the call's
+  subtrees becomes `proposed_category`. Undoing `category_create` checks live state
+  (conflict on claims, foreign sub-categories or LLM analyzers) rather than change order.
+- **Builtin state and claims.** State keys hold audience IDs (renames keep state), weekday
+  keys `mon`…`sun`; `time_activity` stores `wd_hour` and `audience_weekday` (whole hours) to
+  stay within 200 keys per metric and month; every builtin has a `days` metric for the
+  period. Facets: `time_activity` `:hours`, `:slots`, `:weekends`; `time_duration`
+  `:length`, `:latency:<audience_id>`; `time_gaps` none. An interval on a reply is
+  received → replied (latency); other intervals of 0–8 h feed lengths and gaps; gaps are
+  computed within one job. Evidence is replaced from state on every run. Weakening: a
+  pending claim is archived (applied `decay` change, reason `analyzer_weakened`); an
+  approved one keeps its text and gets one proposed archive; an owner-edited text is never
+  re-rendered.
+- **Analyzer tools.** Builtins can only be `active` or `disabled`; `retired` is final for
+  LLM analyzers. `list_analyzers(scope)` matches a category path and an audience name;
+  `get_analyzer` also returns `claim_ids`. For LLM analyzers `failures` counts consecutive
+  failed runs; for builtins it is cumulative.
+- **Sandbox.** The helper module and the analyzer source are passed as argv strings to a
+  `-c` driver that builds `wwyd_helpers` in memory, so changing the helpers needs no asset
+  rebuild; the guest sees `sys.argv == ["-c"]`. Guest flags `-S -B -s` (`-I` would ignore
+  `PYTHONHOME`). The stdlib subset has 69 modules (no zoneinfo, socket, subprocess,
+  ctypes). The assets are in the sdist too, since `uv build` builds the wheel from it.
+  Measured on Apple M-series: first compile 0.8 s, cached load 8 ms, trivial run 32 ms;
+  the wheel grows by 3.1 MB.
+- **Stylometry.** Keyness is Dunning's log-likelihood (G² ≥ 6.63, ≥ 5 uses) against all
+  other audiences, so a single audience has no favourite words. Percentiles are the upper
+  edge of the histogram bucket. The claim needs ≥ 30 messages over ≥ 3 weeks and one
+  rule-like part with share ≥ 0.75, names ≤ 5 favourite words, and its share is the lowest
+  part's. In `predict`, words come from the state behind the approved claim's key (only
+  those still in the text when the owner edited it); "rarely ends with a period" is
+  `1 − period_share ≥ 0.8`; acronyms and a lone "I" are not lowercased; the rules run after
+  the shorten re-ask, whose failure keeps the original.
+- **Annotation and authoring.** A category is annotated only with ≥ `analyzer_min_episodes`
+  episodes of its own in the job or an active LLM analyzer on it or an ancestor (≤ 60 label
+  names per category and field). The authoring trigger counts a category's own episodes;
+  the analyzer reads the subtree, and the test uses its timed episodes. Acceptance also
+  needs a non-empty holdout; hypotheses beyond the `max_analyzers` capacity are dropped
+  before testing. LLM analyzer output keeps only `n`, `hits`, `base_n`, `base_hits` under
+  `_`; the row's `name` is the template cut to 200 chars. Its claim covers the 12 months to
+  the latest month with data and weakens when the last 3 months hold ≥ 10 samples with a
+  share below 0.75.
+- **Word-usage notes.** The last noted favourite-word set is the metric `noted` of a
+  lazily created builtin row `word_usage` per audience (disabling it turns notes off).
+- **Category upkeep.** The nightly merge looks at episode-created categories since
+  `compaction_runs.last_nightly_at`; two seed or owner categories are never merged
+  automatically, and between episode categories the newer goes into the older. A split
+  keeps keyed claims in the parent, takes ≤ 200 claims per call, discards an invalid
+  grouping whole and is skipped when it would exceed `max_categories`. Step failures are
+  counted in `skipped_steps`, never fail the run. Undoing a merge recreates the categories
+  with their original IDs.
+- **Export.** Keyed-claim keys are exported in a portable form (`{category:<path>}`,
+  `{audience:<name>}`, `{analyzer:<index>}`) and mapped back to the target's IDs on import;
+  an unresolvable key is dropped (`keys_dropped`). A `merge` import replaces an existing
+  analyzer's state (adding would double-count); unknown builtins and scopes are skipped and
+  counted; new LLM analyzers beyond `max_analyzers` are skipped. Category paths in the
+  schema accept Unicode; the importer requires normalised paths.

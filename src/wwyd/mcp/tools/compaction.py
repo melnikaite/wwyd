@@ -15,7 +15,9 @@ from wwyd.store import changes as store
 if TYPE_CHECKING:
     from wwyd.mcp.server import WwydServer
 
-Step = Literal["dedupe", "contradictions", "decay", "budget", "purge"]
+Step = Literal[
+    "dedupe", "contradictions", "decay", "budget", "purge", "category_merge", "category_split"
+]
 State = Literal["applied", "proposed", "dismissed", "undone", "expired"]
 Op = Literal[
     "merge",
@@ -25,8 +27,10 @@ Op = Literal[
     "archive_budget",
     "purge",
     "restore",
+    "category_create",
     "category_merge",
     "category_rename",
+    "category_split",
 ]
 
 
@@ -46,9 +50,11 @@ def register(server: WwydServer) -> None:
         ] = None,
     ) -> dict[str, Any]:
         """Consolidate claims: merge duplicates, resolve contradictions, decay stale claims,
-        enforce the size budget, purge claims archived over 30 days ago. Changes to approved
-        claims come back as proposed (approve them with review_claims). With apply=false
-        nothing is written and borderline pairs are only counted (judge_pending)."""
+        enforce the size budget, purge claims archived over 30 days ago, merge synonym categories
+        and split oversized ones (both applied automatically, undoable with undo_change).
+        Changes to approved claims come back as proposed (approve them with review_claims).
+        With apply=false nothing is written and no LLM is called: borderline pairs are
+        counted (judge_pending) and category candidates listed (category_pending)."""
         return await run_compact(server.conn, persona_id(), apply=apply, steps=steps)
 
     @server.scoped_tool(owner, read_only=True)

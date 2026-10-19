@@ -68,6 +68,31 @@ First public release.
   `saturated_audiences`). Notes and decisions are never skipped.
 - `ingest_raw` optional `source` with a per-source timestamp watermark
   (`skipped_seen`); new owner tools `list_sources` and `reset_source` (27 tools).
+- M7 (SPEC D17–D22):
+  - Episodes: one `ingest_raw` shape `{when, where, audience, category, situation,
+    decision, said}` for any data source; only `said` counts as the owner's words.
+  - Organic categories: unknown episode paths are created within `max_categories` and
+    `new_categories_per_job` (else counted in `unmapped_categories`), described by one
+    batched LLM call and undoable; renames and merges leave aliases that keep routing
+    episodes; nightly `category_merge` (synonyms, also across languages) and
+    `category_split` apply automatically with undo; `list_categories` shows aliases.
+  - Analyzers with mergeable counters in `analyzer_state`: builtins `time_activity`,
+    `time_duration`, `time_gaps`, `stylometry` and word-usage notes; host-side output
+    contract and key filter; owner tools `list_analyzers`, `get_analyzer`,
+    `update_analyzer` (30 tools).
+  - A sandbox for LLM-written analyzers: wasmtime running CPython 3.15 for WASI, shipped in
+    the wheel and built by `scripts/build_sandbox.py`; fuel, epoch, memory and output
+    limits; CI runs its isolation tests on Linux, macOS and Windows.
+  - Annotation (the LLM labels distinct values, code counts) and LLM analyzers proposed as
+    hypotheses, tested on older episodes with a recent holdout, a binomial test and
+    Benjamini–Hochberg; rejected ones are kept as negative memory.
+  - Style in `predict`: replies get the audience's approved stylometry parameters and
+    deterministic post-processing (lowercase start, no final period, one shorten re-ask).
+  - Per-user limits `max_categories`, `new_categories_per_job`, `max_analyzers`,
+    `sandbox_cpu_seconds_per_day`; instance `sandbox_concurrency`; config
+    `analyzer_min_episodes`, `split_threshold`.
+  - Export format: category aliases and labels, analyzers with their state, portable
+    keyed-claim keys.
 
 ### Changed
 
@@ -79,6 +104,16 @@ First public release.
 - Ingest jobs no longer fail with `spend_cap` / `rate_limited` / `llm_unavailable` after
   the detectors ran: they end `partial` and keep the claims derived so far (migration
   `0007_ingest_progress`).
+- **Breaking:** `ingest_raw` takes `episodes` instead of typed `records`; the job counter
+  `episodes` replaces `records` (migrations `0008_episodes`, `0009_analyzers`).
+- Habit detectors became builtin analyzers whose counters accumulate across jobs, so small
+  batches add to a habit until it passes the thresholds.
+- Category paths accept Unicode letters (NFKC, casefolded).
+
+### Removed
+
+- The typed ingest records `message`, `call_transcript`, `calendar_event`, `decision` and
+  `note`.
 
 ### Fixed
 

@@ -238,6 +238,7 @@ def answer_user(
     facts: list[dict[str, str | None]],
     kind: str,
     situation: str,
+    style: str | None = None,
 ) -> str:
     claim_block = "\n".join(claims) if claims else "(none)"
     fact_block = (
@@ -251,6 +252,5 @@ def answer_user(
         f"Talking to: {audience_line}\n"
         f"Claims:\n{claim_block}\n"
         f"Facts:{fact_block}\n"
-        f"Kind: {kind}\n"
-        f"Situation: {situation}"
+        f"Kind: {kind}\n" + (f"{style}\n" if style else "") + f"Situation: {situation}"
     )

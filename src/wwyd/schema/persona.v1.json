@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/melnikaite/wwyd/main/schema/persona.v1.json",
   "title": "wwyd persona export, version 1",
-  "description": "One persona: audiences, categories and claims (SPEC section 4.7). Excludes LLM keys, limits, audit, change log and auth data. Archived and rejected claims are included with their status. Claim `visibility` is `owner_only` or `shared`; importers also accept the legacy values `audiences` and `anyone`, which wwyd normalises to `shared` before validating against this schema.",
+  "description": "One persona: audiences, categories (with aliases and labels), analyzers with their state, and claims (SPEC section 4.7). Excludes LLM keys, limits, audit, change log and auth data. Archived and rejected claims are included with their status. Claim `visibility` is `owner_only` or `shared`; importers also accept the legacy values `audiences` and `anyone`, which wwyd normalises to `shared` before validating against this schema.",
   "type": "object",
   "additionalProperties": false,
   "required": ["format", "version", "persona", "audiences", "categories", "claims"],
@@ -41,26 +41,49 @@
         "required": ["path"],
         "properties": {
           "path": {"$ref": "#/$defs/category_path"},
-          "description": {"type": "string", "maxLength": 1000}
+          "description": {"type": "string", "maxLength": 1000},
+          "origin": {"enum": ["seed", "owner", "episode"]}
         }
       }
     },
-    "claims": {
+    "category_aliases": {
       "type": "array",
-      "maxItems": 20000,
-      "items": {"$ref": "#/$defs/claim"}
-    }
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "category"],
+        "properties": {
+          "path": {"$ref": "#/$defs/category_path"},
+          "category": {"$ref": "#/$defs/category_path"}
+        }
+      }
+    },
+    "category_labels": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "field", "label"],
+        "properties": {
+          "category": {"$ref": "#/$defs/category_path"},
+          "field": {"enum": ["decision", "situation", "tag"]},
+          "label": {"type": "string", "minLength": 1, "maxLength": 40, "pattern": "^[^/\\s]+$"}
+        }
+      }
+    },
+    "analyzers": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/analyzer"}},
+    "claims": {"type": "array", "maxItems": 20000, "items": {"$ref": "#/$defs/claim"}}
   },
   "$defs": {
-    "timestamp": {
-      "type": "string",
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
-    },
+    "timestamp": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"},
     "nullable_timestamp": {"anyOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]},
     "audience_name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$"},
     "category_path": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9_-]{0,39}(/[a-z0-9][a-z0-9_-]{0,39}){0,2}$"
+      "description": "Normalised path (SPEC 4.4): NFKC, casefolded (no upper case) segments of Unicode letters, digits, '-' and '_' starting with a letter or digit, at most 40 characters each, at most 3 levels. The importer checks the full rule.",
+      "pattern": "^[^/\\sA-Z]{1,40}(/[^/\\sA-Z]{1,40}){0,2}$"
     },
     "evidence": {
       "type": "object",
@@ -79,9 +102,7 @@
         "stats": {
           "type": "object",
           "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
-          "additionalProperties": {
-            "anyOf": [{"type": "number"}, {"type": "array", "items": {"type": "number"}}]
-          }
+          "additionalProperties": {"anyOf": [{"type": "number"}, {"type": "array", "items": {"type": "number"}}]}
         }
       }
     },
@@ -91,9 +112,7 @@
       "required": ["kind", "category", "text"],
       "properties": {
         "id": {"type": "string", "pattern": "^clm_[a-z0-9]{1,64}$"},
-        "kind": {
-          "enum": ["trait", "preference", "habit", "decision_rule", "style", "boundary"]
-        },
+        "kind": {"enum": ["trait", "preference", "habit", "decision_rule", "style", "boundary"]},
         "category": {"$ref": "#/$defs/category_path"},
         "text": {"type": "string", "minLength": 1, "maxLength": 500},
         "audiences": {
@@ -111,19 +130,82 @@
         "status": {"enum": ["pending", "approved", "rejected", "archived"]},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "evidence": {"$ref": "#/$defs/evidence"},
-        "key": {"type": ["string", "null"], "maxLength": 128},
+        "key": {
+          "type": ["string", "null"],
+          "maxLength": 512,
+          "description": "Analyzer key. Segments are ':'-separated; IDs are written as references: {category:<path>}, {audience:<name>}, {analyzer:<index in analyzers>}, e.g. builtin:time_gaps:{category:work/meetings} or anl:{analyzer:0}. The importer maps them to its own IDs and drops keys it cannot resolve."
+        },
         "origin": {"enum": ["derived", "added", "imported", "owner"]},
         "proposed_category": {"anyOf": [{"$ref": "#/$defs/category_path"}, {"type": "null"}]},
         "superseded_by": {"type": ["string", "null"], "pattern": "^clm_[a-z0-9]{1,64}$"},
-        "archive_reason": {
-          "enum": ["merged", "superseded", "decayed", "budget", "owner", null]
-        },
+        "archive_reason": {"enum": ["merged", "superseded", "decayed", "budget", "owner", null]},
         "created_at": {"$ref": "#/$defs/timestamp"},
         "updated_at": {"$ref": "#/$defs/timestamp"},
         "reviewed_at": {"$ref": "#/$defs/nullable_timestamp"},
         "archived_at": {"$ref": "#/$defs/nullable_timestamp"},
         "last_evidence_at": {"$ref": "#/$defs/nullable_timestamp"}
       }
+    },
+    "analyzer_state": {
+      "type": "object",
+      "description": "Output contract (SPEC 7.2): {metric: {\"YYYY-MM\": {key: number}}}; the importer also checks limits and keys.",
+      "maxProperties": 20,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,63}$"},
+      "additionalProperties": {
+        "type": "object",
+        "propertyNames": {"pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"},
+        "additionalProperties": {"type": "object", "additionalProperties": {"type": "number"}}
+      }
+    },
+    "analyzer": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["origin", "name", "scope", "status"],
+          "properties": {
+            "origin": {"const": "builtin"},
+            "name": {"type": "string", "minLength": 1, "maxLength": 200},
+            "scope": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 1,
+              "additionalProperties": false,
+              "properties": {
+                "category": {"$ref": "#/$defs/category_path"},
+                "audience": {"$ref": "#/$defs/audience_name"}
+              }
+            },
+            "status": {"enum": ["candidate", "active", "disabled", "retired"]},
+            "state": {"$ref": "#/$defs/analyzer_state"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["origin", "name", "scope", "status", "statement_template", "kind", "source"],
+          "properties": {
+            "origin": {"const": "llm"},
+            "name": {"type": "string", "minLength": 1, "maxLength": 200},
+            "scope": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 1,
+              "additionalProperties": false,
+              "properties": {
+                "category": {"$ref": "#/$defs/category_path"},
+                "audience": {"$ref": "#/$defs/audience_name"}
+              }
+            },
+            "status": {"enum": ["candidate", "active", "disabled", "retired"]},
+            "state": {"$ref": "#/$defs/analyzer_state"},
+            "statement_template": {"type": "string", "maxLength": 500},
+            "kind": {"enum": ["trait", "preference", "habit", "decision_rule", "style", "boundary"]},
+            "source": {"type": "string", "maxLength": 20480},
+            "claim": {"type": ["string", "null"], "maxLength": 64}
+          }
+        }
+      ]
     }
   }
 }

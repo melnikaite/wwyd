@@ -34,7 +34,15 @@ CONTEXT_CHARS = 600  # a reply's situation is context only: kept short
 # before a call whose estimate does not fit the remaining daily budget, so the cap can be
 # overrun by at most one call's actual excess over its estimate.
 CHARS_PER_TOKEN = 3  # conservative for Cyrillic and most non-English text
-OUTPUT_TOKENS = {"replies": 800, "statements": 1000, "decisions": 1000, "describe_categories": 600}
+OUTPUT_TOKENS = {
+    "replies": 800,
+    "statements": 1000,
+    "decisions": 1000,
+    "describe_categories": 600,
+    "annotate": 1200,
+    "author_analyzers": 4000,
+    "word_usage": 300,
+}
 MAX_CLAIMS_PER_CALL = 8
 MAX_DESCRIPTION_CHARS = 200
 DEDUPE_JACCARD = 0.6
@@ -247,6 +255,8 @@ class Call:
     allowed: frozenset[str] = frozenset()
     # describe_categories: path -> category ID of the categories to describe.
     targets: dict[str, str] = field(default_factory=dict)
+    # annotate: what the call labels (an ``annotate.Annotation``; in memory only).
+    meta: Any = None
 
     @property
     def estimated_tokens(self) -> int:
@@ -269,6 +279,14 @@ def _month_period(stamps: Iterable[datetime | None]) -> str | None:
 
 def _one_line(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _label_note(ep: Any) -> str:
+    """The episode's annotation (SPEC §7.3) for the pass prompts: guarded names only."""
+    parts = [f"{k}={v}" for k, v in sorted(ep.labels.items())]
+    if ep.tags:
+        parts.append("tags=" + ",".join(ep.tags))
+    return f" [labels: {'; '.join(parts)}]" if parts else ""
 
 
 def subtree(categories: dict[str, str], roots: Iterable[str]) -> frozenset[str]:
@@ -354,7 +372,7 @@ def build_calls(
     groups: dict[tuple[str, str], list[Item]] = defaultdict(list)
     for ep in batch.episodes:
         if ep.is_statement:
-            seg = f"NOTE: {_one_line(ep.said or '')}"
+            seg = f"NOTE: {_one_line(ep.said or '')}{_label_note(ep)}"
             groups[(ep.audience or "", ep.category)].append(
                 (ep.start, seg, "statement", ep.index, ep.category)
             )
@@ -373,7 +391,7 @@ def build_calls(
     for ep in batch.episodes:
         if ep.is_reply:
             context = _one_line(ep.situation or "")[:CONTEXT_CHARS]
-            seg = f"OTHER: {context}\nOWNER: {_one_line(ep.said or '')}"
+            seg = f"OTHER: {context}\nOWNER: {_one_line(ep.said or '')}{_label_note(ep)}"
             replies[ep.audience or default_audience].append(
                 (ep.start, seg, "reply", ep.index, ep.category)
             )
@@ -395,7 +413,7 @@ def build_calls(
             continue
         where = f" ({_one_line(ep.where)})" if ep.where else ""
         situation = f"SITUATION{where}: {_one_line(ep.situation)} " if ep.situation else ""
-        seg = f"{situation}CHOICE: {_one_line(ep.decision)}"
+        seg = f"{situation}CHOICE: {_one_line(ep.decision)}{_label_note(ep)}"
         decisions[(ep.audience or "", ep.category)].append(
             (ep.start, seg, "decision", ep.index, ep.category)
         )

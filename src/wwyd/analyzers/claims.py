@@ -37,9 +37,14 @@ def claim_key(name: str, scope_id: str, facet: str) -> str:
     return f"builtin:{name}:{scope_id}" + (f":{facet}" if facet else "")
 
 
-def _evidence(spec: ClaimSpec) -> dict:
+def anl_key(analyzer_id: str) -> str:
+    """The key of an LLM analyzer's claim (SPEC §4.5)."""
+    return f"anl:{analyzer_id}"
+
+
+def _evidence(spec: ClaimSpec, with_share: bool = True) -> dict:
     ev: dict = {"sources": {"analyzer": int(spec.samples)}, "stats": spec.stats}
-    if spec.text is not None or spec.share:
+    if with_share and (spec.text is not None or spec.share):
         ev["share"] = round(min(max(spec.share, 0.0), 1.0), 3)
     if spec.period is not None:
         ev["period"] = f"{spec.period[0].isoformat()}..{spec.period[1].isoformat()}"
@@ -54,8 +59,13 @@ def upsert_keyed(
     spec: ClaimSpec,
     category_id: str,
     job_id: str | None = None,
+    with_share: bool = True,
 ) -> tuple[Outcome, str | None]:
-    """Merge one rendered facet into its keyed claim; the caller holds the transaction."""
+    """Merge one rendered facet into its keyed claim; the caller holds the transaction.
+
+    Used for ``builtin:`` keys and for LLM analyzers' ``anl:<id>`` keys alike (same
+    weakening rules). ``with_share=False`` leaves ``share`` out of the evidence (usage
+    notes, which have no share)."""
     row = conn.execute(
         "SELECT id, status, origin FROM claims"
         " WHERE persona_id = ? AND key = ? AND status <> 'archived'",
@@ -66,7 +76,7 @@ def upsert_keyed(
     text = spec.text
     if text is not None and (len(text) > 500 or find_identifier(text) is not None):
         text = None  # rendered text holds numbers and paths only; never store a failing one
-    evidence = dumps(_evidence(spec))
+    evidence = dumps(_evidence(spec, with_share))
     ts = now_iso()
 
     if text is None:
@@ -126,7 +136,7 @@ def upsert_keyed(
         visibility="shared",
         status="pending",
         confidence=spec.confidence,
-        evidence=_evidence(spec),
+        evidence=_evidence(spec, with_share),
         origin="derived",
         key=key,
         last_evidence_at=ts,

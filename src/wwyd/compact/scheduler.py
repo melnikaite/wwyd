@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""In-process nightly scheduler (SPEC §10): decay, budget and purge at 03:30 persona-local."""
+"""In-process nightly scheduler (SPEC §10): decay, budget, purge and the category steps
+(§10.6) at 03:30 persona-local."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from wwyd.compact.categories import CATEGORY_STEPS
 from wwyd.compact.constants import NIGHTLY_HOUR, NIGHTLY_MINUTE, SCHEDULER_TICK_SECONDS
 from wwyd.compact.maintenance import run_steps
 from wwyd.compact.run import Run
@@ -54,31 +56,65 @@ def last_due(now: datetime, timezone: str) -> datetime:
     return target.astimezone(UTC)
 
 
-def run_nightly(conn: sqlite3.Connection, now: datetime | None = None) -> list[str]:
-    """Run nightly maintenance for every persona whose local 03:30 passed since its last
-    run. Returns the persona IDs that ran. One persona's failure does not stop the rest."""
-    now = now or datetime.now(UTC)
-    ran: list[str] = []
+def _due(conn: sqlite3.Connection, now: datetime) -> list[sqlite3.Row]:
     rows = conn.execute(
         "SELECT p.id, p.timezone, r.last_nightly_at FROM personas p"
         " LEFT JOIN compaction_runs r ON r.persona_id = p.id ORDER BY p.id"
     ).fetchall()
-    for row in rows:
-        due = last_due(now, row["timezone"])
-        if row["last_nightly_at"] and parse_ts(row["last_nightly_at"]) >= due:
-            continue
+    return [
+        r
+        for r in rows
+        if not (
+            r["last_nightly_at"] and parse_ts(r["last_nightly_at"]) >= last_due(now, r["timezone"])
+        )
+    ]
+
+
+def _maintain(conn: sqlite3.Connection, persona_id: str, now: datetime) -> None:
+    try:
+        run_steps(Run(conn, persona_id, apply=True, now=now), ("decay", "budget", "purge"))
+        for hook in list(_hooks):
+            hook(conn, persona_id, now)
+    except Exception as exc:  # noqa: BLE001 - keep the scheduler alive
+        log.warning("nightly compaction failed for %s: %s", persona_id, type(exc).__name__)
+
+
+def _mark(conn: sqlite3.Connection, persona_id: str, now: datetime) -> None:
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO compaction_runs(persona_id, last_nightly_at) VALUES (?, ?)"
+            " ON CONFLICT(persona_id) DO UPDATE SET last_nightly_at = excluded.last_nightly_at",
+            (persona_id, format_ts(now)),
+        )
+
+
+def run_nightly(conn: sqlite3.Connection, now: datetime | None = None) -> list[str]:
+    """Run nightly maintenance (decay, budget, purge, hooks) for every persona whose local
+    03:30 passed since its last run. Returns the persona IDs that ran. One persona's
+    failure does not stop the rest. The LLM category steps run in :func:`run_nightly_async`."""
+    now = now or datetime.now(UTC)
+    ran: list[str] = []
+    for row in _due(conn, now):
+        _maintain(conn, row["id"], now)
+        _mark(conn, row["id"], now)
+        ran.append(row["id"])
+    return ran
+
+
+async def run_nightly_async(conn: sqlite3.Connection, now: datetime | None = None) -> list[str]:
+    """:func:`run_nightly` plus the category steps (SPEC §10.6), which run before the
+    persona's ``last_nightly_at`` moves (it is their "since the previous run" watermark)."""
+    from wwyd.compact.run import compact
+
+    now = now or datetime.now(UTC)
+    ran: list[str] = []
+    for row in _due(conn, now):
+        _maintain(conn, row["id"], now)
         try:
-            run_steps(Run(conn, row["id"], apply=True, now=now), ("decay", "budget", "purge"))
-            for hook in list(_hooks):
-                hook(conn, row["id"], now)
-        except Exception as exc:  # noqa: BLE001 - keep the scheduler alive
-            log.warning("nightly compaction failed for %s: %s", row["id"], type(exc).__name__)
-        with transaction(conn):
-            conn.execute(
-                "INSERT INTO compaction_runs(persona_id, last_nightly_at) VALUES (?, ?)"
-                " ON CONFLICT(persona_id) DO UPDATE SET last_nightly_at = excluded.last_nightly_at",
-                (row["id"], format_ts(now)),
-            )
+            await compact(conn, row["id"], apply=True, steps=CATEGORY_STEPS, now=now)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("nightly category upkeep failed for %s: %s", row["id"], type(exc).__name__)
+        _mark(conn, row["id"], now)
         ran.append(row["id"])
     return ran
 
@@ -87,7 +123,7 @@ async def scheduler_task(conn: sqlite3.Connection) -> None:
     """Long-running coroutine for the HTTP app lifespan; cancel it on shutdown."""
     while True:
         try:
-            run_nightly(conn)
+            await run_nightly_async(conn)
         except Exception as exc:  # noqa: BLE001
             log.warning("nightly scheduler tick failed: %s", type(exc).__name__)
         await asyncio.sleep(SCHEDULER_TICK_SECONDS)

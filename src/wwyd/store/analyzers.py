@@ -71,6 +71,77 @@ def record_run(
     )
 
 
+DISABLE_AFTER = 3  # consecutive failed runs of an LLM analyzer (SPEC §7.4 step 5)
+
+
+def record_llm_run(
+    conn: sqlite3.Connection, analyzer_id: str, *, failed: bool, claim_id: str | None = None
+) -> bool:
+    """Count an LLM analyzer run. For LLM analyzers ``failures`` is the number of
+    *consecutive* failed runs (a successful run resets it); the third disables the analyzer.
+    Returns True when this run disabled it."""
+    if not failed:
+        conn.execute(
+            "UPDATE analyzers SET runs = runs + 1, failures = 0, last_run_at = ?,"
+            " claim_id = COALESCE(?, claim_id) WHERE id = ?",
+            (now_iso(), claim_id, analyzer_id),
+        )
+        return False
+    conn.execute(
+        "UPDATE analyzers SET runs = runs + 1, failures = failures + 1, last_run_at = ?"
+        " WHERE id = ?",
+        (now_iso(), analyzer_id),
+    )
+    row = conn.execute(
+        "SELECT failures, status FROM analyzers WHERE id = ?", (analyzer_id,)
+    ).fetchone()
+    if row["failures"] >= DISABLE_AFTER and row["status"] == "active":
+        conn.execute("UPDATE analyzers SET status = 'disabled' WHERE id = ?", (analyzer_id,))
+        return True
+    return False
+
+
+def insert_llm(
+    conn: sqlite3.Connection,
+    persona_id: str,
+    *,
+    category_id: str,
+    statement_template: str,
+    kind: str,
+    source: str,
+    status: str,
+) -> str:
+    """Store an authored hypothesis: ``active`` with its (guarded) source, or ``retired``
+    with its statement only (negative memory, SPEC §7.4 step 4)."""
+    analyzer_id = new_id("anl")
+    conn.execute(
+        "INSERT INTO analyzers(id, persona_id, scope_kind, scope_id, origin, name,"
+        " statement_template, kind, source, status, created_at)"
+        " VALUES (?, ?, 'category', ?, 'llm', ?, ?, ?, ?, ?, ?)",
+        (
+            analyzer_id,
+            persona_id,
+            category_id,
+            statement_template[:200],
+            statement_template,
+            kind,
+            source if status != "retired" else "",
+            status,
+            now_iso(),
+        ),
+    )
+    return analyzer_id
+
+
+def count_llm(conn: sqlite3.Connection, persona_id: str) -> int:
+    """LLM analyzers counting against ``max_analyzers`` (retired ones excluded)."""
+    return conn.execute(
+        "SELECT count(*) FROM analyzers WHERE persona_id = ? AND origin = 'llm'"
+        " AND status <> 'retired'",
+        (persona_id,),
+    ).fetchone()[0]
+
+
 def _public(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],

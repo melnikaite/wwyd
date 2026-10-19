@@ -147,7 +147,12 @@ def _persona_row(conn: sqlite3.Connection, persona_id: str) -> sqlite3.Row:
 
 
 def wipe_persona_content(conn: sqlite3.Connection, persona_id: str) -> None:
-    """Delete claims, categories, audiences and changes of a persona (inside a transaction)."""
+    """Delete claims, categories (with aliases and labels), analyzers (with their state),
+    audiences and changes of a persona (inside a transaction). The persona row stays, so
+    ON DELETE CASCADE from it never fires: every table is cleared explicitly."""
+    conn.execute("DELETE FROM analyzers WHERE persona_id = ?", (persona_id,))  # state cascades
+    conn.execute("DELETE FROM category_aliases WHERE persona_id = ?", (persona_id,))
+    conn.execute("DELETE FROM category_labels WHERE persona_id = ?", (persona_id,))
     conn.execute("DELETE FROM claims WHERE persona_id = ?", (persona_id,))
     conn.execute("DELETE FROM changes WHERE persona_id = ?", (persona_id,))
     conn.execute("DELETE FROM audiences WHERE persona_id = ?", (persona_id,))

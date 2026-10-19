@@ -156,7 +156,21 @@ numbers, URLs or handles.
 
 Returns `{categories: [...]}`, the category tree (paths such as `work/meetings`, depth <= 3)
 with descriptions, `claim_count` (claims directly in the node) and `total_claim_count`
-(including sub-categories). `upsert_category {path, description?, rename_to?}` creates or renames one.
+(including sub-categories), and `aliases`: old paths that still route here.
+`upsert_category {path, description?, rename_to?}` creates or renames one; a rename leaves
+every old path of the moved subtree as an alias, so episodes sent with the old path keep
+landing in the right place. `merge_categories {from, into}` moves the claims, analyzers and
+analyzer state of `from` (with sub-categories) into `into`, and the `from` paths become
+aliases. Creating a real category at an alias path drops the alias.
+
+The nightly run (and `compact` with `steps: ["category_merge", "category_split"]`) keeps
+the tree tidy on its own: it merges synonym categories created since the previous night
+(`films` / `movies` / `кино`; an episode-created category always merges into a seeded or
+owner-created one, never the reverse) and splits a category with more than 20 claims into
+2-5 sub-categories. Both apply automatically, one change each in `list_changes`
+(`op: category_merge | category_split`); `undo_change` restores the categories, aliases,
+claims and analyzers. `compact` with `apply: false` makes no LLM call and lists the
+candidates in `category_pending`.
 
 ## `ingest_raw` (owner)
 
@@ -256,4 +270,30 @@ where you can.
 reply calls in a row produced only claims the persona already has), `saturated_audiences`,
 `claims_created`, `claims_updated`, `absorbed`, `dropped_by_guard`,
 `dropped_previously_rejected`, `dropped_invalid`, `unknown_audiences`, `llm_calls`,
-`llm_calls_failed`, plus the analyzer counters.
+`llm_calls_failed`, the analyzer counters `analyzers_run`, `analyzer_errors`,
+`analyzer_keys_dropped` (state keys refused by the key filter), `analyzers_skipped_disabled`,
+`analyzer_claims_created` / `_updated` / `_weakened` / `_proposed`. Annotation, LLM analyzers and usage
+notes add: `annotation_calls` (of `llm_calls`), `labels_created` / `labels_dropped` (new
+label or tag names stored / refused over the per-category limit), `analyzers_proposed`
+(hypotheses the model returned), `analyzers_accepted`, `analyzers_rejected` (stored
+`retired`), `analyzers_duplicate` (restated an existing or retired analyzer: dropped),
+`analyzers_skipped_limit` (`max_analyzers` reached), `analyzers_disabled` (3 failed runs
+in a row), `sandbox_errors` (failed or invalid sandbox runs, tests included),
+`skipped_sandbox_budget` (analyzer runs or hypothesis tests skipped because today's
+`sandbox_cpu_seconds_per_day` was spent; the job still ends `done`),
+`sandbox_unavailable` (sandbox assets not built on this server: LLM analyzers and authoring
+skipped), `word_usage_notes`, `skipped_llm_budget` (an authoring or usage-note call did not
+fit the token budget and was skipped; these calls cover no episodes, so the job is not
+`partial`), `authoring_failed` / `word_usage_failed` (the backend failed on such a call).
+
+## Analyzers (owner)
+
+Analyzers turn processed episodes into counters (never text) and render keyed claims from
+them: builtins (`time_activity`, `time_duration`, `time_gaps`, `stylometry`, word-usage
+notes; see `docs/habits.md`) and LLM-written ones that passed the hypothesis test.
+`list_analyzers {scope?, status?, limit?, cursor?}` lists them (`scope` is a category path
+or an audience name); `get_analyzer {id}` adds the statement template, the source of an LLM
+analyzer and a summary of its state (metrics, months, keys); `update_analyzer {id, status}`
+sets `active`, `disabled` or (LLM analyzers only, final) `retired`, which drops the source
+and keeps the statement so the hypothesis is not proposed again. Their claims start
+`pending` like every derived claim.

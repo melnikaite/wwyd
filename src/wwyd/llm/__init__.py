@@ -17,7 +17,19 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 Purpose = Literal[
-    "route", "answer", "judge", "statements", "replies", "decisions", "describe_categories"
+    "route",
+    "answer",
+    "shorten",
+    "judge",
+    "statements",
+    "replies",
+    "decisions",
+    "describe_categories",
+    "annotate",
+    "author_analyzers",
+    "word_usage",
+    "category_merge",
+    "category_split",
 ]
 
 

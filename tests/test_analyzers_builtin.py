@@ -44,7 +44,9 @@ def test_ground_truth_meetings_and_replies(conn, pid):
     eps = meetings(meet, days, slots=SLOTS) + replies(style, days, "work-chat")
     touched, counts = _run(conn, pid, eps)
     claims = _claims(conn, pid)
-    texts = {k: r["text"] for k, r in claims.items()}
+    # Stylometry (audience scope) is covered in tests/test_stylometry.py.
+    texts = {k: r["text"] for k, r in claims.items() if not k.startswith("builtin:stylometry:")}
+    assert any(k.startswith("builtin:stylometry:") for k in claims)
     assert texts == {
         f"builtin:time_activity:{meet}:hours": (
             "work/meetings: active 10:00–15:00 on weekdays (100% of 84 weekday episodes)."
@@ -85,8 +87,8 @@ def test_ground_truth_meetings_and_replies(conn, pid):
     assert ev["share"] == 1.0
     assert ev["period"] == f"{days[0].isoformat()}..{days[-1].isoformat()}"
     assert ev["stats"]["n"] == 30 and ev["stats"]["hits"] == 30
-    assert counts["analyzers_run"] == 6
-    assert counts["analyzer_claims_created"] == 9
+    assert counts["analyzers_run"] == 8  # 3 time builtins x 2 categories + 2 stylometry rows
+    assert counts["analyzer_claims_created"] == 10  # 9 time claims + 1 stylometry
     assert counts["analyzer_keys_dropped"] == 0
     assert counts["analyzer_errors"] == 0
     row = _analyzer(conn, pid, "time_gaps", meet)
@@ -260,7 +262,10 @@ def test_exact_category_scope_and_no_episodes(conn, pid):
     _run(conn, pid, meetings(meet, workdays(START, 3)) + meetings(work, workdays(START, 2)))
     scopes = {
         (r["name"], r["scope_id"])
-        for r in conn.execute("SELECT name, scope_id FROM analyzers WHERE persona_id = ?", (pid,))
+        for r in conn.execute(
+            "SELECT name, scope_id FROM analyzers WHERE persona_id = ? AND scope_kind = 'category'",
+            (pid,),
+        )
     }
     assert {s for _, s in scopes} == {meet, work}
     assert len(scopes) == 6

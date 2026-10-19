@@ -285,7 +285,7 @@ def _public(row: sqlite3.Row) -> dict[str, Any]:
         "job_id": row["job_id"],
         "claims": payload.get("claims", []),
     }
-    for key in ("before", "after", "plan", "into", "renamed"):
+    for key in ("before", "after", "plan", "into", "renamed", "category", "created"):
         if key in payload:
             out[key] = payload[key]
     return out
@@ -405,6 +405,16 @@ def undo_change(conn: sqlite3.Connection, persona_id: str, change_id: str) -> di
                 raise Conflict(
                     "a later category change must be undone first", id=change_id, later=blocking
                 )
+            mine = set(payload.get("claims", ()))
+            blocking = [
+                r["id"] for r in later if mine & set(json.loads(r["payload"]).get("claims", ()))
+            ]
+            if blocking:
+                raise Conflict(
+                    "a later change touched the same claims; undo it first",
+                    id=change_id,
+                    later=blocking,
+                )
             _undo_category(conn, persona_id, row["op"], payload)
         else:
             if "before" not in payload or not isinstance(payload["before"], dict):
@@ -431,31 +441,10 @@ def _undo_category(
     from wwyd.store import categories as cats
 
     if op == "category_rename":
-        renamed = payload["renamed"]
-        if not renamed:
-            return
-        root = min(renamed, key=lambda r: r["to"].count("/"))
-        row = cats.get_category(conn, persona_id, root["to"])
-        cats._rename(conn, persona_id, row, root["from"], record=False)
-        return
-    if op != "category_merge":
-        raise Conflict(f"{op} cannot be undone yet")
-    # category_merge: recreate the removed categories (parents first), move claims back.
-    before = payload["before"]
-    for cat in reversed(before["categories"]):
-        if cats._row(conn, persona_id, cat["path"]) is not None:
-            raise Conflict(f"category {cat['path']!r} exists again", path=cat["path"])
-        cats.create_category(
-            conn,
-            persona_id,
-            cat["path"],
-            cat.get("description") or "",
-            origin=cat.get("origin", "owner"),
-        )
-    ids = cats.category_ids_by_path(conn, persona_id)
-    ts = now_iso()
-    for claim in before["claims"]:
-        conn.execute(
-            "UPDATE claims SET category_id = ?, updated_at = ? WHERE persona_id = ? AND id = ?",
-            (ids[claim["category"]], ts, persona_id, claim["id"]),
-        )
+        cats.undo_rename(conn, persona_id, payload)
+    elif op == "category_merge":
+        cats.undo_merge(conn, persona_id, payload)
+    elif op == "category_split":
+        cats.undo_split(conn, persona_id, payload)
+    else:
+        raise Conflict(f"{op} cannot be undone")

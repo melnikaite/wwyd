@@ -15,7 +15,15 @@ from wwyd.db import transaction
 from wwyd.errors import Conflict
 from wwyd.store import changes
 
-STEPS = ("dedupe", "contradictions", "decay", "budget", "purge")
+STEPS = (
+    "dedupe",
+    "contradictions",
+    "decay",
+    "budget",
+    "purge",
+    "category_merge",
+    "category_split",
+)
 
 
 def evidence_weight(row: sqlite3.Row) -> float:
@@ -48,6 +56,11 @@ class Run:
     skipped_pairs: int = 0
     judge_pending: int = 0  # dry run: borderline pairs a real run would send to the judge
     use_llm: bool = True  # False: borderline pairs are skipped instead of judged
+    # Category steps (SPEC §10.6): LLM failures per step, discarded split groupings, and
+    # (dry run) what a real run would send to the LLM.
+    skipped_steps: dict[str, int] = field(default_factory=dict)
+    discarded_splits: int = 0
+    category_pending: dict[str, list[str]] = field(default_factory=dict)
 
     def emit(self, op: str, plan: dict[str, Any], *, state: str, reason: str) -> bool:
         """Record one change (or, in a dry run, just report it). False if not emitted."""
@@ -103,6 +116,12 @@ class Run:
         }
         if not self.apply:
             out["judge_pending"] = self.judge_pending
+            if self.category_pending:
+                out["category_pending"] = self.category_pending
+        if self.skipped_steps:
+            out["skipped_steps"] = self.skipped_steps
+        if self.discarded_splits:
+            out["discarded_splits"] = self.discarded_splits
         return out
 
 
@@ -118,8 +137,9 @@ async def compact(
     use_llm: bool = True,
 ) -> dict[str, Any]:
     """Run the requested steps. With ``apply=False`` nothing is written and the LLM judge
-    is not called (it would record usage); borderline pairs are counted in ``judge_pending``."""
-    from wwyd.compact import dedupe, maintenance
+    is not called (it would record usage); borderline pairs are counted in ``judge_pending``
+    and the categories the category steps would send are listed in ``category_pending``."""
+    from wwyd.compact import categories, dedupe, maintenance
 
     wanted = tuple(steps) if steps else STEPS
     run = Run(conn, persona_id, apply, now or datetime.now(UTC), job_id, use_llm=use_llm)
@@ -131,4 +151,5 @@ async def compact(
             contradictions="contradictions" in wanted,
         )
     maintenance.run_steps(run, wanted)
+    await categories.run_steps(run, wanted)
     return run.result()

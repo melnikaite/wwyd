@@ -362,6 +362,20 @@ class Limiter:
         if cost_usd:
             self.spend_state(user_id, persona_id)
 
+    # --- sandbox ----------------------------------------------------------------------------
+
+    def sandbox_seconds_left(self, user_id: str) -> float | None:
+        """Sandbox run time left today under ``sandbox_cpu_seconds_per_day`` (SPEC §7.5;
+        measured as run wall time; None: unlimited). One persona per user, so the user's
+        daily counter is the persona's."""
+        cap = self.effective_limits(user_id)["sandbox_cpu_seconds_per_day"]
+        if cap is None:
+            return None
+        return max(0.0, float(cap) - self._get(user_id, "sandbox_seconds"))
+
+    def record_sandbox_seconds(self, user_id: str, seconds: float) -> None:
+        self._add(user_id, {"sandbox_seconds": max(0.0, seconds)})
+
     # --- ingest -----------------------------------------------------------------------------
 
     def check_ingest(self, user_id: str, persona_id: str, records: int, nbytes: int) -> None:

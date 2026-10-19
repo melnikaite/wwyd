@@ -3,11 +3,17 @@
 
 from __future__ import annotations
 
-from wwyd.analyzers.builtin import time_activity, time_duration, time_gaps
+from wwyd.analyzers.builtin import stylometry, time_activity, time_duration, time_gaps
 from wwyd.analyzers.builtin.base import Builtin, ClaimSpec, Context, Item, host_fields
 
 BUILTINS: dict[str, Builtin] = {
-    b.name: b for b in (time_activity.BUILTIN, time_duration.BUILTIN, time_gaps.BUILTIN)
+    b.name: b
+    for b in (
+        time_activity.BUILTIN,
+        time_duration.BUILTIN,
+        time_gaps.BUILTIN,
+        stylometry.BUILTIN,
+    )
 }
 
 __all__ = ["BUILTINS", "Builtin", "ClaimSpec", "Context", "Item", "host_fields"]

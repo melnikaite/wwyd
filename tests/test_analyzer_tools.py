@@ -39,7 +39,8 @@ async def test_list_get_update(client, conn, pid):
     _seed(conn, pid)
     out = await call(client, "list_analyzers")
     names = sorted(a["name"] for a in out["analyzers"])
-    assert names == ["time_activity", "time_duration", "time_gaps"]
+    # The meetings' audience also gets a stylometry row (audience scope).
+    assert names == ["stylometry", "time_activity", "time_duration", "time_gaps"]
     gaps = next(a for a in out["analyzers"] if a["name"] == "time_gaps")
     assert gaps["scope"] == "work/meetings" and gaps["scope_kind"] == "category"
     assert gaps["origin"] == "builtin" and gaps["runs"] == 1 and gaps["claim_id"]
@@ -82,9 +83,11 @@ async def test_scope_filter_and_pagination(client, conn, pid):
     page1 = await call(client, "list_analyzers", {"limit": 2})
     assert len(page1["analyzers"]) == 2 and page1["next_cursor"]
     page2 = await call(client, "list_analyzers", {"limit": 2, "cursor": page1["next_cursor"]})
-    assert len(page2["analyzers"]) == 2 and "next_cursor" not in page2
+    # 3 time builtins + stylometry (default audience) + the LLM row.
+    page2 = await call(client, "list_analyzers", {"limit": 3, "cursor": page1["next_cursor"]})
+    assert len(page2["analyzers"]) == 3 and "next_cursor" not in page2
     seen = {a["id"] for a in page1["analyzers"] + page2["analyzers"]}
-    assert len(seen) == 4
+    assert len(seen) == 5
 
 
 async def test_retire_llm_clears_source(client, conn, pid):

@@ -135,8 +135,9 @@ def test_category_rename_moves_subtree(conn, pid):
     assert row[0] == "schedule"
     change = conn.execute("SELECT op, payload FROM changes WHERE persona_id = ?", (pid,)).fetchone()
     assert change["op"] == "category_rename"
-    assert {"from": "work/meetings", "to": "schedule/meetings"} in json.loads(change["payload"])[
-        "renamed"
+    renamed = json.loads(change["payload"])["renamed"]
+    assert {"from": "work/meetings", "to": "schedule/meetings"} in [
+        {"from": r["from"], "to": r["to"]} for r in renamed
     ]
     # top-level move, too deep, into own subtree, onto existing, missing parent
     ca.upsert_category(conn, pid, "schedule/meetings", rename_to="meetings")
@@ -170,7 +171,8 @@ def test_merge_categories(conn, pid):
     row = conn.execute("SELECT * FROM changes WHERE id = ?", (res["change_id"],)).fetchone()
     assert (row["op"], row["state"]) == ("category_merge", "applied")
     before = json.loads(row["payload"])["before"]
-    assert {c["id"]: c["category"] for c in before["claims"]} == {
+    old_ids = {c["id"]: c["path"] for c in before["categories"]}
+    assert {i: old_ids[s["category_id"]] for i, s in before["claims"].items()} == {
         ids[0]: "food",
         ids[1]: "food/drinks",
         ids[2]: "travel",

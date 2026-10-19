@@ -18,6 +18,7 @@ from wwyd.limits import get_limiter
 from wwyd.llm import get_llm
 from wwyd.mcp.caller import Caller
 from wwyd.predict import answer as answer_step
+from wwyd.predict import style as style_step
 from wwyd.predict.context import budgeted, fts_match, in_categories, visible_claims
 from wwyd.predict.disclosure import build_disclosure
 from wwyd.predict.prompts import answer_user, claim_line
@@ -167,6 +168,13 @@ async def predict(
         owner = conn.execute(
             "SELECT display_name FROM personas WHERE id = ?", (persona_id,)
         ).fetchone()[0]
+        # Style parameters (D22): replies only, from the audience's approved, visible
+        # stylometry claim (same SQL filter as the context).
+        profile = (
+            style_step.load_profile(conn, persona_id, row["id"], include_private=private)
+            if kind == "reply"
+            else None
+        )
         labels = {f"c{i}": c.id for i, c in enumerate(context, 1)}
         user = answer_user(
             owner=owner,
@@ -176,6 +184,7 @@ async def predict(
             facts=facts or [],
             kind=kind,
             situation=situation,
+            style=style_step.parameters(profile) if profile is not None else None,
         )
         run.llm_called = True
         data, tokens = await answer_step.ask(llm, user, kind=kind)
@@ -218,10 +227,21 @@ async def predict(
                 )
             )
         language = result.pop("language")
+        if profile is not None:
+            result["answer"] = await _styled(llm, run, result["answer"], profile)
         result["disclosure"] = build_disclosure(
             owner, language, settings.get("disclosure_template")
         )
     return run.finish(result)
+
+
+async def _styled(llm, run: _Run, text: str, profile: style_step.StyleProfile) -> str:  # noqa: ANN001
+    """Step 8: one shorten re-ask if far too long, then the deterministic rules."""
+    if style_step.too_long(text, profile):
+        shorter, tokens = await style_step.shorten(llm, text, profile)
+        run.tokens += tokens
+        text = shorter or text
+    return style_step.apply_rules(text, profile)
 
 
 def _categories(

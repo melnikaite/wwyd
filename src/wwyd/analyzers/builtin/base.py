@@ -13,6 +13,7 @@ Rendered texts hold only numbers, weekday/hour words and the scope's category pa
 
 from __future__ import annotations
 
+import sqlite3
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -79,6 +80,8 @@ class Context:
     scope_path: str  # category path (category scope) or audience name
     tz: tzinfo
     audience_ids: Mapping[str, str] = field(default_factory=dict)  # name -> id
+    # Read-only access for renders that compare scopes (stylometry keyness); may be None.
+    conn: sqlite3.Connection | None = None
 
 
 @dataclass
