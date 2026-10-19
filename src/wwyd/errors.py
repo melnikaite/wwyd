@@ -9,7 +9,16 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-ErrorCode = Literal["not_found", "forbidden", "invalid", "conflict", "too_large"]
+ErrorCode = Literal[
+    "not_found",
+    "forbidden",
+    "invalid",
+    "conflict",
+    "too_large",
+    "rate_limited",
+    "spend_cap",
+    "llm_unavailable",
+]
 
 
 class WwydError(Exception):
@@ -42,3 +51,21 @@ class Conflict(WwydError):
 
 class TooLarge(WwydError):
     code = "too_large"
+
+
+class RateLimited(WwydError):
+    """A rate limit or daily quota was hit; ``retry_after`` is whole seconds (≥ 1)."""
+
+    code = "rate_limited"
+
+    def __init__(self, message: str, *, retry_after: int, **details: Any) -> None:
+        super().__init__(message, retry_after=max(1, int(retry_after)), **details)
+        self.retry_after = max(1, int(retry_after))
+
+
+class SpendCap(WwydError):
+    code = "spend_cap"
+
+
+class LLMUnavailable(WwydError):
+    code = "llm_unavailable"

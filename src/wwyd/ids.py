@@ -7,7 +7,7 @@ import base64
 import secrets
 from datetime import UTC, datetime
 
-PREFIXES = frozenset({"usr", "prs", "aud", "cat", "clm", "chg"})
+PREFIXES = frozenset({"usr", "prs", "aud", "cat", "clm", "chg", "grt", "key", "job", "adt"})
 
 
 def new_id(prefix: str) -> str:

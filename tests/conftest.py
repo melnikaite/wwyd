@@ -69,3 +69,16 @@ async def call_error(client: Client, name: str, args: dict[str, Any] | None = No
     result = await client.call_tool(name, args or {})
     assert result.is_error
     return result.structured_content["error"]
+
+
+@pytest.fixture
+def fake_llm() -> Iterator[Any]:
+    """Route every persona's LLM calls to a FakeLLM for the test."""
+    from fake_llm import FakeLLM
+
+    from wwyd.llm import set_llm_factory
+
+    fake = FakeLLM()
+    set_llm_factory(fake.for_persona)
+    yield fake
+    set_llm_factory(None)

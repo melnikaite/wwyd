@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Claims: CRUD, review, FTS search and the M1 "simple absorb"."""
+"""Claims: CRUD, review, FTS search and absorb on add (SPEC §10.1)."""
 
 from __future__ import annotations
 
@@ -28,7 +28,6 @@ from wwyd.store.common import (
     dumps,
     encode_cursor,
     normalize_text,
-    record_change,
 )
 
 MAX_ADD = 200
@@ -275,6 +274,49 @@ def fts_query(query: str) -> str | None:
     return " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens)
 
 
+def text_tokens(text: str) -> frozenset[str]:
+    return frozenset(t.casefold() for t in _FTS_TOKEN.findall(text))
+
+
+def jaccard(a: str, b: str) -> float:
+    ta, tb = text_tokens(a), text_tokens(b)
+    if not ta or not tb:
+        return 1.0 if normalize_text(a) == normalize_text(b) else 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def polarity_differs(a: str, b: str) -> bool:
+    """True if a negation/polarity marker occurs in only one of the two texts."""
+    from wwyd.compact.constants import POLARITY_MARKERS
+
+    return bool((text_tokens(a) ^ text_tokens(b)) & POLARITY_MARKERS)
+
+
+def find_similar(
+    conn: sqlite3.Connection,
+    persona_id: str,
+    *,
+    kind: str,
+    category_id: str,
+    text: str,
+    statuses: Sequence[str] = ("pending", "approved", "rejected"),
+    exclude: str | None = None,
+    limit: int = 5,
+) -> list[tuple[sqlite3.Row, float]]:
+    """FTS top-``limit`` candidates of the same kind and category, with token-set Jaccard."""
+    match = fts_query(text)
+    if match is None:
+        return []
+    marks = ",".join("?" * len(statuses))
+    rows = conn.execute(
+        "SELECT c.* FROM claims_fts JOIN claims c ON c.seq = claims_fts.rowid"
+        f" WHERE claims_fts MATCH ? AND c.persona_id = ? AND c.kind = ? AND c.category_id = ?"
+        f" AND c.status IN ({marks}) AND c.id <> ? ORDER BY bm25(claims_fts) LIMIT ?",
+        [match, persona_id, kind, category_id, *statuses, exclude or "", limit],
+    ).fetchall()
+    return [(r, jaccard(text, r["text"])) for r in rows]
+
+
 def search_claims(
     conn: sqlite3.Connection,
     persona_id: str,
@@ -415,8 +457,14 @@ def add_claims(
     absorb: bool = True,
     allow_approved: bool = False,
     origin: str = "added",
+    job_id: str | None = None,
 ) -> dict[str, Any]:
-    """Validate and store claims one by one; bad items are dropped with a reason."""
+    """Validate and store claims one by one; bad items are dropped with a reason.
+
+    With ``absorb``, a claim whose text matches an existing pending/approved claim of the
+    same kind and category (§10.1: FTS top 5, token-set Jaccard >= 0.6) strengthens it
+    instead; one matching a rejected claim is always dropped (negative memory). Borderline
+    pairs are left for compaction."""
     if len(claims) > MAX_ADD:
         raise TooLarge(f"at most {MAX_ADD} claims per call", limit=MAX_ADD)
     created: list[str] = []
@@ -436,6 +484,7 @@ def add_claims(
                     absorb=absorb,
                     allow_approved=allow_approved,
                     origin=origin,
+                    job_id=job_id,
                 )
             except Invalid as exc:
                 entry = {"index": index, "reason": exc.details.get("reason", "invalid")}
@@ -462,6 +511,7 @@ def _add_one(
     absorb: bool,
     allow_approved: bool,
     origin: str,
+    job_id: str | None,
 ) -> tuple[str, str]:
     if not isinstance(item, dict):
         raise Invalid("each claim must be an object")
@@ -483,22 +533,28 @@ def _add_one(
     if proposed is not None:
         check_category_path(proposed)
 
-    norm = normalize_text(text)
-    match = conn.execute(
-        "SELECT id, status, evidence, confidence FROM claims WHERE persona_id = ? AND kind = ?"
-        " AND category_id = ? AND norm_text = ? AND status <> 'archived'"
-        " ORDER BY status = 'rejected' DESC, seq LIMIT 1",
-        (persona_id, kind, category_id, norm),
-    ).fetchone()
+    match = _absorb_target(conn, persona_id, kind, category_id, text)
     if match is not None and match["status"] == "rejected":
         return "dropped", "previously_rejected"
     ts = now_iso()
     if match is not None and absorb:
-        merged = merge_evidence(json.loads(match["evidence"]), evidence)
-        conn.execute(
-            "UPDATE claims SET evidence = ?, confidence = ?, last_evidence_at = ?, updated_at = ?"
-            " WHERE id = ?",
-            (dumps(merged), max(match["confidence"], confidence), ts, ts, match["id"]),
+        from wwyd.compact.constants import absorbed_confidence
+        from wwyd.store import changes
+
+        cols: dict[str, Any] = {
+            "evidence": dumps(merge_evidence(json.loads(match["evidence"]), evidence)),
+            "confidence": absorbed_confidence(match["confidence"], confidence),
+            "last_evidence_at": ts,
+            "updated_at": ts,
+        }
+        if (
+            match["status"] == "pending"
+            and match["origin"] != "owner"
+            and match["norm_text"] != normalize_text(text)
+        ):
+            cols["text"] = text  # pending + pending: the newer wording wins
+        changes.apply_updates(
+            conn, persona_id, "absorb", {match["id"]: cols}, reason="add_claims", job_id=job_id
         )
         return "absorbed", match["id"]
     claim_id = insert_claim(
@@ -521,6 +577,33 @@ def _add_one(
     return "created", claim_id
 
 
+def _absorb_target(
+    conn: sqlite3.Connection, persona_id: str, kind: str, category_id: str, text: str
+) -> sqlite3.Row | None:
+    """Best duplicate for a new claim; a rejected duplicate wins (it must drop the claim)."""
+    from wwyd.compact.constants import DUPLICATE_JACCARD, FTS_CANDIDATES
+
+    exact = conn.execute(
+        "SELECT * FROM claims WHERE persona_id = ? AND kind = ? AND category_id = ?"
+        " AND norm_text = ? AND status <> 'archived'"
+        " ORDER BY status = 'rejected' DESC, seq LIMIT 1",
+        (persona_id, kind, category_id, normalize_text(text)),
+    ).fetchone()
+    if exact is not None:
+        return exact
+    found = [
+        (row, score)
+        for row, score in find_similar(
+            conn, persona_id, kind=kind, category_id=category_id, text=text, limit=FTS_CANDIDATES
+        )
+        if score >= DUPLICATE_JACCARD and not polarity_differs(text, row["text"])
+    ]
+    if not found:
+        return None
+    found.sort(key=lambda x: (x[0]["status"] == "rejected", x[1]), reverse=True)
+    return found[0][0]
+
+
 def update_claim(
     conn: sqlite3.Connection,
     persona_id: str,
@@ -539,6 +622,7 @@ def update_claim(
         now = datetime.now(UTC)
         ts = now_iso()
         sets: dict[str, Any] = {}
+        restoring = False
         current = row["status"]
         if status is not None:
             _check_choice(status, STATUSES, "status")
@@ -594,21 +678,7 @@ def update_claim(
                         f"another live claim already has key {row['key']!r}", id=claim_id
                     )
                 sets.update(archived_at=None, archive_reason=None, superseded_by=None)
-                record_change(
-                    conn,
-                    persona_id,
-                    "restore",
-                    {
-                        "claims": [claim_id],
-                        "before": {
-                            "status": current,
-                            "archive_reason": row["archive_reason"],
-                            "archived_at": archived_at,
-                            "superseded_by": row["superseded_by"],
-                        },
-                    },
-                    reason="owner",
-                )
+                restoring = True
             sets["status"] = status
             if status == "archived":
                 sets.update(archived_at=ts, archive_reason="owner")
@@ -616,6 +686,9 @@ def update_claim(
                 sets.update(evidence="{}", reviewed_at=ts)
             elif status == "approved":
                 sets["reviewed_at"] = ts
+        from wwyd.store import changes
+
+        before = changes.snapshot(conn, [claim_id]) if restoring else None
         if sets or audience_ids is not None:
             sets["updated_at"] = ts
             assignments = ", ".join(f"{col} = ?" for col in sets)
@@ -627,6 +700,18 @@ def update_claim(
             conn.executemany(
                 "INSERT INTO claim_audiences(claim_id, audience_id) VALUES (?, ?)",
                 [(claim_id, aid) for aid in audience_ids],
+            )
+        if before is not None:
+            changes.record(
+                conn,
+                persona_id,
+                "restore",
+                {
+                    "claims": [claim_id],
+                    "before": before,
+                    "after": changes.snapshot(conn, [claim_id]),
+                },
+                reason="owner",
             )
         return get_claim(conn, persona_id, claim_id)
 
@@ -640,6 +725,8 @@ def _check_ids(ids: Sequence[str], field: str) -> list[str]:
 def delete_claims(conn: sqlite3.Connection, persona_id: str, ids: Sequence[str]) -> dict[str, Any]:
     """Hard delete. Change-log entries that mention a deleted claim become ``expired``."""
     ids = _check_ids(ids, "ids")
+    from wwyd.store import changes
+
     deleted = 0
     with transaction(conn):
         for claim_id in ids:
@@ -648,11 +735,7 @@ def delete_claims(conn: sqlite3.Connection, persona_id: str, ids: Sequence[str])
             )
             if cur.rowcount:
                 deleted += 1
-                conn.execute(
-                    "UPDATE changes SET state = 'expired' WHERE persona_id = ?"
-                    " AND state <> 'expired' AND instr(payload, ?) > 0",
-                    (persona_id, f'"{claim_id}"'),
-                )
+                changes.expire_for_claims(conn, persona_id, [claim_id])
     return {"deleted": deleted}
 
 
@@ -676,10 +759,15 @@ def review_claims(
         "categories_created": [],
         "not_found": [],
         "skipped": [],
-        "not_supported_yet": [],
     }
     ts = now_iso()
     with transaction(conn):
+        for change_id in (i for i in approve if i.startswith("chg_")):
+            _review_change(conn, persona_id, change_id, True, result)
+        for change_id in (i for i in reject if i.startswith("chg_")):
+            _review_change(conn, persona_id, change_id, False, result)
+        approve = [i for i in approve if not i.startswith("chg_")]
+        reject = [i for i in reject if not i.startswith("chg_")]
         for claim_id in approve:
             row = _lookup(conn, persona_id, claim_id, result)
             if row is None:
@@ -718,12 +806,39 @@ def review_claims(
     return result
 
 
+def _review_change(
+    conn: sqlite3.Connection,
+    persona_id: str,
+    change_id: str,
+    approve: bool,
+    result: dict[str, Any],
+) -> None:
+    from wwyd.store import changes
+
+    try:
+        if approve:
+            if changes.apply_proposal(conn, persona_id, change_id):
+                result["applied_changes"] += 1
+            else:
+                result["skipped"].append(change_id)
+        elif changes.dismiss_proposal(conn, persona_id, change_id):
+            result["dismissed_changes"] += 1
+        else:
+            result["skipped"].append(change_id)
+    except NotFound:
+        result["not_found"].append(change_id)
+    except Conflict:
+        # Its claims changed since it was proposed; it can no longer apply as shown.
+        conn.execute(
+            "UPDATE changes SET state = 'dismissed' WHERE persona_id = ? AND id = ?",
+            (persona_id, change_id),
+        )
+        result["skipped"].append(change_id)
+
+
 def _lookup(
     conn: sqlite3.Connection, persona_id: str, item_id: str, result: dict[str, Any]
 ) -> sqlite3.Row | None:
-    if item_id.startswith("chg_"):
-        result["not_supported_yet"].append(item_id)
-        return None
     row = conn.execute(
         "SELECT * FROM claims WHERE persona_id = ? AND id = ?", (persona_id, item_id)
     ).fetchone()

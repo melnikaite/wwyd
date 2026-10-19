@@ -1,0 +1,33 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>{% block title %}wwyd{% endblock %} · wwyd</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <a class="brand" href="/">wwyd<small>what would you do</small></a>
+      {% if me %}
+      <nav class="top" aria-label="Main">
+        <a href="/account">Account</a>
+        {% if me.is_admin %}<a href="/admin">Users</a>{% endif %}
+        <form method="post" action="/logout">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="link" type="submit">Sign out</button>
+        </form>
+      </nav>
+      {% endif %}
+    </header>
+    <main>
+      {% block main %}{% endblock %}
+    </main>
+    <footer>Your persona stays on this server. Nothing here is shared without your choice.</footer>
+  </div>
+  <script src="/static/copy.js" defer></script>
+</body>
+</html>

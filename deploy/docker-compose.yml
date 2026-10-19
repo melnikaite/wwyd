@@ -1,0 +1,46 @@
+# wwyd + Caddy (automatic HTTPS). Usage:
+#   WWYD_DOMAIN=wwyd.example.com docker compose up -d
+#   docker compose logs wwyd        # shows the one-time setup link on first start
+# The domain's DNS A/AAAA record must point at this machine, and ports 80 and 443 must be
+# reachable from the internet, before Caddy can obtain a certificate.
+name: wwyd
+
+services:
+  wwyd:
+    image: ${WWYD_IMAGE:-ghcr.io/melnikaite/wwyd:latest}
+    restart: unless-stopped
+    environment:
+      WWYD_PUBLIC_URL: https://${WWYD_DOMAIN:?set WWYD_DOMAIN to your domain}
+      # Trust X-Forwarded-For only from the proxy network below (Caddy).
+      WWYD_TRUSTED_PROXIES: 172.30.87.0/24
+    volumes:
+      - wwyd-data:/data
+    networks: [proxy]
+    # No "ports:": wwyd is reachable only through Caddy.
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [wwyd]
+    environment:
+      WWYD_DOMAIN: ${WWYD_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [proxy]
+
+networks:
+  proxy:
+    ipam:
+      config:
+        - subnet: 172.30.87.0/24
+
+volumes:
+  wwyd-data:
+  caddy-data:
+  caddy-config:

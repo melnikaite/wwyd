@@ -1,0 +1,20 @@
+# Only pyproject.toml, uv.lock, README.md, LICENSE and src/ are needed in the image.
+.git
+.github
+.claude
+.venv
+.pytest_cache
+.ruff_cache
+**/__pycache__
+**/*.pyc
+tests
+docs
+deploy
+dist
+build
+*.db
+*.db-*
+.env
+.env.*
+Dockerfile
+.dockerignore

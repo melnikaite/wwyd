@@ -7,10 +7,10 @@
 
 ## Status
 
-**Pre-alpha.** Milestone 1 of 6 (store and CRUD over stdio) is done. HTTP, auth,
-`predict`, ingest and compaction are still to come; see the
-[roadmap in SPEC.md §16](SPEC.md#16-milestones). Interfaces and the database schema may
-change without notice.
+**Pre-alpha.** All six milestones of the [roadmap in SPEC.md §16](SPEC.md#16-milestones)
+are implemented: store and CRUD, HTTP with OAuth 2.1 and API keys, `predict`, ingest with
+habit detectors, compaction, limits and packaging. No release has been published yet;
+interfaces and the database schema may still change without notice.
 
 ## What it is
 
@@ -47,34 +47,47 @@ The full rules are in [SPEC.md §2](SPEC.md#2-privacy-invariants). In short:
 Text sent to `predict` or ingest goes to the LLM backend the persona is configured with;
 with a local backend nothing leaves the machine.
 
-## Quick start (from source)
+## Quick start
 
-Requires [uv](https://docs.astral.sh/uv/).
+Requires [uv](https://docs.astral.sh/uv/). Step-by-step instructions for every setup
+(own computer, Docker, cloud server with a domain, connecting Claude and ChatGPT) are in
+[docs/install.md](docs/install.md).
+
+### HTTP server
 
 ```sh
 git clone https://github.com/melnikaite/wwyd.git
 cd wwyd
 uv sync
+uv run wwyd            # http://127.0.0.1:8740, MCP endpoint /mcp
+```
+
+On first start wwyd prints a one-time link (`/setup?t=...`) to create the admin account.
+`wwyd invite` prints an invite link for another user, `wwyd reset-password <login>` a
+password reset link. `GET /healthz` is a liveness check.
+
+**OAuth.** MCP clients that support OAuth (claude.ai custom connectors, ChatGPT, Claude
+Code) only need the URL `https://your.domain/mcp`: they register themselves (dynamic client
+registration or a client ID metadata document), the user signs in and picks a scope on the
+consent page. Anything but localhost needs `public_url` with https.
+
+**API keys.** On the account page (`/account`) create a key with a scope: `owner`, `read`,
+or `respond:<audience>[,<audience>...]`. Send it as `Authorization: Bearer <key>`. Keys
+and OAuth grants can be revoked there; revocation is effective on the next request.
+
+### stdio
+
+```sh
 uv run wwyd stdio --user you@example.com
 ```
 
-The stdio transport serves one user's persona with owner scope. Usually you let your MCP
-client start it, as below.
-
-Planned, not available yet: `uvx wwyd` from PyPI, a Docker image, and the HTTP server with
-OAuth and API keys (milestone 2).
-
-### Claude Code
+Serves one user's persona with owner scope, no OAuth. Usually the MCP client starts it:
 
 ```sh
 claude mcp add wwyd -- uv run --project /path/to/wwyd wwyd stdio --user you@example.com
 ```
 
-Add `--scope project` to write it to the project's `.mcp.json` instead.
-
-### Claude Desktop
-
-Add to `claude_desktop_config.json`:
+or, in Claude Desktop's `claude_desktop_config.json`:
 
 ```json
 {
@@ -87,44 +100,101 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
+### Docker
+
+```sh
+docker run -d --name wwyd -v wwyd-data:/data -p 127.0.0.1:8740:8740 ghcr.io/melnikaite/wwyd:latest
+docker logs wwyd   # shows the setup link
+```
+
+`deploy/` has a `docker-compose.yml` with Caddy for TLS and a cloud-init file for a VM.
+
+### Evaluation
+
+`wwyd eval <pairs.jsonl> --user <login>` blind-compares `predict` answers with the owner's
+real replies; see [docs/eval.md](docs/eval.md).
+
+## Further reading
+
+- [docs/install.md](docs/install.md): installation and connecting AI apps.
+- [docs/ecosystem.md](docs/ecosystem.md): what a harness sends to `ingest_raw` and how it
+  uses `predict`.
+- [docs/habits.md](docs/habits.md): the habit detectors and the claims they produce.
+- [docs/eval.md](docs/eval.md): evaluation method and results.
+
 ## Tools
 
-Available now (milestone 1):
+25 tools. Scopes per [SPEC.md §5](SPEC.md#5-scopes-and-who-sees-what): a client only sees
+the tools its scope allows.
 
-| Tool | Purpose |
-|---|---|
-| `add_claims` | Add claims (statements about the owner) |
-| `list_claims` | List claims with filters |
-| `search_claims` | Full-text search over claims |
-| `update_claim` | Edit a claim |
-| `delete_claims` | Delete claims |
-| `review_claims` | Accept or reject pending claims |
-| `list_audiences` | List audiences |
-| `upsert_audience` | Create or update an audience |
-| `delete_audience` | Delete an audience |
-| `list_categories` | List categories |
-| `upsert_category` | Create or update a category |
-| `merge_categories` | Merge one category into another |
-| `export_persona` | Export the persona as `persona.v1.json` |
-| `import_persona` | Import a persona (replace or merge) |
-| `delete_persona` | Delete the persona |
-| `get_settings` | Read persona settings |
-| `update_settings` | Change persona settings |
+| Tool | Scope | Purpose |
+|---|---|---|
+| `predict` | owner, respond | How would the owner reply or act in this situation |
+| `get_persona` | owner, read | Persona summary for personalising a harness |
+| `ingest_raw` | owner | Submit raw records; derives claims in a background job |
+| `job_status` | owner | Progress and counts of an ingest job |
+| `add_claims` | owner | Add claims (statements about the owner) |
+| `list_claims` | owner | List claims with filters |
+| `search_claims` | owner | Full-text search over claims |
+| `update_claim` | owner | Edit a claim |
+| `delete_claims` | owner | Delete claims |
+| `review_claims` | owner | Approve or reject pending claims and proposed changes |
+| `list_audiences` | owner | List audiences |
+| `upsert_audience` | owner | Create or update an audience |
+| `delete_audience` | owner | Delete an audience |
+| `list_categories` | owner | List categories |
+| `upsert_category` | owner | Create or update a category |
+| `merge_categories` | owner | Merge one category into another |
+| `compact` | owner | Dedupe, contradictions, decay, size budget (dry run by default) |
+| `list_changes` | owner | Change log |
+| `undo_change` | owner | Undo a change |
+| `list_audit` | owner | Audit log of `predict` calls (no text) |
+| `export_persona` | owner | Export the persona as `persona.v1.json` |
+| `import_persona` | owner | Import a persona (replace or merge) |
+| `delete_persona` | owner | Delete the persona's content, settings, audit and jobs |
+| `get_settings` | owner | Read persona settings, limits and usage |
+| `update_settings` | owner | Change persona settings, including the LLM backend |
 
-Planned:
+See [SPEC.md §6](SPEC.md#6-mcp-tools) for arguments and results.
 
-| Tool | Milestone |
-|---|---|
-| `predict`, `get_persona` | 3 |
-| `ingest_raw` and job status | 4 |
-| Compaction, change log and undo | 5 |
+## Configuration
 
-See [SPEC.md §6](SPEC.md#6-mcp-tools) for the full tool list.
+Built-in defaults, then `wwyd.toml` in the data directory, then `WWYD_*` environment
+variables.
+
+| Key | Env | Meaning |
+|---|---|---|
+| `public_url` | `WWYD_PUBLIC_URL` | External URL and OAuth issuer; https unless localhost |
+| `host`, `port` | `WWYD_HOST`, `WWYD_PORT` | Bind address, default `127.0.0.1:8740` |
+| `trusted_proxies` | `WWYD_TRUSTED_PROXIES` (comma-separated) | Peers whose `X-Forwarded-For` is trusted |
+| `smtp_*` | `WWYD_SMTP_*` | Optional mail for password reset links |
+| `[limits]` | `WWYD_LIMIT_<NAME>` | Instance default limits (SPEC §11), e.g. `spend_cap_usd` |
+| `[llm]` | `WWYD_LLM_<NAME>` | Instance default LLM backend |
+
+The `[llm]` table has `base_url`, `model`, `api_key`, `price_in_per_m` and
+`price_out_per_m` (USD per million tokens). Unset values keep the built-in LocalAI default
+(`http://127.0.0.1:1240/v1`, `qwen3-vl-8b-instruct`). Each persona can override the backend
+in its settings. The API key is never logged.
+
+```toml
+public_url = "https://wwyd.example.com"
+trusted_proxies = ["127.0.0.1"]
+
+[limits]
+spend_cap_usd = 5
+
+[llm]
+base_url = "https://openrouter.ai/api/v1"
+model = "some/model"
+api_key = "..."
+price_in_per_m = 0.2
+price_out_per_m = 0.8
+```
 
 ## Data location
 
-Data lives in `~/.wwyd/` (a single SQLite file, `wwyd.db`). Set `WWYD_DATA_DIR` to use
-another directory.
+Data lives in `~/.wwyd/` (`wwyd.db`, `secret.key`, optional `wwyd.toml`). Set
+`WWYD_DATA_DIR` to use another directory.
 
 ## Development
 

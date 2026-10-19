@@ -1,0 +1,33 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- Limits and today's usage (SPEC §11). Numbers and metric names only, never persona content. -#}
+{% macro usage_today(v) %}
+<dl class="usage">
+  <dt>Calls today</dt>
+  <dd>{% if v.calls %}{% for tool, n in v.calls %}<span class="tag">{{ tool }} {{ n }}</span>{% endfor %}{% else %}none{% endif %}</dd>
+  <dt>Language model tokens</dt><dd>{{ v.tokens_in }} in · {{ v.tokens_out }} out</dd>
+  <dt>Cost today</dt><dd>${{ v.cost_usd }} (this month ${{ v.spend_month_usd }})</dd>
+  <dt>Imported</dt><dd>{{ v.ingest_bytes }} bytes · {{ v.ingest_records }} records</dd>
+</dl>
+{% endmacro %}
+
+{% macro limits_form(v, action, csrf, column, label, hint, button) %}
+<form method="post" action="{{ action }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p class="small muted">{{ hint }}</p>
+  <table class="limits">
+    <thead><tr><th scope="col">Limit</th><th scope="col">Default</th><th scope="col">Admin ceiling</th><th scope="col">Effective</th><th scope="col">{{ label }}</th></tr></thead>
+    <tbody>
+    {% for r in v.rows %}
+      <tr>
+        <th scope="row"><label for="{{ action }}-{{ r.key }}">{{ r.label }}</label></th>
+        <td>{{ r.default }}</td>
+        <td>{{ r.ceiling or "—" }}</td>
+        <td>{{ r.effective }}</td>
+        <td><input id="{{ action }}-{{ r.key }}" name="limit_{{ r.key }}" type="number" min="0" step="{{ r.step }}" value="{{ r[column] }}" inputmode="decimal"></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="actions"><button type="submit" class="secondary">{{ button }}</button></div>
+</form>
+{% endmacro %}

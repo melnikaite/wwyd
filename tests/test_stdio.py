@@ -100,12 +100,9 @@ def test_stdout_carries_only_protocol_messages(data_dir):
     assert f"created user {LOGIN}" in stderr and "admin" in stderr
 
 
-def test_serve_is_not_available_yet(data_dir):
+def test_serve_refuses_http_public_url(data_dir):
+    env = {**_env(data_dir), "WWYD_PUBLIC_URL": "http://wwyd.example"}
     proc = subprocess.run(
-        [sys.executable, "-m", "wwyd"],
-        capture_output=True,
-        text=True,
-        env=_env(data_dir),
-        timeout=30,
+        [sys.executable, "-m", "wwyd"], capture_output=True, text=True, env=env, timeout=30
     )
-    assert proc.returncode != 0 and "milestone 2" in proc.stderr and proc.stdout == ""
+    assert proc.returncode == 2 and "must use https" in proc.stderr and proc.stdout == ""

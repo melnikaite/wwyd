@@ -1,0 +1,131 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% from "_scope_choice.html" import scope_choice %}
+{% from "_limits.html" import usage_today, limits_form %}
+{% block title %}Your account{% endblock %}
+{% block main %}
+<h1>Your account</h1>
+<p class="lead">Signed in as <strong>{{ user.login }}</strong>{% if user.is_admin %} <span class="tag">admin</span>{% endif %}.</p>
+
+{% if user.password_reset_by_admin_at %}
+<div class="notice info" role="status">Your password was reset by an administrator at {{ user.password_reset_by_admin_at }} (UTC). If that was not you or your request, talk to your administrator.</div>
+{% endif %}
+
+{% block spend_cap %}
+{% if spend_cap_reached %}
+<div class="notice error" role="status">This month's spending limit is reached. Answers that need the language model are paused until it resets.</div>
+{% endif %}
+{% endblock %}
+
+{% if welcome %}{% include "_connect.html" %}{% endif %}
+
+<section class="card" id="apps">
+  <h2>Connected apps</h2>
+  {% if grants %}
+  <ul class="list">
+    {% for g in grants %}
+    <li>
+      <div class="row">
+        <div>
+          <strong>{{ g.client_name or "Unnamed app" }}</strong> <span class="tag">{{ g.scope_label }}</span>
+          <div class="meta">Connected {{ g.created_at }} · last used {{ g.last_used_at or "never" }}</div>
+        </div>
+        <details class="confirm">
+          <summary><span class="button danger-quiet" role="button">Revoke</span></summary>
+          <p>{{ g.client_name or "This app" }} will lose access immediately.</p>
+          <form method="post" action="/account/grants/{{ g.id }}/revoke">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="danger">Revoke access</button>
+          </form>
+        </details>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No apps are connected.</p>
+  {% endif %}
+</section>
+
+<section class="card" id="keys">
+  <h2>API keys</h2>
+  <p class="muted small">For scripts and plugins that cannot sign in. Sent as <code>Authorization: Bearer &lt;key&gt;</code>.</p>
+  {% if new_key %}
+  <div class="notice ok" role="status">
+    <strong>Your new key. Copy it now; it will not be shown again.</strong>
+    <div class="copy"><code id="new-key">{{ new_key }}</code><button type="button" class="secondary" data-copy="new-key">Copy</button></div>
+    <span class="small">Claude Code:</span>
+    <div class="copy"><code id="new-key-cc">claude mcp add --transport http wwyd {{ mcp_url }} --header "Authorization: Bearer {{ new_key }}"</code><button type="button" class="secondary" data-copy="new-key-cc">Copy</button></div>
+  </div>
+  {% endif %}
+  {% if keys %}
+  <ul class="list">
+    {% for k in keys %}
+    <li>
+      <div class="row">
+        <div>
+          <strong>{{ k.name }}</strong> <span class="tag">{{ k.scope_label }}</span>
+          <div class="meta">wwyd_{{ k.prefix }}_… · created {{ k.created_at }} · last used {{ k.last_used_at or "never" }}</div>
+        </div>
+        <details class="confirm">
+          <summary><span class="button danger-quiet" role="button">Revoke</span></summary>
+          <p>Anything using this key stops working immediately.</p>
+          <form method="post" action="/account/keys/{{ k.id }}/revoke">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="danger">Revoke key</button>
+          </form>
+        </details>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <details {% if key_error %}open{% endif %}>
+    <summary><strong>Create an API key</strong></summary>
+    {% if key_error %}<div class="notice error" role="alert">{{ key_error }}</div>{% endif %}
+    <form method="post" action="/account/keys">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div class="field">
+        <label for="key-name">Name <span class="hint">So you recognise it later, e.g. "mail auto-responder".</span></label>
+        <input id="key-name" name="name" type="text" maxlength="80" required>
+      </div>
+      {{ scope_choice(kinds, audiences, "key") }}
+      <div class="actions"><button type="submit">Create key</button></div>
+    </form>
+  </details>
+</section>
+
+{% if not welcome %}{% include "_connect.html" %}{% endif %}
+
+<section class="card" id="limits">
+  <h2>Limits and usage</h2>
+  {% if limits_error %}<div class="notice error" role="alert">{{ limits_error }}</div>{% endif %}
+  {% if limits_ok %}<div class="notice ok" role="status">{{ limits_ok }}</div>{% endif %}
+  {{ usage_today(limits) }}
+  <details {% if limits_error %}open{% endif %}>
+    <summary><strong>Set your own lower limits</strong></summary>
+    {{ limits_form(limits, "/account/limits", csrf, "own", "Your limit",
+        "You can only lower a limit, never raise it above the admin ceiling or default. Leave a field empty for no limit of your own.",
+        "Save my limits") }}
+  </details>
+</section>
+
+<section class="card" id="password">
+  <h2>Change password</h2>
+  {% if password_error %}<div class="notice error" role="alert">{{ password_error }}</div>{% endif %}
+  {% if password_ok %}<div class="notice ok" role="status">{{ password_ok }}</div>{% endif %}
+  <form method="post" action="/account/password">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="email" name="username" value="{{ user.login }}" autocomplete="username" hidden>
+    <div class="field">
+      <label for="current">Current password</label>
+      <input id="current" name="current" type="password" autocomplete="current-password" required>
+    </div>
+    <div class="field">
+      <label for="new">New password <span class="hint">At least 10 characters. Other devices will be signed out; connected apps keep working.</span></label>
+      <input id="new" name="new" type="password" autocomplete="new-password" minlength="10" required>
+    </div>
+    <div class="actions"><button type="submit">Change password</button></div>
+  </form>
+</section>
+{% endblock %}

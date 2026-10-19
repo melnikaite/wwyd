@@ -1,0 +1,41 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Allow access?{% endblock %}
+{% block main %}
+<h1>Connect <span class="client">{{ client_name }}</span>?</h1>
+<p class="lead">
+  After you decide, you will be sent back to <span class="host">{{ redirect_host }}</span>.
+  {% if client_id_url %}<br><span class="small">App identity: {{ client_id_url }}</span>{% endif %}
+  Only continue if you started this connection yourself.
+</p>
+{% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+<form method="post" action="/consent">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="req" value="{{ req }}">
+  <section class="card">
+    <fieldset>
+      <legend>What may this app do?</legend>
+      {% for kind, title, desc in kinds %}
+      <label class="choice">
+        <input type="radio" name="scope" value="{{ kind }}" {% if selected_kind == kind %}checked{% endif %} required>
+        <span><strong>{{ title }}</strong><span class="hint">{{ desc }}</span></span>
+      </label>
+      {% if kind == "respond" %}
+      <div class="audiences" role="group" aria-label="Groups this app may answer for">
+        {% for a in audiences %}
+        <label><input type="checkbox" name="audiences[]" value="{{ a.name }}" {% if a.name in selected_audiences %}checked{% endif %}> {{ a.name }}{% if a.description %} <span class="hint">· {{ a.description }}</span>{% endif %}</label>
+        {% else %}
+        <p class="hint">You have no groups yet. Create them in your persona first.</p>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% endfor %}
+    </fieldset>
+    <p class="small muted">You can revoke this at any time on your account page.</p>
+    <div class="actions">
+      <button type="submit" name="decision" value="allow">Allow</button>
+      <button type="submit" name="decision" value="deny" class="secondary" formnovalidate>Deny</button>
+    </div>
+  </section>
+</form>
+{% endblock %}

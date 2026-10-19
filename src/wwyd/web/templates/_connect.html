@@ -1,0 +1,12 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+<section class="card{% if welcome %} highlight{% endif %}" id="connect">
+  <h2>{% if welcome %}You're set up. Now connect an app{% else %}Connect an app{% endif %}</h2>
+  <p class="muted small">Every app asks you to sign in here and choose what it may do.</p>
+  <h3>Claude Code</h3>
+  <div class="copy"><code id="snip-cc">claude mcp add --transport http wwyd {{ mcp_url }}</code><button type="button" class="secondary" data-copy="snip-cc">Copy</button></div>
+  <h3>Claude Desktop or claude.ai</h3>
+  <p class="small">Settings → Connectors → Add custom connector, then paste this URL:</p>
+  <div class="copy"><code id="snip-url">{{ mcp_url }}</code><button type="button" class="secondary" data-copy="snip-url">Copy</button></div>
+  <h3>ChatGPT</h3>
+  <p class="small">Settings → Apps &amp; Connectors → Create (developer mode), and use the same URL as the connector URL.</p>
+</section>

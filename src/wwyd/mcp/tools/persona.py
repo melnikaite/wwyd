@@ -5,13 +5,29 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from wwyd.mcp.caller import current_caller
 from wwyd.store import personas, portable
 
 if TYPE_CHECKING:
     from wwyd.mcp.server import WwydServer
+
+
+class LLMBackendIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preset: Literal["instance", "localai", "ollama", "lmstudio", "openrouter"] = Field(
+        description="instance = the server's shared default; the others are presets whose"
+        " base_url/model can be overridden."
+    )
+    base_url: str | None = Field(default=None, description="OpenAI-compatible base URL.")
+    model: str | None = None
+    api_key: str | None = Field(
+        default=None, description="Stored encrypted; omit to keep the current key, null to clear."
+    )
+    price_in_per_m: float | None = Field(default=None, description="USD per 1M input tokens.")
+    price_out_per_m: float | None = Field(default=None, description="USD per 1M output tokens.")
 
 
 def register(server: WwydServer) -> None:
@@ -45,7 +61,8 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(owner, read_only=True)
     async def get_settings() -> dict[str, Any]:
-        """Persona settings and where raw text goes."""
+        """Persona settings, limits (effective, admin ceilings, own), today's usage, the
+        spend-cap flag and where raw text goes."""
         return personas.get_settings(server.conn, current_caller().persona_id)
 
     @server.scoped_tool(owner)
@@ -61,8 +78,22 @@ def register(server: WwydServer) -> None:
         llm_for_ingest: Annotated[
             bool | None, Field(description="false: derive claims from code detectors only.")
         ] = None,
+        limits: Annotated[
+            dict[str, int | float | None] | None,
+            Field(
+                description='Your own lower limits, e.g. {"predict_per_day": 100}; values above'
+                " the default or admin ceiling are rejected; null removes one."
+            ),
+        ] = None,
+        llm: Annotated[
+            LLMBackendIn | None,
+            Field(
+                description="LLM backend. The new backend is checked with GET /models before"
+                " it is saved. Remote providers see predict situations and raw ingest text."
+            ),
+        ] = None,
     ) -> dict[str, Any]:
-        """Change persona settings; returns the new settings."""
+        """Change persona settings; returns the new settings (the API key is shown masked)."""
         return personas.update_settings(
             server.conn,
             current_caller().persona_id,
@@ -71,4 +102,6 @@ def register(server: WwydServer) -> None:
             escalate_below=escalate_below,
             disclosure_template=disclosure_template,
             llm_for_ingest=llm_for_ingest,
+            limits=limits,
+            llm=llm.model_dump(exclude_unset=True) if llm is not None else None,
         )

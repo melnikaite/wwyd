@@ -1,0 +1,110 @@
+#cloud-config
+# wwyd on a fresh Ubuntu 24.04 / 26.04 VM: Docker (official apt repo) + wwyd + Caddy (HTTPS).
+#
+# Before you paste this into your cloud provider's "user data" / "cloud-init" field:
+#   1. Change WWYD_DOMAIN below to your domain (e.g. wwyd.example.com).
+#   2. Point that domain's DNS A record at the VM's public IP.
+#   3. Allow inbound TCP 80 and 443 (and UDP 443) in the provider's firewall.
+# After boot (a few minutes), SSH in and run:   sudo wwyd-setup-link
+# It prints the one-time link that creates the admin account.
+
+write_files:
+  - path: /opt/wwyd/.env
+    permissions: "0600"
+    content: |
+      # ---- change these ----
+      WWYD_DOMAIN=wwyd.example.com
+      # Image to run. Until a published image exists, it is built from source on the VM.
+      WWYD_IMAGE=wwyd:local
+      WWYD_SOURCE=https://github.com/melnikaite/wwyd.git#main
+  - path: /opt/wwyd/docker-compose.yml
+    content: |
+      # wwyd + Caddy (automatic HTTPS). Usage:
+      #   WWYD_DOMAIN=wwyd.example.com docker compose up -d
+      #   docker compose logs wwyd        # shows the one-time setup link on first start
+      # The domain's DNS A/AAAA record must point at this machine, and ports 80 and 443 must be
+      # reachable from the internet, before Caddy can obtain a certificate.
+      name: wwyd
+      
+      services:
+        wwyd:
+          image: ${WWYD_IMAGE:-ghcr.io/melnikaite/wwyd:latest}
+          restart: unless-stopped
+          environment:
+            WWYD_PUBLIC_URL: https://${WWYD_DOMAIN:?set WWYD_DOMAIN to your domain}
+            # Trust X-Forwarded-For only from the proxy network below (Caddy).
+            WWYD_TRUSTED_PROXIES: 172.30.87.0/24
+          volumes:
+            - wwyd-data:/data
+          networks: [proxy]
+          # No "ports:": wwyd is reachable only through Caddy.
+      
+        caddy:
+          image: caddy:2
+          restart: unless-stopped
+          depends_on: [wwyd]
+          environment:
+            WWYD_DOMAIN: ${WWYD_DOMAIN}
+          ports:
+            - "80:80"
+            - "443:443"
+            - "443:443/udp"
+          volumes:
+            - ./Caddyfile:/etc/caddy/Caddyfile:ro
+            - caddy-data:/data
+            - caddy-config:/config
+          networks: [proxy]
+      
+      networks:
+        proxy:
+          ipam:
+            config:
+              - subnet: 172.30.87.0/24
+      
+      volumes:
+        wwyd-data:
+        caddy-data:
+        caddy-config:
+  - path: /opt/wwyd/Caddyfile
+    content: |
+      # Caddy obtains and renews the certificate for $WWYD_DOMAIN automatically.
+      # No ACME account email is needed; add a global { email you@example.com } block if you
+      # want expiry notices.
+      {$WWYD_DOMAIN} {
+      	encode zstd gzip
+      	reverse_proxy wwyd:8740 {
+      		# Streamable HTTP responses may be long-lived event streams.
+      		flush_interval -1
+      	}
+      }
+  - path: /usr/local/bin/wwyd-setup-link
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # Prints the one-time admin setup link from the wwyd container logs.
+      cd /opt/wwyd && docker compose logs wwyd 2>&1 | grep -o 'https://[^ ]*/setup?t=[^ ]*' | tail -n 1
+
+runcmd:
+  # Docker Engine from Docker's official apt repository
+  # (https://docs.docker.com/engine/install/ubuntu/).
+  - apt-get update
+  - apt-get install -y ca-certificates curl
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - >-
+    sh -c '. /etc/os-release && echo "deb [arch=$(dpkg --print-architecture)
+    signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu
+    ${UBUNTU_CODENAME:-$VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list'
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  - systemctl enable --now docker
+  # Build the image from source (skip if WWYD_IMAGE points at a published image).
+  - >-
+    sh -c 'set -a; . /opt/wwyd/.env; if [ "$WWYD_IMAGE" = "wwyd:local" ];
+    then docker build -t wwyd:local "$WWYD_SOURCE"; fi'
+  - cd /opt/wwyd && docker compose up -d
+  - sleep 15
+  - >-
+    sh -c 'echo "wwyd setup link: $(/usr/local/bin/wwyd-setup-link)
+    (run: sudo wwyd-setup-link)" | tee /dev/console'

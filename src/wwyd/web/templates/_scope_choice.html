@@ -1,0 +1,21 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{%- macro scope_choice(kinds, audiences, prefix) -%}
+<fieldset>
+  <legend>What may it do?</legend>
+  {% for kind, title, desc in kinds %}
+  <label class="choice">
+    <input type="radio" name="scope" value="{{ kind }}" required>
+    <span><strong>{{ title }}</strong><span class="hint">{{ desc }}</span></span>
+  </label>
+  {% if kind == "respond" %}
+  <div class="audiences" role="group" aria-label="Groups it may answer for">
+    {% for a in audiences %}
+    <label><input type="checkbox" name="audiences[]" value="{{ a.name }}"> {{ a.name }}</label>
+    {% else %}
+    <p class="hint">You have no groups yet.</p>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% endfor %}
+</fieldset>
+{%- endmacro -%}

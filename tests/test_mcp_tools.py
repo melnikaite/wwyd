@@ -22,12 +22,22 @@ OWNER_TOOLS = {
     "list_categories",
     "upsert_category",
     "merge_categories",
+    "compact",
+    "list_changes",
+    "undo_change",
     "export_persona",
     "import_persona",
     "delete_persona",
     "get_settings",
     "update_settings",
+    "ingest_raw",
+    "job_status",
+    "list_audit",
+    "get_persona",
+    "predict",
 }
+# SPEC §5: everything is owner-only except get_persona (read) and predict (respond).
+SCOPED_TOOLS = {"respond": {"predict"}, "read": {"get_persona"}}
 
 
 async def test_owner_tools_listed(client):
@@ -39,50 +49,36 @@ async def test_owner_tools_listed(client):
     assert all(t.description and t.output_schema for t in tools.values())
 
 
-def _register_dummies(server):
-    @server.scoped_tool(["read", "owner"])
-    async def get_persona() -> dict[str, Any]:
-        """Dummy for the scope test."""
-        return {"text": ""}
-
-    @server.scoped_tool(["respond", "owner"])
-    async def predict() -> dict[str, Any]:
-        """Dummy for the scope test."""
-        return {"type": "escalate"}
-
-    async def unscoped() -> dict[str, Any]:
+def _register_unscoped(server):
+    async def test_only_unscoped() -> dict[str, Any]:
         return {}
 
-    server.add_tool(unscoped, structured_output=True)  # no declared scope: hidden from all
+    server.add_tool(test_only_unscoped, structured_output=True)  # no scope: hidden from all
 
 
-@pytest.mark.parametrize("dummies", [False, True])
-@pytest.mark.parametrize(
-    ("scope", "visible"),
-    [("respond", {"predict"}), ("read", {"get_persona"}), ("owner", None)],
-)
-async def test_tools_filtered_by_scope(conn, user, scope, visible, dummies):
+@pytest.mark.parametrize("scope", ["respond", "read", "owner"])
+async def test_tools_filtered_by_scope(conn, user, scope):
     server = make_server(
         conn, user, scope=scope, audiences=("family",) if scope == "respond" else None
     )
-    if dummies:
-        _register_dummies(server)
+    _register_unscoped(server)
+    assert {n for n, s in server.tool_scopes().items() if scope in s} == (
+        SCOPED_TOOLS.get(scope) or OWNER_TOOLS
+    )
     async with Client(server) as c:
         names = {t.name for t in (await c.list_tools()).tools}
-        if visible is None:
-            expected = OWNER_TOOLS | ({"get_persona", "predict"} if dummies else set())
-        else:
-            expected = visible if dummies else set()  # M1 has no read/respond tools yet
-        assert names == expected
-        if scope != "owner":
-            err = await call_error(c, "list_claims")
-            assert err["code"] == "forbidden"
-        if dummies:
-            assert (await call_error(c, "unscoped"))["code"] == "not_found"
-            if scope != "owner":
-                (other,) = {"get_persona", "predict"} - visible
-                assert (await call_error(c, other))["code"] == "forbidden"
-                assert not (await c.call_tool(next(iter(visible)), {})).is_error
+        assert names == (SCOPED_TOOLS.get(scope) or OWNER_TOOLS)
+        assert (await call_error(c, "test_only_unscoped"))["code"] == "not_found"
+        if scope == "owner":
+            return
+        assert (await call_error(c, "list_claims"))["code"] == "forbidden"
+        (visible,) = SCOPED_TOOLS[scope]
+        (other,) = {"get_persona", "predict"} - {visible}
+        assert (await call_error(c, other))["code"] == "forbidden"
+        # The visible tool is reachable: no forbidden, at most an argument error.
+        res = await c.call_tool(visible, {})
+        if res.is_error:
+            assert res.structured_content["error"]["code"] == "invalid"
 
 
 async def test_no_caller_sees_nothing(conn, user):
@@ -127,7 +123,7 @@ async def test_claim_flow(client):
     assert [c["id"] for c in listed["claims"]] == [approved]  # owner may add approved directly
 
     review = await call(client, "review_claims", {"approve": [pending, "chg_x"]})
-    assert review["approved"] == 1 and review["not_supported_yet"] == ["chg_x"]
+    assert review["approved"] == 1 and review["not_found"] == ["chg_x"]
 
     found = await call(client, "search_claims", {"query": 'salary "writing'})
     assert [c["id"] for c in found["claims"]] == [pending] and "score" in found["claims"][0]

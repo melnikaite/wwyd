@@ -65,3 +65,28 @@ def test_delete_persona_requires_login_and_reseeds(conn, user):
         == "everyone"
     )
     assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+
+
+def test_delete_persona_removes_audit_jobs_changes_and_runs(conn, user):
+    from wwyd.store import audit, changes
+    from wwyd.store import jobs as job_store
+
+    pid = user.persona_id
+    add_claims(conn, pid, [{"kind": "trait", "category": "food", "text": "Likes tea"}])
+    audit.record(conn, pid, scope="owner", outcome="answer")
+    job_store.create_job(conn, pid, {})
+    changes.record(conn, pid, "merge", {})
+    conn.execute(
+        "INSERT INTO compaction_runs(persona_id, last_nightly_at) VALUES (?, ?)",
+        (pid, "2026-01-01T00:00:00Z"),
+    )
+    tables = ("audit", "jobs", "changes", "compaction_runs")
+
+    def count(table):
+        return conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE persona_id = ?", (pid,)
+        ).fetchone()[0]
+
+    assert all(count(t) > 0 for t in tables)
+    personas.delete_persona(conn, pid, user.login)
+    assert {t: count(t) for t in tables} == dict.fromkeys(tables, 0)

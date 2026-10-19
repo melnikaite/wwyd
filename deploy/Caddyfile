@@ -1,0 +1,10 @@
+# Caddy obtains and renews the certificate for $WWYD_DOMAIN automatically.
+# No ACME account email is needed; add a global { email you@example.com } block if you
+# want expiry notices.
+{$WWYD_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy wwyd:8740 {
+		# Streamable HTTP responses may be long-lived event streams.
+		flush_interval -1
+	}
+}

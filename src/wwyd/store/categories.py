@@ -153,7 +153,14 @@ def upsert_category(
         return {"category": _public(get_category(conn, persona_id, final_path)), "created": False}
 
 
-def _rename(conn: sqlite3.Connection, persona_id: str, row: sqlite3.Row, new_path: str) -> None:
+def _rename(
+    conn: sqlite3.Connection,
+    persona_id: str,
+    row: sqlite3.Row,
+    new_path: str,
+    *,
+    record: bool = True,
+) -> None:
     old_path = row["path"]
     check_category_path(new_path)
     if new_path.startswith(old_path + "/"):
@@ -187,7 +194,8 @@ def _rename(conn: sqlite3.Connection, persona_id: str, row: sqlite3.Row, new_pat
             "UPDATE claims SET proposed_category = ? WHERE persona_id = ? AND proposed_category = ?",
             (item["to"], persona_id, item["from"]),
         )
-    record_change(conn, persona_id, "category_rename", {"renamed": renamed})
+    if record:
+        record_change(conn, persona_id, "category_rename", {"renamed": renamed})
 
 
 def merge_categories(

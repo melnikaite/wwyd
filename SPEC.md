@@ -97,7 +97,9 @@ persona can switch `ingest_raw` to code-only derivation (`llm_for_ingest: false`
   and optional `wwyd.toml`.
 - **Config:** built-in defaults → `wwyd.toml` → `WWYD_*` env vars. The important keys are
   `public_url` (OAuth issuer; required for anything but localhost), `host`/`port` (default
-  `127.0.0.1:8740`), the instance default LLM, default limits, and optional SMTP.
+  `127.0.0.1:8740`), `trusted_proxies` (peers whose `X-Forwarded-For` is trusted for the
+  client IP; empty by default), the instance default LLM (`[llm]`), default limits
+  (`[limits]`), and optional SMTP.
 
 ### Source of truth per subsystem
 
@@ -586,19 +588,25 @@ persona's timezone (in-process scheduler, no cron), and on `compact`. Every writ
 ### 10.1 Dedupe and absorb
 - Candidates: same persona, same `kind`, same category, status `pending`/`approved`. For a
   new or changed claim, query FTS5 with its terms (top 5), then compute token-set Jaccard.
-- Jaccard ≥ 0.6 → duplicate. 0.3–0.6 → one batched LLM judge call per category:
-  `same | contradicts | different`.
+- Jaccard ≥ 0.6 → duplicate, unless the token symmetric difference contains a polarity
+  marker (negations such as never/not/rarely/avoids and their equivalents in the supported
+  languages; the set lives in `compact/constants.py`). 0.3–0.6, and ≥ 0.6 pairs with such a
+  marker → one batched LLM judge call per category: `same | contradicts | different`.
+  `add_claims` has no LLM, so it never absorbs a marker pair: the claim lands as pending
+  and compaction judges the pair later. On any LLM error the pairs are skipped (counted).
+  `compact(apply=false)` does not call the judge (it would record usage); it reports the
+  pairs it would send as `judge_pending`.
 - Keyed detector claims merge by `key` without any of this.
 - **pending + pending:** merge into one pending claim (newer text, summed evidence).
 - **new derivation + approved:** **absorb**: the approved claim keeps its text, evidence is
-  summed, `last_evidence_at` and confidence go up. The review queue only grows with new
-  information.
+  summed, `last_evidence_at` and confidence go up (`c = max + (1 − max) × min × 0.5`,
+  capped at 0.99). The review queue only grows with new information.
 - **new derivation + rejected:** drop it.
 - **approved + approved:** a `proposed` merge the owner approves via `review_claims`.
 
 ### 10.2 Contradictions
-Pairs judged `contradicts`: the winner has the newer `last_evidence_at` and the higher
-evidence weight (`confidence × log(1 + Σ sources)`); on a tie, newer wins. The loser is
+Pairs judged `contradicts`: the higher evidence weight (`confidence × log(1 + Σ sources)`)
+wins; on a tie, the newer `last_evidence_at` wins. The loser is
 archived with `superseded_by`. If the loser is owner-approved, it becomes a `proposed`
 change instead.
 
@@ -623,8 +631,10 @@ depends on.
 
 ## 11. Limits and usage
 
-The same code runs hosted and self-hosted. Effective limit = min(config default, admin
-ceiling for the user, the user's own setting).
+The same code runs hosted and self-hosted. Effective limit = min(admin ceiling for the
+user if set, else the config default; the user's own setting). An admin ceiling replaces
+the default and may be higher than it (larger plans); the user's own setting can only
+lower the effective value, never raise it.
 
 | Limit | Scope | Default |
 |---|---|---|
@@ -827,3 +837,26 @@ mid-price OpenRouter model, chosen at M3.
 changes are approved or dismissed with their `chg_…` IDs, which keeps the tool count at 25.
 
 **D15. Container images** will be published to GitHub Container Registry at M6.
+
+### Implementation notes
+
+Deviations and details recorded while implementing M2–M6:
+
+- **Guard on owner texts.** Guard part 3 also scans the owner's own texts, not only third
+  parties' (P2).
+- **Job columns.** `jobs` has two extra numeric columns, `progress` and `started_at`.
+- **Audience before limits.** `predict` resolves the audience before the limit check.
+- **Empty visible set.** When no claim is visible to the audience, `predict` escalates
+  `out_of_persona` without an LLM call.
+- **Usage accounting.** `record_predict` runs only when the LLM was actually called.
+- **Audit IDs** use the `adt_` prefix.
+- **LLM settings shape.** Persona setting `llm` is `{preset, base_url, model, api_key,
+  price_in_per_m, price_out_per_m}`; `api_key` is write-only and encrypted at rest. The
+  instance default is the `[llm]` config table / `WWYD_LLM_*` with the same fields.
+- **Preflight.** A failed `GET /models` preflight when saving a backend is rejected with
+  `invalid`.
+- **HTTP 402** from the LLM backend maps to `spend_cap`.
+- **Revocation.** `/revoke` needs an empty `client_secret` for public clients in this MCP
+  SDK version.
+- **Self-service resets** do not show the admin-reset notice on the account page.
+- **`/healthz`** is an unauthenticated liveness endpoint that does not touch the DB.

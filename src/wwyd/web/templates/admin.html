@@ -1,0 +1,80 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% from "_limits.html" import usage_today, limits_form %}
+{% block title %}Users & invites{% endblock %}
+{% block main %}
+<h1>Users &amp; invites</h1>
+<p class="lead">Manage who can use this server. Administrators never see anyone's persona.</p>
+{% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+{% if link_url %}
+<div class="notice ok" role="status">
+  <strong>{{ link_text }}</strong>
+  <div class="copy"><code id="link">{{ link_url }}</code><button type="button" class="secondary" data-copy="link">Copy</button></div>
+  <span class="small">Send it privately. It is shown only now.</span>
+</div>
+{% endif %}
+
+<section class="card">
+  <h2>Invite someone</h2>
+  <p class="small muted">Creates a one-time link (valid 7 days) where they choose their login and password.</p>
+  <form method="post" action="/admin/invite">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit">Create invite link</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Users</h2>
+  <ul class="list">
+    {% for u in users %}
+    <li>
+      <div class="row">
+        <div>
+          <strong>{{ u.login }}</strong>
+          {% if u.is_admin %}<span class="tag">admin</span>{% endif %}
+          {% if u.disabled_at %}<span class="tag danger">disabled</span>{% endif %}
+          {% if not u.has_password %}<span class="tag">no password</span>{% endif %}
+          <div class="meta">Created {{ u.created_at }}{% if u.disabled_at %} · disabled {{ u.disabled_at }}{% endif %}</div>
+          {% block user_limits scoped %}
+          {% set v = user_limits[u.id] %}
+          {% if v.spend.spend_capped %}<span class="tag danger">spend cap reached</span>{% endif %}
+          <details class="limits">
+            <summary>Limits and usage today</summary>
+            {{ usage_today(v) }}
+            {{ limits_form(v, "/admin/users/" ~ u.id ~ "/limits", csrf, "ceiling", "New ceiling",
+                "A ceiling replaces the default for this user and may be higher than it. Leave a field empty to use the default.",
+                "Save ceilings") }}
+          </details>
+          {% endblock %}
+        </div>
+        <div class="actions tight">
+          <form method="post" action="/admin/users/{{ u.id }}/reset">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="secondary">Reset link</button>
+          </form>
+          {% if me and u.id != me.id %}
+          {% if u.disabled_at %}
+          <form method="post" action="/admin/users/{{ u.id }}/enable">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="secondary">Enable</button>
+          </form>
+          {% else %}
+          <details class="confirm">
+            <summary><span class="button danger-quiet" role="button">Disable</span></summary>
+            <p>{{ u.login }} is signed out and all their apps and keys stop working until you enable them again.</p>
+            <form method="post" action="/admin/users/{{ u.id }}/disable">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <button type="submit" class="danger">Disable user</button>
+            </form>
+          </details>
+          {% endif %}
+          {% endif %}
+        </div>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
+{% block limits_section %}{# LIMITS: instance-wide limit defaults and usage summary go here. #}{% endblock %}
+{% endblock %}

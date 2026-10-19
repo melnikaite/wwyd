@@ -1,0 +1,21 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Reset your password{% endblock %}
+{% block main %}
+<h1>Reset your password</h1>
+{% if smtp %}
+<p class="lead">Enter your login. If it exists, we email it a link to choose a new password.</p>
+<section class="card">
+  <form method="post" action="/reset/request">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="field">
+      <label for="login">Login (email)</label>
+      <input id="login" name="login" type="email" autocomplete="username" required autofocus>
+    </div>
+    <div class="actions"><button type="submit">Send me a reset link</button></div>
+  </form>
+</section>
+{% else %}
+<p class="lead">This server cannot send email. Ask your administrator for a one-time reset link.</p>
+{% endif %}
+{% endblock %}

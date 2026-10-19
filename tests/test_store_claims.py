@@ -98,7 +98,7 @@ def test_absorb_merges_evidence(conn, pid):
     assert res["created"] == [] and res["absorbed"] == [{"index": 0, "into": first}]
     c = cl.get_claim(conn, pid, first)
     assert c["evidence"] == {"sources": {"message": 5, "note": 1}, "period": "2026-02..2026-06"}
-    assert c["confidence"] == 0.7
+    assert c["confidence"] == 0.76  # goes up (SPEC §10.1)
     assert c["text"] == "Short, no greeting."
 
 
@@ -302,7 +302,7 @@ def test_review(conn, pid):
     a, b, c = add(conn, pid, claim("A"), claim("B"), claim("C"))["created"]
     res = cl.review_claims(conn, pid, approve=[a, "clm_missing", "chg_abc"], reject=[b])
     assert (res["approved"], res["rejected"]) == (1, 1)
-    assert res["not_found"] == ["clm_missing"] and res["not_supported_yet"] == ["chg_abc"]
+    assert sorted(res["not_found"]) == ["chg_abc", "clm_missing"]
     assert res["applied_changes"] == 0 and res["dismissed_changes"] == 0
     assert cl.get_claim(conn, pid, a)["status"] == "approved"
     assert cl.get_claim(conn, pid, b)["status"] == "rejected"

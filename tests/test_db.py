@@ -7,11 +7,12 @@ from wwyd.store.personas import SEED_CATEGORIES, create_user, get_or_create_user
 def test_migrations_apply_once(tmp_path):
     conn = open_db(tmp_path / "a.db")
     assert migrate(conn) == []
-    rows = conn.execute("SELECT version, name FROM schema_migrations").fetchall()
-    assert [tuple(r) for r in rows] == [(1, "0001_init.sql")]
+    rows = conn.execute("SELECT version, name FROM schema_migrations ORDER BY version").fetchall()
+    assert [tuple(r) for r in rows][:2] == [(1, "0001_init.sql"), (2, "0002_auth.sql")]
     conn.close()
     conn = open_db(tmp_path / "a.db")  # reopen: nothing new to apply
-    assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
+    assert migrate(conn) == []
+    assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == len(rows)
 
 
 def test_pragmas(conn):
@@ -20,13 +21,21 @@ def test_pragmas(conn):
     assert conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
 
 
-def test_only_m1_tables(conn):
+def test_core_tables(conn):
     names = {
         r[0]
         for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         if not r[0].startswith(("sqlite_", "claims_fts_"))
     }
-    assert names == {
+    assert names >= {
+        "web_sessions",
+        "one_time_links",
+        "oauth_clients",
+        "pending_authorizations",
+        "oauth_codes",
+        "grants",
+        "tokens",
+        "api_keys",
         "schema_migrations",
         "users",
         "personas",

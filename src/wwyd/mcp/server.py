@@ -12,13 +12,15 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from mcp.server import MCPServer
+from mcp.server.caching import CacheHint
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import ValidationError
 from pydantic.fields import FieldInfo
 
 from wwyd import __version__
-from wwyd.errors import Forbidden, Invalid, NotFound, WwydError
+from wwyd.errors import Forbidden, Invalid, NotFound, RateLimited, WwydError
+from wwyd.limits import get_limiter
 from wwyd.logs import install_privacy_filter
 from wwyd.mcp.caller import Caller, CallerProvider, bind_caller, unbind_caller
 
@@ -41,13 +43,29 @@ def _aliases(fn: Callable[..., Any]) -> dict[str, str]:
     return out
 
 
-def error_result(error: WwydError) -> CallToolResult:
-    payload = {"error": error.to_payload()}
+def _payload_result(payload: dict[str, Any], *, is_error: bool) -> CallToolResult:
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))],
         structured_content=payload,
-        is_error=True,
+        is_error=is_error,
     )
+
+
+def rate_limited_escalation() -> CallToolResult:
+    """What ``predict`` returns over the per-call rate limit (SPEC §8.1): no error, no LLM."""
+    return _payload_result(
+        {
+            "type": "escalate",
+            "escalate": "rate_limited",
+            "reason": "too many requests; try again later",
+            "hints": [],
+        },
+        is_error=False,
+    )
+
+
+def error_result(error: WwydError) -> CallToolResult:
+    return _payload_result({"error": error.to_payload()}, is_error=True)
 
 
 class WwydServer(MCPServer):
@@ -55,6 +73,9 @@ class WwydServer(MCPServer):
 
     def __init__(self, conn: sqlite3.Connection, caller_provider: CallerProvider, **kwargs: Any):
         install_privacy_filter()
+        # tools/list depends on the caller's scope: never let a client reuse one caller's
+        # list for another authorization context.
+        kwargs.setdefault("cache_hints", {"tools/list": CacheHint(ttl_ms=0, scope="private")})
         super().__init__(name="wwyd", version=__version__, instructions=INSTRUCTIONS, **kwargs)
         self.conn = conn
         self._caller_provider = caller_provider
@@ -120,6 +141,13 @@ class WwydServer(MCPServer):
             return error_result(NotFound(f"unknown tool {name!r}"))
         if not self.is_allowed(caller, name):
             return error_result(Forbidden(f"tool {name!r} is not available with this access"))
+        assert caller is not None
+        try:
+            get_limiter(self.conn).check_request(
+                caller.user_id, caller.persona_id, caller.subject_id, name
+            )
+        except RateLimited as exc:
+            return rate_limited_escalation() if name == "predict" else error_result(exc)
         token = bind_caller(caller)  # type: ignore[arg-type]
         try:
             return await super().call_tool(name, arguments, context)
@@ -150,9 +178,11 @@ class WwydServer(MCPServer):
         return error_result(err)
 
 
-def build_server(conn: sqlite3.Connection, caller_provider: CallerProvider) -> WwydServer:
+def build_server(
+    conn: sqlite3.Connection, caller_provider: CallerProvider, **kwargs: Any
+) -> WwydServer:
     from wwyd.mcp.tools import register_all
 
-    server = WwydServer(conn, caller_provider)
+    server = WwydServer(conn, caller_provider, **kwargs)
     register_all(server)
     return server

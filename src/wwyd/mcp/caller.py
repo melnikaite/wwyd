@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Who is calling: the seam between transports/auth and tools.
 
-stdio fixes one owner-scoped caller per process. In M2 the HTTP transport supplies a
-provider that derives the caller from ``mcp.server.auth.middleware.auth_context
-.get_access_token()`` (grant/API key lookup -> user, persona, scope, audiences).
+stdio fixes one owner-scoped caller per process. Over HTTP,
+:func:`wwyd.auth.provider.http_caller_provider` derives the caller from
+``get_access_token()`` (grant/API key lookup -> user, persona, scope, audiences).
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ class Caller:
     scope: Scope
     audiences: tuple[str, ...] | None = None  # respond scope: permitted audience names
     client_name: str | None = None
+    # What limits are keyed on: the grant id (grt_…) or API key id (key_…); "stdio" on stdio.
+    subject_id: str = "stdio"
 
 
 CallerProvider = Callable[[], Caller | None]

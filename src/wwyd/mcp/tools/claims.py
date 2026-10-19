@@ -54,7 +54,8 @@ def register(server: WwydServer) -> None:
     async def add_claims(
         claims: Annotated[list[ClaimIn], Field(description="Up to 200 claims.")],
         absorb: Annotated[
-            bool, Field(description="Strengthen an identical existing claim instead of adding.")
+            bool,
+            Field(description="Strengthen an existing claim that says the same instead of adding."),
         ] = True,
     ) -> dict[str, Any]:
         """Add claims derived elsewhere. They land as pending unless status is approved.
@@ -158,8 +159,8 @@ def register(server: WwydServer) -> None:
         ] = False,
     ) -> dict[str, Any]:
         """Approve or reject claims in bulk. Rejected claims are kept as negative memory, so
-        the same claim is not proposed again. Change IDs (chg_...) are not supported yet and
-        come back under not_supported_yet."""
+        the same claim is not proposed again. Proposed change IDs (chg_..., see list_changes)
+        are accepted too: approving applies the change, rejecting dismisses it."""
         return store.review_claims(
             server.conn,
             persona_id(),

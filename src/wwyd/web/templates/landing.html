@@ -1,0 +1,36 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block main %}
+<h1>{{ title }}</h1>
+<p class="lead">
+  {% if kind == "setup" %}This is a new wwyd server. The account you create now is its administrator.
+  {% elif kind == "invite" %}Choose a login and password for your own wwyd account.
+  {% else %}Choose a new password. You will be signed out on all other devices.{% endif %}
+</p>
+{% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+<section class="card">
+  <form method="post" action="/{{ kind }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="t" value="{{ token }}">
+    <div class="field">
+      <label for="login">Login (email)</label>
+      {% if fixed_login %}
+      <input id="login" type="email" value="{{ fixed_login }}" readonly autocomplete="username">
+      {% else %}
+      <input id="login" name="login" type="email" autocomplete="username" required autofocus value="{{ login or '' }}">
+      <span class="hint">Used only to sign in. No emails are sent unless your administrator set that up.</span>
+      {% endif %}
+    </div>
+    <div class="field">
+      <label for="password">Password <span class="hint">At least {{ min_password }} characters. A few unrelated words work well.</span></label>
+      <input id="password" name="password" type="password" autocomplete="new-password" minlength="{{ min_password }}" required>
+    </div>
+    <div class="field">
+      <label for="password2">Repeat password</label>
+      <input id="password2" name="password2" type="password" autocomplete="new-password" minlength="{{ min_password }}" required>
+    </div>
+    <div class="actions"><button type="submit">{{ button }}</button></div>
+  </form>
+</section>
+{% endblock %}
