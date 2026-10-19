@@ -216,7 +216,7 @@ def _filters(
         where.append("c.kind = ?")
         args.append(_check_choice(kind, KINDS, "kind"))
     if category is not None:
-        check_category_path(category)
+        category = check_category_path(category)
         get_category(conn, persona_id, category)
         where.append("(cat.path = ? OR cat.path LIKE ? ESCAPE '\\')")
         escaped = category.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -524,6 +524,11 @@ def _add_one(
     kind = _check_choice(item.get("kind"), KINDS, "kind")
     text = check_text(item.get("text"))
     category = item.get("category")
+    if isinstance(category, str):
+        try:
+            category = check_category_path(category)
+        except Invalid:
+            category = None
     if not isinstance(category, str) or category not in categories:
         raise Invalid(
             "unknown category; see list_categories, or create it with upsert_category",
@@ -540,7 +545,7 @@ def _add_one(
         status = "pending"
     proposed = item.get("proposed_category")
     if proposed is not None:
-        check_category_path(proposed)
+        proposed = check_category_path(proposed)
 
     match = _absorb_target(conn, persona_id, kind, category_id, text)
     if match is not None and match["status"] == "rejected":
@@ -661,7 +666,7 @@ def update_claim(
         if kind is not None:
             sets["kind"] = _check_choice(kind, KINDS, "kind")
         if category is not None:
-            check_category_path(category)
+            category = check_category_path(category)
             sets["category_id"] = get_category(conn, persona_id, category)["id"]
         if visibility is not None:
             sets["visibility"] = _check_choice(visibility, VISIBILITIES, "visibility")

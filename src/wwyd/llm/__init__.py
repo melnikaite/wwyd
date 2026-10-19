@@ -16,7 +16,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-Purpose = Literal["route", "answer", "style", "notes", "decisions", "judge"]
+Purpose = Literal[
+    "route", "answer", "judge", "statements", "replies", "decisions", "describe_categories"
+]
 
 
 @dataclass(frozen=True)

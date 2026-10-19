@@ -19,6 +19,10 @@ USER_LIMIT_KEYS: tuple[str, ...] = (
     "spend_cap_usd",
     "max_claims_per_category",
     "max_approved_tokens",
+    "max_categories",
+    "new_categories_per_job",
+    "max_analyzers",
+    "sandbox_cpu_seconds_per_day",
 )
 # Limits whose value is a float; the rest are integers.
 FLOAT_LIMIT_KEYS = frozenset({"spend_cap_usd"})
@@ -41,10 +45,17 @@ class LimitDefaults:
     # Compaction size budget per persona (SPEC §10.4).
     max_claims_per_category: int = 30
     max_approved_tokens: int = 6000
+    # Organic categories (SPEC §4.4): per persona, seeds included; new ones per ingest job.
+    max_categories: int = 200
+    new_categories_per_job: int = 20
+    # LLM analyzers per persona (retired ones excluded) and sandbox run time per day (§7.5).
+    max_analyzers: int = 50
+    sandbox_cpu_seconds_per_day: int = 600
     # Instance-level only, never per user.
     llm_concurrency: int = 2
     llm_queue_timeout_s: float = 60.0
     llm_call_timeout_s: float = 120.0
+    sandbox_concurrency: int = 4
 
     def user_limits(self) -> dict[str, int | float | None]:
         values = asdict(self)

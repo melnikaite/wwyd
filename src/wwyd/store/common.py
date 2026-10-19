@@ -14,7 +14,7 @@ from wwyd.errors import Invalid
 from wwyd.ids import new_id, now_iso
 
 AUDIENCE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
-CATEGORY_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+MAX_CATEGORY_SEGMENT = 40
 MAX_CATEGORY_DEPTH = 3
 
 KINDS = ("trait", "preference", "habit", "decision_rule", "style", "boundary")
@@ -36,17 +36,12 @@ def check_audience_name(name: str) -> str:
 
 
 def check_category_path(path: str) -> str:
-    if not isinstance(path, str):
-        raise Invalid("category path must be a string", field="path")
-    segments = path.split("/")
-    if len(segments) > MAX_CATEGORY_DEPTH:
-        raise Invalid(f"category path deeper than {MAX_CATEGORY_DEPTH} levels", field="path")
-    if not all(CATEGORY_SEGMENT.match(seg) for seg in segments):
-        raise Invalid(
-            "category path segments must match [a-z0-9][a-z0-9_-]{0,39}, separated by '/'",
-            field="path",
-        )
-    return path
+    """Normalise and validate a category path; returns the normalised path (SPEC §4.4).
+
+    The rule lives in :func:`wwyd.store.categories.normalize_category_path`."""
+    from wwyd.store.categories import normalize_category_path
+
+    return normalize_category_path(path)
 
 
 def parent_path(path: str) -> str | None:

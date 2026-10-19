@@ -66,6 +66,27 @@ class LlmSettings:
         )
 
 
+@dataclass(frozen=True)
+class Thresholds:
+    """Instance thresholds read by ingest, analyzers and compaction (SPEC §7.4, §10.6)."""
+
+    analyzer_min_episodes: int = 100
+    split_threshold: int = 20
+
+
+_thresholds = Thresholds()
+
+
+def configure_thresholds(value: Thresholds) -> None:
+    """Install the instance thresholds (from :class:`Config`) for :func:`thresholds`."""
+    global _thresholds
+    _thresholds = value
+
+
+def thresholds() -> Thresholds:
+    return _thresholds
+
+
 @dataclass
 class Config:
     host: str = DEFAULT_HOST
@@ -86,8 +107,15 @@ class Config:
     # ``[auth] allow_insecure_redirects`` / ``WWYD_AUTH_ALLOW_INSECURE_REDIRECTS`` (SPEC §9.1):
     # accept plain-http redirect URIs on non-loopback hosts (LAN deployments).
     allow_insecure_redirects: bool = True
+    # Instance thresholds, not limits (SPEC §11): ``analyzer_min_episodes`` /
+    # ``WWYD_ANALYZER_MIN_EPISODES`` and ``split_threshold`` / ``WWYD_SPLIT_THRESHOLD``.
+    analyzer_min_episodes: int = 100
+    split_threshold: int = 20
 
     def __post_init__(self) -> None:
+        for name in ("analyzer_min_episodes", "split_threshold"):
+            if getattr(self, name) < 1:
+                raise ConfigError(f"{name} must be at least 1")
         if not isinstance(self.allow_insecure_redirects, bool):
             self.allow_insecure_redirects = _as_bool(
                 self.allow_insecure_redirects, "[auth] allow_insecure_redirects"
@@ -110,6 +138,10 @@ class Config:
             )
 
     @property
+    def thresholds(self) -> Thresholds:
+        return Thresholds(self.analyzer_min_episodes, self.split_threshold)
+
+    @property
     def public_host(self) -> str:
         return urlsplit(self.public_url).hostname or ""
 
@@ -130,7 +162,7 @@ class Config:
         return self.public_url + "/mcp"
 
 
-_INT_KEYS = {"port", "smtp_port"}
+_INT_KEYS = {"port", "smtp_port", "analyzer_min_episodes", "split_threshold"}
 _LIMIT_FIELDS = {f.name: f for f in fields(LimitDefaults)}
 _NONE_WORDS = {"none", "off", "unlimited"}
 
@@ -156,7 +188,7 @@ def _limit_value(name: str, raw: Any, source: str) -> int | float | None:
         raise ConfigError(f"{where} must be an integer, got {raw!r}")
     if not math.isfinite(raw) or raw < 0:
         raise ConfigError(f"{where} must be a finite number >= 0, got {raw!r}")
-    if name == "llm_concurrency" and raw < 1:
+    if name in ("llm_concurrency", "sandbox_concurrency") and raw < 1:
         raise ConfigError(f"{where} must be at least 1")
     return float(raw) if is_float else int(raw)
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Synthetic calendars and message streams with known ground truth."""
+"""Synthetic calendars and message streams as episodes, with known ground truth."""
 
 from __future__ import annotations
 
@@ -10,13 +10,17 @@ BERLIN = ZoneInfo("Europe/Berlin")
 
 
 def ev(day: date, h: int, m: int, minutes: int, response="accepted", attendees=3, tz=BERLIN):
+    """A meeting invite as a choice episode: the interval is the meeting's span."""
     start = datetime(day.year, day.month, day.day, h, m, tzinfo=tz)
     return {
-        "type": "calendar_event",
-        "start": start.isoformat(),
-        "end": (start + timedelta(minutes=minutes)).isoformat(),
-        "attendees": attendees,
-        "response": response,
+        "when": {
+            "start": start.isoformat(),
+            "end": (start + timedelta(minutes=minutes)).isoformat(),
+        },
+        "where": "online",
+        "category": "work/meetings",
+        "situation": f"meeting invite, {attendees} attendees",
+        "decision": response,
     }
 
 
@@ -29,8 +33,8 @@ def workdays(first: date, weeks: int):
 
 def calendar(first=date(2026, 2, 2), weeks=6):
     """Mon-Fri: 09:00 25 min, 09:40 50 min (15 min gap), 11:00 25 min (35 min gap);
-    Mon-Thu also 14:00 50 min and 15:00 25 min (10 min gap). Never on Friday afternoon. Plus declined invites:
-    big meetings (12 attendees) and ones leaving < 5 min of buffer."""
+    Mon-Thu also 14:00 50 min and 15:00 25 min (10 min gap). Never on Friday afternoon.
+    Plus declined invites: big meetings (12 attendees) and ones leaving < 5 min of buffer."""
     out = []
     for d in workdays(first, weeks):
         out += [ev(d, 9, 0, 25), ev(d, 9, 40, 50), ev(d, 11, 0, 25, attendees=6)]
@@ -44,33 +48,22 @@ def calendar(first=date(2026, 2, 2), weeks=6):
 
 
 def messages(audience: str, first=date(2026, 2, 2), weeks=5, per_day=2, tz=BERLIN):
-    """Other -> owner pairs on workdays at 10:00 / 15:00, owner replies after 3 min with
-    one short line."""
+    """Chat replies on workdays at 10:00 / 15:00: the interval runs from the incoming
+    message to the owner's reply 3 min later, one short line."""
     out = []
-    n = 0
     for d in workdays(first, weeks):
         for k in range(per_day):
-            n += 1
             ts = datetime(d.year, d.month, d.day, 10 + 5 * k, 0, tzinfo=tz)
-            thread = f"t{n}"
             out.append(
                 {
-                    "type": "message",
-                    "from_owner": False,
+                    "when": {
+                        "start": ts.isoformat(),
+                        "end": (ts + timedelta(minutes=3)).isoformat(),
+                    },
                     "audience": audience,
-                    "text": "Can you look at this when you have a minute please",
-                    "ts": ts.isoformat(),
-                    "thread": thread,
-                }
-            )
-            out.append(
-                {
-                    "type": "message",
-                    "from_owner": True,
-                    "audience": audience,
-                    "text": "sure, on it",
-                    "ts": (ts + timedelta(minutes=3)).isoformat(),
-                    "thread": thread,
+                    "category": "communication/chat",
+                    "situation": "Can you look at this when you have a minute please",
+                    "said": "sure, on it",
                 }
             )
     return out

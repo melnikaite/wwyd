@@ -6,12 +6,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from wwyd.mcp.tools import audiences, categories, claims, compaction, ingest, persona, predict
+from wwyd.mcp.tools import (
+    analyzers,
+    audiences,
+    categories,
+    claims,
+    compaction,
+    ingest,
+    persona,
+    predict,
+)
 
 if TYPE_CHECKING:
     from wwyd.mcp.server import WwydServer
 
 
 def register_all(server: WwydServer) -> None:
-    for module in (claims, audiences, categories, persona, predict, ingest, compaction):
+    for module in (claims, audiences, categories, persona, predict, ingest, compaction, analyzers):
         module.register(server)

@@ -1,37 +1,44 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LLM derivation of style, notes and decisions (SPEC §7.3).
+"""LLM passes over episodes (SPEC §7.6) and the category description call (§4.4).
 
 Builds prompts from the in-memory batch, chunked to about 2500 characters, and turns the
-model's JSON into candidate claims. Candidates are guarded (§7.4), deduplicated among
-themselves and returned; the job stores them through ``store.claims.add_claims``.
-Nothing here logs or stores prompt or response text.
+model's JSON into candidate claims: (a) statements -> claims of any kind; (b) replies per
+audience in chronological order, ``said`` with its ``situation`` as context; (c) decisions
+-> ``decision_rule`` when a pattern repeats, else low-confidence ``preference``. The model
+chooses a category within the episode's subtree (the only part of the tree it sees) or
+proposes one. Candidates are guarded (§7.7), deduplicated among themselves and returned;
+the job stores them through ``store.claims.add_claims``. Nothing here logs or stores prompt
+or response text.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from wwyd.errors import Invalid
+from wwyd.ingest.episodes import Batch
 from wwyd.ingest.guard import BatchGuard
-from wwyd.ingest.records import Batch, Decision, Message
-from wwyd.store.common import KINDS, MAX_TEXT, check_category_path, normalize_text, parent_path
+from wwyd.store.categories import normalize_category_path
+from wwyd.store.common import KINDS, MAX_TEXT, normalize_text, parent_path
 
 CHUNK_CHARS = 2500
+CONTEXT_CHARS = 600  # a reply's situation is context only: kept short
 # Token estimate per call (SPEC §7.1): (chars of system + user) / CHARS_PER_TOKEN plus a
 # fixed output allowance per purpose. A conservative estimate, not a bound: the job stops
 # before a call whose estimate does not fit the remaining daily budget, so the cap can be
 # overrun by at most one call's actual excess over its estimate.
 CHARS_PER_TOKEN = 3  # conservative for Cyrillic and most non-English text
-OUTPUT_TOKENS = {"style": 800, "notes": 1000, "decisions": 1000}
+OUTPUT_TOKENS = {"replies": 800, "statements": 1000, "decisions": 1000, "describe_categories": 600}
 MAX_CLAIMS_PER_CALL = 8
+MAX_DESCRIPTION_CHARS = 200
 DEDUPE_JACCARD = 0.6
-SATURATION_CALLS = 5  # consecutive style calls of one audience with nothing new (§7.1)
+SATURATION_CALLS = 5  # consecutive reply calls of one audience with nothing new (§7.1)
 SINGLE_DECISION_CONFIDENCE = 0.3
 RULE_CONFIDENCE = 0.6
 
@@ -65,9 +72,25 @@ def _schema(extra: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
-STYLE_SCHEMA = _schema()
-NOTES_SCHEMA = _schema()
+REPLIES_SCHEMA = _schema()
+STATEMENTS_SCHEMA = _schema()
 DECISIONS_SCHEMA = _schema({"support": {"type": "integer"}})
+DESCRIBE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["descriptions"],
+    "properties": {
+        "descriptions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["path", "description"],
+                "properties": {"path": {"type": "string"}, "description": {"type": "string"}},
+            },
+        }
+    },
+}
 
 _COMMON_RULES = """Rules:
 - One statement per claim, at most 200 characters, about the owner in the third person or
@@ -84,7 +107,7 @@ _COMMON_RULES = """Rules:
 Categories:
 """
 
-STYLE_SYSTEM = (
+REPLIES_SYSTEM = (
     """You describe how one person (the owner) writes and talks to one group of people (an
 "audience"). The input contains excerpts: lines starting with OWNER are the owner's words,
 lines starting with OTHER are the other side's words, given only as context.
@@ -109,7 +132,7 @@ Answer:
 """
 )
 
-NOTES_SYSTEM = (
+STATEMENTS_SYSTEM = (
     """The owner wrote notes about themselves. Extract claims about the owner's character,
 preferences, habits, rules for decisions, communication style and boundaries.
 Return JSON {"claims": [...]}; kind is one of: trait, preference, habit, decision_rule,
@@ -151,20 +174,33 @@ Answer:
 """
 )
 
+DESCRIBE_SYSTEM = """You write a one-line description for each new category in the
+knowledge base of one person (the owner). A category groups what the owner does and
+prefers in one area of life. You see only the category paths (segments joined by "/").
+Rules:
+- One sentence per path, at most 120 characters, saying what the category holds.
+- Never mention people's names, companies, places, links, emails or phone numbers.
+- Write the description in the language of the path.
+- Return JSON {"descriptions": [{"path": ..., "description": ...}]}, one item per path.
+
+Example:
+Input:
+- hobbies/films
+- кино/сериалы
+Answer:
+{"descriptions": [{"path": "hobbies/films", "description": "Which films the owner watches and how they rate them."},
+{"path": "кино/сериалы", "description": "Какие сериалы владелец смотрит и досматривает ли их."}]}
+"""
+
 ALLOWED_KINDS = {
-    "style": ("style", "boundary", "preference"),
-    "notes": KINDS,
+    "replies": ("style", "boundary", "preference"),
+    "statements": KINDS,
     "decisions": ("decision_rule", "preference"),
 }
-DEFAULT_CATEGORY = {
-    "style": "communication/style",
-    "notes": None,
-    "decisions": "work/decisions",
-}
 
 
-# (timestamp, prompt segment, record type, batch indices of the records in the segment)
-Item = tuple[datetime | None, str, str, tuple[int, ...]]
+# (timestamp, prompt segment, class, batch index, episode category)
+Item = tuple[datetime | None, str, str, int, str]
 
 
 @dataclass
@@ -205,6 +241,12 @@ class Call:
     sources: dict[str, int]
     period: str | None
     records: frozenset[int] = frozenset()  # batch indices covered by this call
+    # The category a claim lands in when the model names none it may use (the call's most
+    # frequent episode category), and the paths it may choose (the episodes' subtrees).
+    default_category: str | None = None
+    allowed: frozenset[str] = frozenset()
+    # describe_categories: path -> category ID of the categories to describe.
+    targets: dict[str, str] = field(default_factory=dict)
 
     @property
     def estimated_tokens(self) -> int:
@@ -229,161 +271,205 @@ def _one_line(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def build_calls(batch: Batch, categories: dict[str, str]) -> list[Call]:
-    """All LLM calls for a batch, in order: style per audience, notes, decisions."""
-    cat_list = "\n".join(
-        f"- {path}: {desc}" if desc else f"- {path}" for path, desc in categories.items()
+def subtree(categories: dict[str, str], roots: Iterable[str]) -> frozenset[str]:
+    """Every path in ``categories`` that is one of ``roots`` or lies below one."""
+    roots = set(roots)
+    return frozenset(
+        p for p in categories if p in roots or any(p.startswith(r + "/") for r in roots)
     )
+
+
+def _category_list(categories: dict[str, str], allowed: Iterable[str]) -> str:
+    return "\n".join(
+        f"- {path}: {categories[path]}" if categories.get(path) else f"- {path}"
+        for path in sorted(allowed)
+    )
+
+
+def describe_call(created: list[dict[str, str]]) -> Call | None:
+    """The one batched description call for the categories a job created (covers no
+    episodes)."""
+    if not created:
+        return None
+    targets = {c["path"]: c["id"] for c in created}
+    return Call(
+        "describe_categories",
+        DESCRIBE_SYSTEM,
+        "\n".join(f"- {p}" for p in targets),
+        DESCRIBE_SCHEMA,
+        "all",
+        {},
+        None,
+        targets=targets,
+    )
+
+
+def build_calls(
+    batch: Batch,
+    categories: dict[str, str],
+    *,
+    default_audience: str,
+    decision_min_episodes: int,
+) -> list[Call]:
+    """All pass calls for a batch, in order: statements, replies per audience, decisions.
+
+    Decisions only for categories with fewer than ``decision_min_episodes`` episodes in the
+    batch; larger ones are left to annotation and analyzers (SPEC §7.6)."""
     calls: list[Call] = []
 
-    # Style: owner messages with the preceding non-owner message, and owner call turns.
-    per_audience: dict[str, list[Item]] = defaultdict(list)
-    threads: dict[tuple[str, str], list] = defaultdict(list)
-    for m in batch.messages:
-        threads[(m.audience, m.thread)].append(m)
-    for (audience, _), msgs in threads.items():
-        msgs.sort(key=lambda m: (m.ts, m.position if m.position is not None else 0))
-        context: Message | None = None
-        waiting: list[int] = []  # all non-owner messages since the last owner message
-        for m in msgs:
-            if not m.from_owner:
-                context = m
-                waiting.append(m.index)
-                continue
-            seg = (
-                f"OTHER: {_one_line(context.text)}\n" if context else ""
-            ) + f"OWNER: {_one_line(m.text)}"
-            # The whole run of waiting messages shares the reply's fate (processed or
-            # remaining): the reply-latency detector pairs the first of them with it.
-            per_audience[audience].append((m.ts, seg, "message", (m.index, *waiting)))
-            context, waiting = None, []
-    for t in batch.transcripts:
-        context = None
-        for speaker, text in t.turns:
-            if speaker != "owner":
-                context = text
-                continue
-            seg = (
-                f"OTHER: {_one_line(context)}\n" if context else ""
-            ) + f"OWNER: {_one_line(text)}"
-            per_audience[t.audience].append((t.ts, seg, "call_transcript", (t.index,)))
-            context = None
-    system = STYLE_SYSTEM.replace("{categories}", cat_list)
-    for audience in sorted(per_audience):
-        items = sorted(per_audience[audience], key=lambda x: x[0])
+    def emit(
+        purpose: str,
+        system: str,
+        schema: dict[str, Any],
+        items: list[Item],
+        header: str,
+        audiences: str | list[str],
+        *,
+        numbered: bool = False,
+    ) -> None:
         for chunk in _chunked_items(items):
-            sources: dict[str, int] = defaultdict(int)
-            for _, _, kind, _ in chunk:
-                sources[kind] += 1
+            cats = Counter(it[4] for it in chunk)
+            allowed = subtree(categories, cats)
+            segs = [it[1] for it in chunk]
+            if numbered:
+                segs = [f"{i}. {seg}" for i, seg in enumerate(segs, start=1)]
             calls.append(
                 Call(
-                    "style",
-                    system,
-                    f"Audience: {audience}\n" + "\n".join(seg for _, seg, _, _ in chunk),
-                    STYLE_SCHEMA,
-                    [audience],
-                    dict(sources),
+                    purpose,
+                    system.replace("{categories}", _category_list(categories, allowed)),
+                    header + "\n".join(segs),
+                    schema,
+                    audiences,
+                    {purpose_class[purpose]: len(chunk)},
                     _month_period(it[0] for it in chunk),
-                    _indices(chunk),
+                    frozenset(it[3] for it in chunk),
+                    default_category=cats.most_common(1)[0][0],
+                    allowed=allowed,
                 )
             )
 
-    if batch.notes:
-        system = NOTES_SYSTEM.replace("{categories}", cat_list)
-        items = [(n.ts, f"NOTE: {_one_line(n.text)}", "note", (n.index,)) for n in batch.notes]
-        for chunk in _chunked_items(items):
-            calls.append(
-                Call(
-                    "notes",
-                    system,
-                    "\n".join(seg for _, seg, _, _ in chunk),
-                    NOTES_SCHEMA,
-                    "all",
-                    {"note": len(chunk)},
-                    _month_period(it[0] for it in chunk),
-                    _indices(chunk),
-                )
-            )
+    purpose_class = {"statements": "statement", "replies": "reply", "decisions": "decision"}
 
-    by_audience: dict[str | None, list[Decision]] = defaultdict(list)
-    for d in batch.decisions:
-        by_audience[d.audience].append(d)
-    system = DECISIONS_SYSTEM.replace("{categories}", cat_list)
-    for audience in sorted(by_audience, key=lambda a: a or ""):
-        items = [
-            (
-                d.ts,
-                f"SITUATION: {_one_line(d.situation)} CHOICE: {_one_line(d.choice)}",
-                "decision",
-                (d.index,),
+    # (a) Statements, grouped by audience (None: about everyone) and category.
+    groups: dict[tuple[str, str], list[Item]] = defaultdict(list)
+    for ep in batch.episodes:
+        if ep.is_statement:
+            seg = f"NOTE: {_one_line(ep.said or '')}"
+            groups[(ep.audience or "", ep.category)].append(
+                (ep.start, seg, "statement", ep.index, ep.category)
             )
-            for d in by_audience[audience]
-        ]
-        for chunk in _chunked_items(items):
-            lines = [f"{i}. {it[1]}" for i, it in enumerate(chunk, start=1)]
-            calls.append(
-                Call(
-                    "decisions",
-                    system,
-                    (f"Audience: {audience}\n" if audience else "") + "\n".join(lines),
-                    DECISIONS_SCHEMA,
-                    [audience] if audience else "all",
-                    {"decision": len(chunk)},
-                    _month_period(it[0] for it in chunk),
-                    _indices(chunk),
-                )
+    for (audience, _), items in sorted(groups.items()):
+        emit(
+            "statements",
+            STATEMENTS_SYSTEM,
+            STATEMENTS_SCHEMA,
+            _chronological(items),
+            f"Audience: {audience}\n" if audience else "",
+            [audience] if audience else "all",
+        )
+
+    # (b) Replies per audience in chronological order (the default audience for style).
+    replies: dict[str, list[Item]] = defaultdict(list)
+    for ep in batch.episodes:
+        if ep.is_reply:
+            context = _one_line(ep.situation or "")[:CONTEXT_CHARS]
+            seg = f"OTHER: {context}\nOWNER: {_one_line(ep.said or '')}"
+            replies[ep.audience or default_audience].append(
+                (ep.start, seg, "reply", ep.index, ep.category)
             )
+    for audience in sorted(replies):
+        emit(
+            "replies",
+            REPLIES_SYSTEM,
+            REPLIES_SCHEMA,
+            _chronological(replies[audience]),
+            f"Audience: {audience}\n",
+            [audience],
+        )
+
+    # (c) Decisions, per audience and category, only for small categories.
+    per_category = Counter(ep.category for ep in batch.episodes)
+    decisions: dict[tuple[str, str], list[Item]] = defaultdict(list)
+    for ep in batch.episodes:
+        if ep.decision is None or per_category[ep.category] >= decision_min_episodes:
+            continue
+        where = f" ({_one_line(ep.where)})" if ep.where else ""
+        situation = f"SITUATION{where}: {_one_line(ep.situation)} " if ep.situation else ""
+        seg = f"{situation}CHOICE: {_one_line(ep.decision)}"
+        decisions[(ep.audience or "", ep.category)].append(
+            (ep.start, seg, "decision", ep.index, ep.category)
+        )
+    for (audience, category), items in sorted(decisions.items()):
+        emit(
+            "decisions",
+            DECISIONS_SYSTEM,
+            DECISIONS_SCHEMA,
+            _chronological(items),
+            (f"Audience: {audience}\n" if audience else "") + f"Category: {category}\n",
+            [audience] if audience else "all",
+            numbered=True,
+        )
     return calls
 
 
-def _indices(chunk: list[Item]) -> frozenset[int]:
-    return frozenset(i for it in chunk for i in it[3])
+def _chronological(items: list[Item]) -> list[Item]:
+    """By timestamp (untimed ones keep batch order, after the timed ones)."""
+    return sorted(items, key=lambda it: (it[0] is None, it[0] or datetime.min, it[3]))
 
 
 def _chunked_items(items: list[Item]) -> list[list[Item]]:
     out: list[list[Item]] = []
     current: list[Item] = []
     size = 0
-    for ts, seg, kind, indices in items:
+    for ts, seg, kind, index, category in items:
         seg = seg[:CHUNK_CHARS]
         if current and size + len(seg) + 1 > CHUNK_CHARS:
             out.append(current)
             current, size = [], 0
-        current.append((ts, seg, kind, indices))
+        current.append((ts, seg, kind, index, category))
         size += len(seg) + 1
     if current:
         out.append(current)
     return out
 
 
+def _normalized(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return normalize_category_path(value.strip())
+    except Invalid:
+        return None
+
+
 def _resolve_category(
-    raw_category: Any, raw_proposed: Any, purpose: str, categories: dict[str, str]
+    raw_category: Any, raw_proposed: Any, call: Call
 ) -> tuple[str, str | None] | None:
-    proposed: str | None = None
-    for candidate in (raw_proposed, raw_category):
-        if isinstance(candidate, str) and candidate and candidate not in categories:
-            try:
-                proposed = check_category_path(candidate.strip().lower())
-                break
-            except Invalid:
-                continue
-    if isinstance(raw_category, str) and raw_category in categories:
-        return raw_category, proposed
+    """A path the call may use (within its episodes' subtrees) and an optional proposal.
+
+    A path outside the allowed subtrees becomes ``proposed_category``; the claim is stored
+    under its closest allowed ancestor, else under the call's default category."""
+    allowed = call.allowed
+    category = _normalized(raw_category)
+    proposed = next(
+        (p for p in (_normalized(raw_proposed), category) if p is not None and p not in allowed),
+        None,
+    )
+    if category is not None and category in allowed:
+        return category, proposed
     current = proposed
     while current is not None:
-        if current in categories:
+        if current in allowed:
             return current, (proposed if current != proposed else None)
         current = parent_path(current)
-    default = DEFAULT_CATEGORY[purpose]
-    if default is not None and default in categories:
-        return default, proposed
+    if call.default_category is not None:
+        return call.default_category, proposed
     return None
 
 
 def to_candidates(
     call: Call,
     data: Any,
-    categories: dict[str, str],
     guard: BatchGuard,
     counts: DeriveCounts,
 ) -> list[Candidate]:
@@ -419,9 +505,7 @@ def to_candidates(
         if kind not in ALLOWED_KINDS[call.purpose]:
             counts.invalid += 1
             continue
-        resolved = _resolve_category(
-            item.get("category"), item.get("proposed_category"), call.purpose, categories
-        )
+        resolved = _resolve_category(item.get("category"), item.get("proposed_category"), call)
         if resolved is None:
             counts.invalid += 1
             continue
@@ -440,6 +524,34 @@ def to_candidates(
                 proposed_category=proposed,
             )
         )
+    return out
+
+
+def to_descriptions(
+    call: Call, data: Any, guard: BatchGuard, counts: DeriveCounts
+) -> dict[str, str]:
+    """category ID -> guarded one-line description from a describe_categories reply."""
+    if not isinstance(data, dict) or not isinstance(data.get("descriptions"), list):
+        counts.failed_calls += 1
+        return {}
+    out: dict[str, str] = {}
+    for item in data["descriptions"]:
+        if not isinstance(item, dict):
+            counts.invalid += 1
+            continue
+        path = _normalized(item.get("path"))
+        text = item.get("description")
+        if path not in call.targets or not isinstance(text, str):
+            counts.invalid += 1
+            continue
+        text = _one_line(text)
+        if not text or len(text) > MAX_DESCRIPTION_CHARS:
+            counts.invalid += 1
+            continue
+        if guard.check(text) is not None:
+            counts.dropped_by_guard += 1
+            continue
+        out[call.targets[path]] = text
     return out
 
 
@@ -496,3 +608,15 @@ def same_claim(a: Candidate, b: Candidate) -> bool:
     ta, tb = _tokens(a.text), _tokens(b.text)
     union = ta | tb
     return bool(union) and len(ta & tb) / len(union) >= DEDUPE_JACCARD
+
+
+def guard_for(batch: Batch, vocabulary: set[str]) -> BatchGuard:
+    """The batch guard (§7.7): ``said`` is the only owner text; ``situation``,
+    ``decision`` and ``where`` are non-owner text (5-gram check). Part 3 scans both."""
+    other: list[str] = []
+    owner: list[str] = []
+    for ep in batch.episodes:
+        other.extend(t for t in (ep.situation, ep.decision, ep.where) if t)
+        if ep.said:
+            owner.append(ep.said)
+    return BatchGuard(other_texts=other, all_texts=other + owner, vocabulary=vocabulary)

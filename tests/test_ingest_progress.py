@@ -11,10 +11,11 @@ from conftest import call, call_error, make_server
 from mcp import Client
 
 from wwyd.errors import RateLimited
-from wwyd.ingest import jobs, style
-from wwyd.ingest.records import parse_batch
+from wwyd.ingest import jobs, passes
+from wwyd.ingest.episodes import parse_batch
 from wwyd.limits import get_limiter
 from wwyd.store.audiences import upsert_audience
+from wwyd.store.categories import normalize_category_path
 
 pytestmark = pytest.mark.anyio
 
@@ -27,35 +28,32 @@ def setup(conn, pid, fake_llm, monkeypatch):
     upsert_audience(conn, pid, "work-slack")
     monkeypatch.setattr(jobs, "FLUSH_EVERY", 2)
     fake_llm.on("judge", {"verdicts": []})
-    fake_llm.on("notes", {"claims": []})
+    fake_llm.on("statements", {"claims": []})
+    fake_llm.on("describe_categories", {"descriptions": []})
 
 
 def pairs(n, start=0, audience="work-slack", word="ok"):
-    """``n`` other -> owner pairs, one hour apart; each owner reply is ~1100 chars, so one
-    style call covers two pairs (record indices 4k..4k+3)."""
+    """``n`` chat replies, one hour apart; each ``said`` is ~1100 chars, so one reply call
+    covers two episodes (indices 2k, 2k+1)."""
     out = []
     for i in range(start, start + n):
         ts = BASE + timedelta(hours=i)
         out.append(
             {
-                "type": "message",
-                "from_owner": False,
+                "when": {"start": ts.isoformat(), "end": (ts + timedelta(minutes=1)).isoformat()},
                 "audience": audience,
-                "text": f"question {i}",
-                "ts": ts.isoformat(),
-                "thread": f"t{i}",
+                "category": "communication/style",
+                "situation": f"question {i}",
+                "said": f"reply {i} " + f"{word} " * 360,
             }
         )
-        out.append(
-            {
-                "type": "message",
-                "from_owner": True,
-                "audience": audience,
-                "text": f"reply {i} " + f"{word} " * 360,
-                "ts": (ts + timedelta(minutes=1)).isoformat(),
-                "thread": f"t{i}",
-            }
-        )
+    return out
+
+
+def note(text, ts=None):
+    out = {"category": "food", "said": text}
+    if ts is not None:
+        out["when"] = ts
     return out
 
 
@@ -89,16 +87,16 @@ DISTINCT = [
 
 def distinct_replies(fake_llm, fail_at=None, exc=None):
     def reply(c):
-        n = len(fake_llm.by_purpose("style"))
+        n = len(fake_llm.by_purpose("replies"))
         if fail_at is not None and n == fail_at:
             raise exc or RateLimited("daily LLM token limit reached", retry_after=60)
         return claim(DISTINCT[n - 1])
 
-    fake_llm.on("style", reply)
+    fake_llm.on("replies", reply)
 
 
 async def submit(client, records, **kw):
-    out = await call(client, "ingest_raw", {"records": records, **kw})
+    out = await call(client, "ingest_raw", {"episodes": records, **kw})
     await jobs.wait(out["job_id"])
     return out, await call(client, "job_status", {"job_id": out["job_id"]})
 
@@ -118,7 +116,7 @@ async def test_flush_survives_rate_limit_mid_job(client, conn, fake_llm):
     # Calls 1-3 completed (two flushed by the periodic flush, one on the way out).
     assert style_texts(conn) == set(DISTINCT[:3])
     assert status["counts"]["llm_calls"] == 4
-    assert status["remaining_records"] == list(range(12, 20))
+    assert status["remaining_records"] == list(range(6, 10))
 
 
 async def test_llm_unavailable_is_partial(client, conn, fake_llm):
@@ -128,15 +126,22 @@ async def test_llm_unavailable_is_partial(client, conn, fake_llm):
     _, status = await submit(client, pairs(4))
     assert status["status"] == "partial" and status["error_code"] == "llm_unavailable"
     assert "retry_after" not in status
-    assert status["remaining_records"] == [4, 5, 6, 7]
+    assert status["remaining_records"] == [2, 3]
     assert style_texts(conn) == {DISTINCT[0]}
 
 
 def call_estimates(conn, pid, records):
     batch = parse_batch(
-        records, tz=UTC, audiences={"work-slack", "everyone"}, default_audience="everyone"
+        records,
+        tz=UTC,
+        audiences={"work-slack", "everyone"},
+        default_audience="everyone",
+        normalize_category=normalize_category_path,
     )
-    return [c.estimated_tokens for c in style.build_calls(batch, jobs._categories(conn, pid))]
+    calls = passes.build_calls(
+        batch, jobs._categories(conn, pid), default_audience="everyone", decision_min_episodes=100
+    )
+    return [c.estimated_tokens for c in calls]
 
 
 async def test_budget_stops_before_call_that_would_not_fit(client, conn, user, fake_llm):
@@ -148,31 +153,30 @@ async def test_budget_stops_before_call_that_would_not_fit(client, conn, user, f
 
     def reply(c):
         # Spend exactly the estimate, like a backend reporting its usage.
-        n = len(fake_llm.by_purpose("style"))
+        n = len(fake_llm.by_purpose("replies"))
         limiter.record_llm_usage(user.user_id, user.persona_id, est[n - 1], 0, None)
         return claim(DISTINCT[n - 1])
 
-    fake_llm.on("style", reply)
+    fake_llm.on("replies", reply)
     out, status = await submit(client, records)
     assert out["estimated_tokens"] == sum(est)
     assert out["remaining_tokens"] == est[0] + est[1] + est[2] // 2
-    assert len(fake_llm.by_purpose("style")) == 2  # the third would not have fit
+    assert len(fake_llm.by_purpose("replies")) == 2  # the third would not have fit
     assert status["status"] == "partial" and status["error_code"] == "rate_limited"
-    assert status["remaining_records"] == list(range(8, 20))
+    assert status["remaining_records"] == list(range(4, 10))
     assert style_texts(conn) == set(DISTINCT[:2])
 
 
-async def test_no_budget_left_runs_detectors_only(client, conn, user, fake_llm):
+async def test_no_budget_left_runs_analyzers_only(client, conn, user, fake_llm):
     limiter = get_limiter(conn)
     limiter.set_own_limits(user.user_id, {"llm_tokens_per_day": 1000})
     limiter.record_llm_usage(user.user_id, user.persona_id, 1000, 0, None)
     distinct_replies(fake_llm)
-    note = {"type": "note", "text": "I like tea.", "ts": BASE.isoformat()}
-    out, status = await submit(client, [*pairs(2), note])
-    assert out["accepted"] == 5 and out["estimated_tokens"] > 0
+    out, status = await submit(client, [*pairs(2), note("I like tea.", BASE.isoformat())])
+    assert out["accepted"] == 3 and out["estimated_tokens"] > 0
     assert out["remaining_tokens"] == 0
-    assert fake_llm.by_purpose("style") == [] and fake_llm.by_purpose("notes") == []
-    assert status["status"] == "partial" and status["remaining_records"] == [0, 1, 2, 3, 4]
+    assert fake_llm.by_purpose("replies") == [] and fake_llm.by_purpose("statements") == []
+    assert status["status"] == "partial" and status["remaining_records"] == [0, 1, 2]
 
 
 async def test_no_llm_step_estimates_zero(client):
@@ -181,24 +185,24 @@ async def test_no_llm_step_estimates_zero(client):
     assert "remaining_records" not in status
 
 
-async def test_saturation_skips_rest_of_audience_but_not_notes(client, conn, fake_llm):
-    fake_llm.on("style", claim("Writes long replies padded with filler words."))
+async def test_saturation_skips_rest_of_audience_but_not_statements(client, conn, fake_llm):
+    fake_llm.on("replies", claim("Writes long replies padded with filler words."))
     notes = []
 
     def note_reply(c):
         notes.append(c)
         return claim("Writes long replies padded with filler words.")
 
-    fake_llm.on("notes", note_reply)
-    records = [*pairs(20), {"type": "note", "text": "I write a lot."}]
+    fake_llm.on("statements", note_reply)
+    records = [*pairs(20), note("I write a lot.")]
     _, status = await submit(client, records)
     assert status["status"] == "done"
     # Call 1 is new, calls 2-6 add nothing: calls 7-10 are skipped.
-    assert len(fake_llm.by_purpose("style")) == 1 + style.SATURATION_CALLS
+    assert len(fake_llm.by_purpose("replies")) == 1 + passes.SATURATION_CALLS
     counts = status["counts"]
     assert counts["saturated_audiences"] == 1
-    assert counts["skipped_saturated"] == 4 * 4
-    assert len(notes) == 1  # notes are never skipped
+    assert counts["skipped_saturated"] == 4 * 2
+    assert len(notes) == 1  # statements are never skipped
 
 
 async def test_saturation_counts_existing_claims_as_known(client, conn, fake_llm):
@@ -207,38 +211,38 @@ async def test_saturation_counts_existing_claims_as_known(client, conn, fake_llm
         "add_claims",
         {"claims": [{"kind": "style", "category": "communication/style", "text": "Terse."}]},
     )
-    fake_llm.on("style", claim("Terse."))
+    fake_llm.on("replies", claim("Terse."))
     _, status = await submit(client, pairs(14))
-    assert len(fake_llm.by_purpose("style")) == style.SATURATION_CALLS
-    assert status["counts"]["skipped_saturated"] == 2 * 4
+    assert len(fake_llm.by_purpose("replies")) == passes.SATURATION_CALLS
+    assert status["counts"]["skipped_saturated"] == 2 * 2
     assert status["counts"]["absorbed"] >= 1
 
 
 async def test_source_watermark(client, conn, fake_llm):
     distinct_replies(fake_llm)
-    note = {"type": "note", "text": "I like tea."}  # no ts: never skipped
-    out, status = await submit(client, [*pairs(4), note], source="tg")
+    tea = note("I like tea.")  # no timestamp: never skipped
+    out, status = await submit(client, [*pairs(4), tea], source="tg")
     assert status["status"] == "done" and status["counts"]["skipped_seen"] == 0
     (src,) = (await call(client, "list_sources"))["sources"]
-    last = BASE + timedelta(hours=3, minutes=1)
-    assert src["source"] == "tg" and src["records_total"] == 9
+    last = BASE + timedelta(hours=3)  # the episode timestamp is when.start
+    assert src["source"] == "tg" and src["records_total"] == 5
     assert datetime.fromisoformat(src["last_ts"]) == last
 
     fake_llm.calls.clear()
-    out, status = await submit(client, [*pairs(6), note], source="tg")
-    assert out["accepted"] == 13
-    assert status["counts"]["skipped_seen"] == 8
-    assert status["counts"]["records"]["message"] == 12  # records received, by type
+    out, status = await submit(client, [*pairs(6), tea], source="tg")
+    assert out["accepted"] == 7
+    assert status["counts"]["skipped_seen"] == 4
+    assert status["counts"]["episodes"]["reply"] == 6  # episodes received, by class
     (src,) = (await call(client, "list_sources"))["sources"]
-    assert datetime.fromisoformat(src["last_ts"]) == BASE + timedelta(hours=5, minutes=1)
-    assert src["records_total"] == 9 + 5
+    assert datetime.fromisoformat(src["last_ts"]) == BASE + timedelta(hours=5)
+    assert src["records_total"] == 5 + 3
 
     # An older batch under another source label does not move "tg"; an older one under
     # "tg" is skipped entirely and never moves the watermark backwards.
     _, status = await submit(client, pairs(2), source="tg")
-    assert status["counts"]["skipped_seen"] == 4
+    assert status["counts"]["skipped_seen"] == 2
     (src,) = (await call(client, "list_sources"))["sources"]
-    assert datetime.fromisoformat(src["last_ts"]) == BASE + timedelta(hours=5, minutes=1)
+    assert datetime.fromisoformat(src["last_ts"]) == BASE + timedelta(hours=5)
 
     # Without source nothing is skipped.
     _, status = await submit(client, pairs(2))
@@ -247,33 +251,34 @@ async def test_source_watermark(client, conn, fake_llm):
     assert (await call(client, "reset_source", {"source": "tg"}))["deleted"] is True
     assert (await call(client, "list_sources"))["sources"] == []
     assert (await call(client, "reset_source", {"source": "tg"}))["deleted"] is False
-    assert (await call_error(client, "ingest_raw", {"records": pairs(1), "source": "Bad!"}))[
+    assert (await call_error(client, "ingest_raw", {"episodes": pairs(1), "source": "Bad!"}))[
         "code"
     ] == "invalid"
 
 
 async def test_partial_watermark_stays_below_remaining(client, conn, fake_llm):
     distinct_replies(fake_llm, fail_at=3)
+    start = BASE + timedelta(days=30)
     late_event = {
-        "type": "calendar_event",
-        "start": (BASE + timedelta(days=30)).isoformat(),
-        "end": (BASE + timedelta(days=30, hours=1)).isoformat(),
-        "attendees": 2,
-        "response": "accepted",
+        "when": {"start": start.isoformat(), "end": (start + timedelta(hours=1)).isoformat()},
+        "category": "work/meetings",
+        "situation": "invite",
+        "decision": "accepted",
     }
+    fake_llm.on("decisions", {"claims": []})
     _, status = await submit(client, [*pairs(6), late_event], source="tg")
-    assert status["status"] == "partial" and status["remaining_records"] == list(range(8, 12))
+    assert status["status"] == "partial" and status["remaining_records"] == [4, 5, 6]
     (src,) = (await call(client, "list_sources"))["sources"]
-    # The event (processed, but later than the remaining records) does not count.
-    assert datetime.fromisoformat(src["last_ts"]) == BASE + timedelta(hours=3, minutes=1)
+    # The event's decision call never ran; the processed replies count.
+    assert datetime.fromisoformat(src["last_ts"]) == BASE + timedelta(hours=3)
 
-    # Resending the remaining records is not skipped.
+    # Resending the remaining episodes is not skipped.
     records = [*pairs(6), late_event]
-    fake_llm.on("style", claim("Terse."))
+    fake_llm.on("replies", claim("Terse."))
     _, status = await submit(client, [records[i] for i in status["remaining_records"]], source="tg")
     assert status["status"] == "done" and status["counts"]["skipped_seen"] == 0
     (src,) = (await call(client, "list_sources"))["sources"]
-    assert datetime.fromisoformat(src["last_ts"]) == BASE + timedelta(hours=5, minutes=1)
+    assert datetime.fromisoformat(src["last_ts"]) == start
 
 
 async def test_source_tools_owner_only(conn, user):
@@ -283,88 +288,45 @@ async def test_source_tools_owner_only(conn, user):
             assert (await call_error(c, "reset_source", {"source": "tg"}))["code"] == "forbidden"
 
 
-async def test_progress_rows_hold_no_record_text(client, conn, fake_llm):
+async def test_progress_rows_hold_no_episode_text(client, conn, fake_llm):
     distinct_replies(fake_llm, fail_at=2)
     records = pairs(4)
-    records[0]["thread"] = CANARY
-    records[0]["text"] = CANARY
-    records[3]["text"] = f"{CANARY} " + records[3]["text"]
-    records.append({"type": "note", "text": f"{CANARY} note", "ts": BASE.isoformat()})
+    records[0]["situation"] = CANARY
+    records[0]["where"] = CANARY
+    records[3]["said"] = f"{CANARY} " + records[3]["said"]
+    records.append(note(f"{CANARY} note", BASE.isoformat()))
     out, status = await submit(client, records, source="tg")
     assert status["status"] == "partial"
     rows = [dict(r) for r in conn.execute("SELECT * FROM jobs")]
     rows += [dict(r) for r in conn.execute("SELECT * FROM ingest_sources")]
     dumped = json.dumps(rows)
-    assert CANARY not in dumped and "reply" not in dumped
+    assert CANARY not in dumped and "reply 1 ok" not in dumped and "question" not in dumped
     remaining = json.loads(conn.execute("SELECT remaining_records FROM jobs").fetchone()[0])
     assert all(isinstance(i, int) for i in remaining)
 
 
-def habit_evidence(conn):
-    return {
-        r["key"]: json.loads(r["evidence"])
-        for r in conn.execute("SELECT key, evidence FROM claims WHERE key LIKE 'habit:%'")
-    }
+async def test_partial_then_resend_counts_each_episode_once(
+    client, conn, user, fake_llm, monkeypatch
+):
+    monkeypatch.setattr(passes, "SATURATION_CALLS", 1000)
+    seen: list[str] = []
 
+    def fake_run(conn, *, persona_id, episodes, tz, counts, job_id=None):
+        seen.extend(ep.said or "" for ep in episodes)
+        return set()
 
-def chatty(n):
-    """``n`` threads on workdays: two other messages, then the owner's reply 3 min later."""
-    out = []
-    day = datetime(2026, 2, 2, 10, 0, tzinfo=UTC)
-    for i in range(n):
-        ts = day + timedelta(days=i, hours=4 * (i % 2))
-        for k, (owner, text) in enumerate(((False, "ping"), (False, "any news?"), (True, "ok"))):
-            out.append(
-                {
-                    "type": "message",
-                    "from_owner": owner,
-                    "audience": "work-slack",
-                    "text": text + " " + "x " * (500 if owner else 0),
-                    "ts": (ts + timedelta(minutes=k + (1 if owner else 0))).isoformat(),
-                    "thread": f"t{i}",
-                }
-            )
-    return out
-
-
-async def test_partial_then_resend_counts_each_record_once(conn, user, fake_llm, monkeypatch):
-    monkeypatch.setattr(style, "SATURATION_CALLS", 1000)
-    from wwyd.store.personas import create_user
-
-    records = chatty(60)
-    fake_llm.on("style", {"claims": []})
-    # A single full run, on a separate persona.
-    other = create_user(conn, "other@example.com")
-    upsert_audience(conn, other.persona_id, "work-slack")
-    async with Client(make_server(conn, other)) as c:
-        _, status = await submit(c, records)
-    assert status["status"] == "done"
-    full = {
-        k: v
-        for k, v in habit_evidence(conn).items()
-        if conn.execute("SELECT persona_id FROM claims WHERE key = ?", (k,)).fetchone()[0]
-        == other.persona_id
-    }
-    assert any(k.startswith("habit:reply_latency") for k in full)
-
-    # Partial run on the owner's persona, then a resend of remaining_records.
-    conn.execute("DELETE FROM claims WHERE persona_id = ?", (other.persona_id,))
-    fake_llm.calls.clear()
+    monkeypatch.setattr(jobs, "run_analyzers", fake_run)
+    records = pairs(30)
 
     def reply(c):
-        # Stop late enough that the processed part alone clears the detector thresholds
-        # (a below-threshold finding without an existing keyed claim is not kept).
-        if len(fake_llm.by_purpose("style")) == 24:
+        if len(fake_llm.by_purpose("replies")) == 6:
             raise RateLimited("daily LLM token limit reached", retry_after=60)
         return {"claims": []}
 
-    fake_llm.on("style", reply)
-    async with Client(make_server(conn, user)) as c:
-        _, status = await submit(c, records)
-        assert status["status"] == "partial" and 0 < len(status["remaining_records"]) < 180
-        fake_llm.on("style", {"claims": []})
-        _, status = await submit(c, [records[i] for i in status["remaining_records"]])
+    fake_llm.on("replies", reply)
+    _, status = await submit(client, records)
+    assert status["status"] == "partial" and status["remaining_records"] == list(range(10, 30))
+    fake_llm.on("replies", {"claims": []})
+    _, status = await submit(client, [records[i] for i in status["remaining_records"]])
     assert status["status"] == "done"
-    resent = habit_evidence(conn)
-    for key, ev in full.items():
-        assert resent[key]["stats"] == ev["stats"], key
+    assert sorted(seen) == sorted(r["said"] for r in records)

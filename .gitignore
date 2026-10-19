@@ -10,3 +10,6 @@ build/
 *.db-wal
 *.db-shm
 .DS_Store
+
+# Built by scripts/build_sandbox.py (shipped in the wheel, never committed)
+src/wwyd/sandbox/assets/

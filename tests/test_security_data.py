@@ -11,8 +11,8 @@ from conftest import call, call_error
 from wwyd.auth import tokens
 from wwyd.auth.scopes import parse_scope
 from wwyd.errors import Invalid
+from wwyd.ingest.episodes import validate_episode
 from wwyd.ingest.guard import find_identifier
-from wwyd.ingest.records import validate_record
 from wwyd.mcp.caller import Caller
 from wwyd.predict import predict
 from wwyd.store.audiences import delete_audience, upsert_audience
@@ -78,7 +78,7 @@ async def test_tool_schemas_declare_bounds(client):
         ("search_claims", ["query", "audience"]),
         ("undo_change", ["id"]),
         ("job_status", ["job_id"]),
-        ("ingest_raw", ["records"]),
+        ("ingest_raw", ["episodes"]),
     ):
         for param in params:
             assert bounded(tools[name]["properties"][param]), (name, param)
@@ -165,12 +165,12 @@ def test_replace_import_keeps_a_default_audience(conn, pid):
 def test_unknown_field_error_has_no_key_name():
     secret_key = "alice_smith_phone"
     with pytest.raises(Invalid) as info:
-        validate_record(3, {"type": "note", "text": "hi", secret_key: "x"})
+        validate_episode(3, {"category": "x", "said": "hi", secret_key: "x"})
     assert secret_key not in str(info.value.to_payload())
     assert info.value.details == {"index": 3, "path": ""}
-    turns = [{"speaker": "owner", "text": "hi", secret_key: 1}]
+    when = {"start": "2026-01-01T10:00", secret_key: 1}
     with pytest.raises(Invalid) as info:
-        validate_record(0, {"type": "call_transcript", "ts": "2026-01-01T10:00", "turns": turns})
+        validate_episode(0, {"category": "x", "said": "hi", "when": when})
     assert secret_key not in str(info.value.to_payload())
 
 

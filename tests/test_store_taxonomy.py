@@ -99,7 +99,8 @@ def test_category_create_requires_parent_and_depth(conn, pid):
     assert ca.upsert_category(conn, pid, "work/meetings/one-on-one", description="1:1s")["created"]
     with pytest.raises(NotFound):
         ca.upsert_category(conn, pid, "garden/roses")
-    for bad in ["a/b/c/d", "Work", "work//x", "work/", "a b"]:
+    # Unicode normalisation (SPEC §4.4): "Work" and "a b" are valid now ("work", "a-b").
+    for bad in ["a/b/c/d", "work//x", "work/", "-a", "a.b"]:
         with pytest.raises(Invalid):
             ca.upsert_category(conn, pid, bad)
     res = ca.upsert_category(conn, pid, "food", description="Eating")

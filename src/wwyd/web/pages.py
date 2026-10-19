@@ -509,12 +509,16 @@ LIMIT_LABELS = {
     "predict_per_audience_per_day": "Answers per day, per audience",
     "llm_tokens_per_day": "Language model tokens per day",
     "ingest_bytes_per_day": "Imported bytes per day",
-    "batch_records": "Records per import call",
+    "batch_records": "Episodes per import call",
     "batch_bytes": "Bytes per import call",
     "concurrent_jobs": "Background jobs at a time",
     "spend_cap_usd": "Spending cap per month (USD)",
     "max_claims_per_category": "Kept statements per category",
     "max_approved_tokens": "Approved statements, total tokens",
+    "max_categories": "Categories",
+    "new_categories_per_job": "New categories per import",
+    "max_analyzers": "Learned analyzers",
+    "sandbox_cpu_seconds_per_day": "Analyzer run time per day (seconds)",
 }
 
 

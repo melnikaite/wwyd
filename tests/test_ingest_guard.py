@@ -46,3 +46,41 @@ def test_sentence_initial_capitals_numbers_and_vocabulary_pass():
     assert g.check("Meets on Friday at 10, writes in English.") is None
     assert g.check("Thanks people in work-slack.") is None
     assert g.check("Is close to Anna.") is None  # the display name is vocabulary
+
+
+def test_only_said_is_owner_text():
+    """situation, decision and where are non-owner text (5-gram check); said is owner."""
+    from wwyd.ingest.episodes import Batch, Episode
+    from wwyd.ingest.passes import guard_for
+
+    def ep(**kw):
+        return Episode(index=0, category_id="c", category="x", audience=None, **kw)
+
+    batch = Batch(
+        [
+            ep(
+                situation="could you please send me the draft today",
+                said="I prefer green tea in the morning",
+            ),
+            ep(decision="declined because the meeting runs too late"),
+            ep(where="the big shared office downstairs here", decision="ok"),
+        ]
+    )
+    g = guard_for(batch, {"Anna"})
+    assert g.check("Asks to please send me the draft early.") == "verbatim"
+    assert g.check("Declined because the meeting runs too late.") == "verbatim"
+    assert g.check("Works in the big shared office downstairs.") == "verbatim"
+    assert g.check("Prefers green tea in the morning.") is None
+
+
+def test_episode_category_names_are_not_vocabulary(conn, pid):
+    """Seeded and owner-created categories whitelist their names; episode-created ones do not."""
+    from wwyd.db import transaction
+    from wwyd.store.categories import CategoryResolver, guard_vocabulary, upsert_category
+
+    upsert_category(conn, pid, "hobbies/chess")
+    with transaction(conn):
+        CategoryResolver(conn, pid).resolve("friends/velmorine")
+    vocab = guard_vocabulary(conn, pid)
+    assert {"chess", "food", "communication"} <= vocab
+    assert "velmorine" not in vocab and "friends" not in vocab

@@ -36,6 +36,7 @@ SEED_CATEGORIES: tuple[tuple[str, str], ...] = (
     ("family", "How the owner deals with family matters and family members."),
     ("hobbies", "Free-time interests and activities."),
     ("tech", "Tools, devices and software the owner prefers and how they use them."),
+    ("other", "Anything that fits no other category."),
 )
 
 DEFAULT_DISCLOSURE = "This reply was written automatically by an AI assistant on behalf of {owner}."

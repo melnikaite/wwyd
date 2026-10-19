@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Ingest jobs (SPEC §7.1): validate, enqueue in memory, derive in the background.
 
-``submit`` validates and size-checks a batch, writes a ``jobs`` row with counts only and
-queues the parsed records on a per-persona in-memory queue; one worker task per persona
-drains it. The records are held only by the :class:`Job` object and are released in
-``finally`` whatever happens (P1). Nothing here logs record content, prompts or replies.
+``submit`` validates and size-checks a batch of episodes, writes a ``jobs`` row with counts
+only, resolves (and organically creates) the episodes' categories and queues the parsed
+episodes on a per-persona in-memory queue; one worker task per persona drains it. The
+episodes are held only by the :class:`Job` object and are released in ``finally`` whatever
+happens (P1). Nothing here logs episode content, prompts or replies.
+
+Order inside a job: preparation (in ``submit``: times, audiences, categories, classes;
+then the category description call) -> [M7c: annotation] -> the LLM passes -> [M7c:
+analyzer authoring] -> the analyzers over the processed episodes (always) -> watermark.
 
 Derived candidates are flushed to the store every ``FLUSH_EVERY`` LLM calls and when the
 job ends, so a job stopped by the token budget, the spend cap or an unavailable backend
@@ -25,22 +30,28 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from wwyd import compact
+from wwyd.analyzers import run_analyzers
+from wwyd.config import thresholds
 from wwyd.db import transaction
 from wwyd.errors import Invalid, LLMUnavailable, RateLimited, SpendCap, TooLarge, WwydError
-from wwyd.ingest import detectors, style
-from wwyd.ingest.guard import BatchGuard
-from wwyd.ingest.keyed import upsert_finding
-from wwyd.ingest.records import Batch, parse_batch
+from wwyd.ingest import passes
+from wwyd.ingest.episodes import Batch, parse_batch
 from wwyd.limits import get_limiter
 from wwyd.llm import get_llm
 from wwyd.store import claims as claim_store
 from wwyd.store import jobs as job_store
 from wwyd.store import sources as source_store
-from wwyd.store.categories import category_ids_by_path
+from wwyd.store.categories import (
+    CategoryResolver,
+    category_ids_by_path,
+    guard_vocabulary,
+    normalize_category_path,
+    set_descriptions,
+)
 
 log = logging.getLogger(__name__)
 
-MAX_RECORDS = 1000
+MAX_EPISODES = 1000
 MAX_BYTES = 2 * 1024 * 1024
 ADD_CHUNK = 200  # store.claims.add_claims accepts at most 200 items per call
 FLUSH_EVERY = 20  # LLM calls between two flushes of derived candidates (SPEC §7.1)
@@ -59,9 +70,8 @@ class Job:
     counts: dict[str, Any] = field(default_factory=dict)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     source: str | None = None
-    calls: list[style.Call] = field(default_factory=list)
-    categories: dict[str, str] = field(default_factory=dict)
-    # Batch index -> timestamp of every record the job derives from (indices only, P1).
+    calls: list[passes.Call] = field(default_factory=list)
+    # Batch index -> timestamp of every episode the job derives from (indices only, P1).
     stamps: dict[int, datetime | None] = field(default_factory=dict)
     # Batch index -> number of LLM calls containing it that have not completed yet.
     pending: dict[int, int] = field(default_factory=dict)
@@ -103,11 +113,11 @@ def _persona(conn: sqlite3.Connection, persona_id: str) -> dict[str, Any]:
     }
 
 
-def _batch_bytes(records: list[Any]) -> int:
+def _batch_bytes(episodes: list[Any]) -> int:
     try:
-        return len(json.dumps(records, ensure_ascii=False, separators=(",", ":")).encode())
+        return len(json.dumps(episodes, ensure_ascii=False, separators=(",", ":")).encode())
     except (TypeError, ValueError):
-        raise Invalid("records must be JSON objects") from None
+        raise Invalid("episodes must be JSON objects") from None
 
 
 def _categories(conn: sqlite3.Connection, persona_id: str) -> dict[str, str]:
@@ -124,49 +134,51 @@ def submit(
     conn: sqlite3.Connection,
     user_id: str,
     persona_id: str,
-    records: list[Any],
+    episodes: list[Any],
     *,
     llm_for_ingest: bool | None = None,
     source: str | None = None,
 ) -> dict[str, Any]:
-    """Validate, record a job row and queue the batch.
+    """Validate, record a job row, resolve categories and queue the batch.
 
     Returns ``{job_id, accepted, estimated_tokens, remaining_tokens}``: ``accepted`` is the
-    number of valid records received, ``estimated_tokens`` a conservative estimate of the job's LLM
-    tokens (0 without an LLM step) and ``remaining_tokens`` today's remaining token budget
-    (None: unlimited). ``llm_for_ingest`` can only narrow the persona setting: when the
-    persona has LLM derivation off, a call cannot turn it on. With ``source``, records at
-    or below that source's watermark are skipped (SPEC §7.1).
+    number of valid episodes received, ``estimated_tokens`` a conservative estimate of the
+    job's LLM tokens (0 without an LLM step) and ``remaining_tokens`` today's remaining token
+    budget (None: unlimited). ``llm_for_ingest`` can only narrow the persona setting: when
+    the persona has LLM derivation off, a call cannot turn it on. With ``source``, episodes
+    at or below that source's watermark are skipped (SPEC §7.1).
     """
-    if not isinstance(records, list) or not records:
-        raise Invalid("records must be a non-empty list", field="records")
+    if not isinstance(episodes, list) or not episodes:
+        raise Invalid("episodes must be a non-empty list", field="episodes")
     if source is not None:
         source_store.check_source(source)
-    nbytes = _batch_bytes(records)
-    if len(records) > MAX_RECORDS:
-        raise TooLarge("too many records in one call", limit="batch_records", maximum=MAX_RECORDS)
+    nbytes = _batch_bytes(episodes)
+    if len(episodes) > MAX_EPISODES:
+        raise TooLarge("too many episodes in one call", limit="batch_records", maximum=MAX_EPISODES)
     if nbytes > MAX_BYTES:
         raise TooLarge("batch too large", limit="batch_bytes", maximum=MAX_BYTES)
     limiter = get_limiter(conn)
-    limiter.check_ingest(user_id, persona_id, len(records), nbytes)
+    limiter.check_ingest(user_id, persona_id, len(episodes), nbytes)
     persona = _persona(conn, persona_id)
     batch = parse_batch(
-        records,
+        episodes,
         tz=persona["tz"],
         audiences=persona["audiences"],
         default_audience=persona["default_audience"],
+        normalize_category=normalize_category_path,
     )
+    received = batch.counts()
     skipped_seen = 0
     if source is not None:
         last_ts = source_store.get_last_ts(conn, persona_id, source)
         if last_ts is not None:
             skipped_seen = batch.drop_seen(last_ts)
     use_llm = bool(persona["llm_for_ingest"]) and llm_for_ingest is not False
-    categories = _categories(conn, persona_id) if use_llm else {}
-    calls = style.build_calls(batch, categories) if use_llm else []
-    counts = {
-        "records": dict(batch.counts),
+    counts: dict[str, Any] = {
+        "episodes": received,
         "unknown_audiences": batch.unknown_audiences,
+        "categories_created": 0,
+        "unmapped_categories": 0,
         "skipped_seen": skipped_seen,
         "skipped_saturated": 0,
         "saturated_audiences": 0,
@@ -179,11 +191,35 @@ def submit(
         "llm_calls": 0,
         "llm_calls_failed": 0,
     }
+    limits = limiter.effective_limits(user_id)
     with transaction(conn):
         job_id = job_store.create_job(conn, persona_id, counts)
-    limiter.record_ingest(user_id, persona_id, len(records), nbytes)
+        # Preparation (SPEC §7.1, §4.4): resolve every category, creating missing paths
+        # within the limits; one category_create change for the job.
+        resolver = CategoryResolver(
+            conn,
+            persona_id,
+            max_categories=limits.get("max_categories"),  # type: ignore[arg-type]
+            new_per_job=limits.get("new_categories_per_job"),  # type: ignore[arg-type]
+        )
+        for ep in batch.episodes:
+            ep.category_id, ep.category = resolver.resolve(ep.category)
+        resolver.record(job_id)
+        counts["categories_created"] = len(resolver.created)
+        counts["unmapped_categories"] = resolver.unmapped
+        job_store.update_job(conn, job_id, counts=counts)
+    calls: list[passes.Call] = []
+    if use_llm:
+        describe = passes.describe_call(resolver.created)
+        calls = ([describe] if describe else []) + passes.build_calls(
+            batch,
+            _categories(conn, persona_id),
+            default_audience=persona["default_audience"],
+            decision_min_episodes=thresholds().analyzer_min_episodes,
+        )
+    limiter.record_ingest(user_id, persona_id, len(episodes), nbytes)
     job = Job(job_id, user_id, persona_id, conn, use_llm, batch, counts, source=source)
-    job.calls, job.categories, job.stamps = calls, categories, batch.stamps()
+    job.calls, job.stamps = calls, batch.stamps()
     _events[job_id] = job.done
     _queues.setdefault(persona_id, deque()).append(job)
     worker = _workers.get(persona_id)
@@ -193,7 +229,7 @@ def submit(
         )
     return {
         "job_id": job_id,
-        "accepted": len(records),
+        "accepted": len(episodes),
         "estimated_tokens": sum(c.estimated_tokens for c in calls),
         "remaining_tokens": limiter.remaining_tokens(user_id, persona_id),
     }
@@ -230,13 +266,13 @@ async def _run(job: Job) -> None:
         status, error_code = "done", None
     except (SpendCap, RateLimited, LLMUnavailable) as exc:
         # Raised by the LLM phase (after storing what it derived and running the
-        # detectors on the processed records): partial. Otherwise (job slot): failed.
+        # analyzers on the processed episodes): partial. Otherwise (job slot): failed.
         status = "partial" if exc is job.stopped_by else "failed"
         error_code = exc.code
     except WwydError as exc:
         error_code = exc.code
     except Exception as exc:  # noqa: BLE001
-        # Type only: messages and tracebacks could carry record text.
+        # Type only: messages and tracebacks could carry episode text.
         log.error("ingest job %s failed: %s", job.job_id, type(exc).__name__)
     finally:
         if job.batch is not None:
@@ -265,7 +301,7 @@ async def _run(job: Job) -> None:
 
 def _advance_watermark(job: Job, remaining: list[int]) -> None:
     """``done``: the largest processed timestamp. ``partial``: the largest processed one
-    strictly below the earliest remaining record's, so a resend is not skipped. The store
+    strictly below the earliest remaining episode's, so a resend is not skipped. The store
     never moves it backwards."""
     left = set(remaining)
     processed = [ts for i, ts in job.stamps.items() if i not in left and ts is not None]
@@ -290,31 +326,35 @@ async def _derive(job: Job) -> None:
     persona = _persona(conn, pid)
     touched: list[str] = []
     try:
-        # 1. LLM derivation (style, notes, decisions). An LLM error stops this phase only.
         calls = job.calls
         for call in calls:
             for i in call.records:
                 job.pending[i] = job.pending.get(i, 0) + 1
         job_store.update_job(conn, job.job_id, progress=1 / (len(calls) + 2), counts=counts)
+        # [M7c] Annotation (SPEC §7.3) goes here, before the passes; its calls cover the
+        # episodes they label.
+        # LLM phase: the description call, then the passes (§7.6). An LLM error stops this
+        # phase only.
         if calls:
             try:
                 await _llm_calls(job, persona, touched)
             except (SpendCap, RateLimited, LLMUnavailable) as exc:
                 job.stopped_by = exc
+        # [M7c] Analyzer authoring (SPEC §7.4) goes here; it sees processed episodes only.
 
-        # 2. Code detectors (always), over the processed records only: remaining records
-        # reach habit stats through their resend, so each record is counted once.
+        # The analyzers (always), over the processed episodes only: remaining episodes
+        # reach analyzer state through their resend, so each is counted once.
         processed = batch.subset(set(job.remaining())) if job.stopped_by else batch
-        for finding in detectors.collect_all(processed, persona["tz"]):
-            outcome, claim_id = upsert_finding(conn, pid, finding)
-            if outcome == "created":
-                counts["claims_created"] += 1
-            elif outcome == "updated":
-                counts["claims_updated"] += 1
-            elif outcome == "rejected":
-                counts["dropped_previously_rejected"] += 1
-            if claim_id:
-                touched.append(claim_id)
+        touched.extend(
+            run_analyzers(
+                conn,
+                persona_id=pid,
+                episodes=processed.episodes,
+                tz=persona["tz"],
+                counts=counts,
+                job_id=job.job_id,
+            )
+        )
         if job.stopped_by is not None:
             raise job.stopped_by
     finally:
@@ -334,24 +374,24 @@ async def _llm_calls(job: Job, persona: dict[str, Any], touched: list[str]) -> N
     """Run the calls in order with budget checks, saturation and periodic flushes."""
     conn, pid, counts = job.conn, job.persona_id, job.counts
     assert job.batch is not None
-    categories = job.categories
     category_ids = category_ids_by_path(conn, pid)
-    guard = _guard(job.batch, persona, categories)
+    vocabulary = {persona["display_name"], *persona["audiences"], *guard_vocabulary(conn, pid)}
+    guard = passes.guard_for(job.batch, vocabulary)
     llm = get_llm(conn, pid)
     limiter = get_limiter(conn)
-    derive_counts = style.DeriveCounts()
-    window: list[style.Candidate] = []
+    derive_counts = passes.DeriveCounts()
+    window: list[passes.Candidate] = []
     streak: dict[str, int] = {}
     saturated: set[str] = set()
     skipped: set[int] = set()
     total = len(job.calls)
 
-    def finish(call: style.Call) -> None:
+    def finish(call: passes.Call) -> None:
         for i in call.records:
             job.pending[i] -= 1
 
-    def is_new(cand: style.Candidate) -> bool:
-        if any(style.same_claim(cand, other) for other in window):
+    def is_new(cand: passes.Candidate) -> bool:
+        if any(passes.same_claim(cand, other) for other in window):
             return False
         return not claim_store.known_claim(
             conn, pid, cand.kind, category_ids.get(cand.category, ""), cand.text
@@ -359,14 +399,14 @@ async def _llm_calls(job: Job, persona: dict[str, Any], touched: list[str]) -> N
 
     def flush() -> None:
         if window:
-            items = [c.as_item() for c in style.dedupe(window, derive_counts)]
+            items = [c.as_item() for c in passes.dedupe(window, derive_counts)]
             window.clear()
             _store(job, items, touched)
         job_store.update_job(conn, job.job_id, counts=counts)
 
     try:
         for n, call in enumerate(job.calls, start=1):
-            audience = call.audiences[0] if call.purpose == "style" else None
+            audience = call.audiences[0] if call.purpose == "replies" else None
             if audience is not None and audience in saturated:
                 skipped.update(call.records)
                 finish(call)
@@ -387,12 +427,19 @@ async def _llm_calls(job: Job, persona: dict[str, Any], touched: list[str]) -> N
                 user=call.user,
                 schema=call.schema,
             )
-            found = style.to_candidates(call, result.data, categories, guard, derive_counts)
+            if call.purpose == "describe_categories":
+                described = passes.to_descriptions(call, result.data, guard, derive_counts)
+                del result
+                if described:
+                    set_descriptions(conn, pid, described)
+                finish(call)
+                continue
+            found = passes.to_candidates(call, result.data, guard, derive_counts)
             del result
             if audience is not None:
                 fresh = any(is_new(c) for c in found)
                 streak[audience] = 0 if fresh else streak.get(audience, 0) + 1
-                if streak[audience] >= style.SATURATION_CALLS:
+                if streak[audience] >= passes.SATURATION_CALLS:
                     saturated.add(audience)
                     counts["saturated_audiences"] += 1
             window.extend(found)
@@ -433,18 +480,3 @@ def _store(job: Job, items: list[dict[str, Any]], touched: list[str]) -> None:
                 counts["dropped_previously_rejected"] += 1
             else:
                 counts["dropped_invalid"] += 1
-
-
-def _guard(batch: Batch, persona: dict[str, Any], categories: dict[str, str]) -> BatchGuard:
-    other: list[str] = [m.text for m in batch.messages if not m.from_owner]
-    owner: list[str] = [m.text for m in batch.messages if m.from_owner]
-    for t in batch.transcripts:
-        for speaker, text in t.turns:
-            (owner if speaker == "owner" else other).append(text)
-    owner.extend(d.situation for d in batch.decisions)
-    owner.extend(d.choice for d in batch.decisions)
-    owner.extend(n.text for n in batch.notes)
-    vocabulary = {persona["display_name"], *persona["audiences"]}
-    for path in categories:
-        vocabulary.update(path.split("/"))
-    return BatchGuard(other_texts=other, all_texts=other + owner, vocabulary=vocabulary)

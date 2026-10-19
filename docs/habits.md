@@ -1,128 +1,150 @@
-# Habit detectors
+# Builtin analyzers
 
-Habits nobody puts into words are computed in code from `ingest_raw` batches (SPEC §7.2).
-Code: `src/wwyd/ingest/detectors/`. Tests with synthetic calendars and message streams:
-`tests/test_detectors.py`.
+Habits nobody puts into words are computed in code from the processed episodes of every
+`ingest_raw` job (SPEC §7.2, D19). Code: `src/wwyd/analyzers/`. Tests with synthetic
+episodes: `tests/test_analyzers_builtin.py` (ground truth, thresholds, accumulation,
+resends, DST, weakening), `tests/test_analyzer_contract.py` (output contract and key
+filter), `tests/test_analyzer_tools.py` (the three tools).
 
 ## How they work
 
-Each detector is two pure functions:
+A builtin is shipped code with two pure functions:
 
-- `collect(batch, tz)` turns one batch into **fixed-size statistics** (histograms and
-  counters). Records are never kept.
-- `render(stats, period_days)` turns statistics into the claim text, `share` and
-  `confidence`, or returns nothing below threshold.
+- `run(items, ctx)` turns the episodes of one scope into **counters** in the output
+  contract `{metric: {"YYYY-MM": {key: number}}}`. Episodes are never kept.
+- `render(state, ctx)` turns the accumulated counters into one claim spec per *facet*:
+  text, `share`, sample count, period and `stats`, or no text below threshold.
 
-The statistics are stored in the claim's `evidence.stats`. A later batch adds its buckets
-to the stored ones, then the claim is re-rendered from the merged numbers. A re-run
-therefore updates the keyed claim instead of creating a duplicate (`src/wwyd/ingest/keyed.py`).
+The host validates the output (`analyzers/contract.py`), drops every key that fails the
+key filter (`analyzers/keyfilter.py`, counted in `analyzer_keys_dropped`, never logged),
+and **adds** the rest to `analyzer_state` (`analyzers/state.py`). Then it reads the whole
+state back and re-renders the claims. Because state accumulates across jobs, small batches
+still count: a claim appears as soon as the totals pass, even if no single batch would.
 
-**Thresholds** (constants in `detectors/common.py`):
+**Scope.** Builtin rows are created lazily, one per (builtin, exact category) the first
+time a job has episodes in that category. A row sees the job's processed episodes whose
+category is *exactly* its category, not the subtree: every episode is counted once per
+builtin, and the claim lands in the episode's own category. Audience-scoped builtins
+(stylometry, next phase) get one row per audience with the episodes of that audience; LLM
+analyzers (M7c) are bound to a subtree and share the same validate → filter → merge path.
+A `disabled` row is skipped (`analyzers_skipped_disabled`); builtins cannot be retired.
+
+**Each episode counts once.** Only processed episodes reach the analyzers. A `partial`
+job's remaining episodes are counted when they are resent, so a job plus its resend gives
+the same state as one full job (tested). An `interrupted` job ran no analyzers.
+
+**Thresholds** (constants in `analyzers/builtin/base.py`):
 
 - at least **30 samples**;
 - a **share of at least 0.75** for any rule-like statement;
-- a **period of at least 3 weeks** (21 days, from the first to the last local date seen).
+- a **period of at least 3 weeks** (21 days, from the first to the last sampled local day,
+  read from the `days` metric).
 
-**Time handling.** Every timestamp keeps its UTC offset. A value without an offset is read
-in the persona's timezone. Durations and gaps are computed on aware datetimes, so a DST
-switch never adds or removes an hour. Day, weekday and hour buckets use the persona's
-timezone.
+**Host-computed fields.** `start`/`end` are already in the persona timezone; a naive value
+is read in it. `weekday`, `hour`, `month` and the day come from the local start. Durations
+are computed on UTC instants, so a DST switch never adds or removes an hour (subtracting
+two aware datetimes with the same `ZoneInfo` would give wall-clock time instead).
 
-**Event filters.** An event is *attended* when `response` is `accepted` or `organizer`. It
-is an *invite* when `response` is `accepted`, `tentative` or `declined`. Events of 0
-minutes or longer than 8 hours (all-day blocks) are ignored.
+**Intervals.** An episode with `start` and `end` is an interval. Intervals of 0 minutes or
+longer than 8 hours (all-day blocks) are ignored by `time_duration` (lengths) and
+`time_gaps`. A *reply* episode (`said` + `situation`) with an interval `when` is read as
+"message received at start, reply sent at end" and feeds reply latency instead.
 
 **Confidence** is `min(0.95, 0.35 + 0.6 × share × min(1, samples / 150))`.
 
-**Merging rules for keyed claims:**
+## Keyed claims
 
-- **Pending claim:** text, numbers and evidence are all refreshed.
-- **Approved claim:** evidence and confidence are refreshed. The text is re-rendered only
-  while `origin` is still `derived`; once the owner edits the text, it is kept. The claim
-  stays approved.
-- **Rejected claim:** never touched and never resurrected. The finding is dropped and
-  counted as `dropped_previously_rejected`. Archiving the claim frees the key.
-- **Below threshold:** with no live claim, nothing is stored and that batch's statistics
-  are discarded. With a live claim, its evidence is updated and the text is kept.
+Key `builtin:<name>:<scope_id>` plus `:<facet>` when a builtin renders several statements
+(IDs, so renames keep the key). Texts are rendered by code only, hold only numbers,
+weekday/hour words and the category path, and start `pending`, `visibility: shared`,
+`origin: derived`. `evidence` = `{sources: {analyzer: n}, share, period, stats}`; it is
+replaced on every run (the state is the source of truth), never summed.
 
-Category: the one listed below. If the owner deleted it, the nearest existing parent is
-used; if none exists, the finding is skipped.
+- **No live claim, passes:** a new pending claim.
+- **Pending or approved claim, passes:** numbers, confidence, `last_evidence_at` refreshed;
+  the text is re-rendered while `origin` is `derived` (never after an owner edit).
+- **Below threshold, pending claim:** archived (applied `decay` change, reason
+  `analyzer_weakened`). A later passing run creates a new pending claim.
+- **Below threshold, approved claim:** numbers refreshed, text kept, and a `proposed`
+  archive change for the owner (one at a time), like a lost contradiction (SPEC §10.2).
+- **Rejected claim:** untouched (negative memory); a re-run never resurrects it.
 
-## `habit:meeting_buffer`
+Counters in the job's `counts`: `analyzers_run`, `analyzer_errors`, `analyzer_keys_dropped`,
+`analyzers_skipped_disabled`, `analyzer_claims_created|updated|weakened|proposed`.
 
-| | |
-|---|---|
-| Kind / category | `habit` / `work/meetings` |
-| Input | attended events, grouped by local start date and sorted by start |
-| Statistic | `gap_minutes_hist`: gaps between an event's start and the latest end so far that day, in buckets `[0,5) [5,10) [10,15) [15,30) [30,60) [60,120)`. Overlaps count as 0; gaps of 120 min or more are not "between calls" and are skipped. |
-| Formula | for T in 15, 10, 5: share = gaps ≥ T / all gaps. The first T with share ≥ 0.75 wins. Otherwise, if gaps under 5 min ≥ 0.75: "back to back". |
-| Example | "Keeps at least 10 min between calls (100% of 84 same-day gaps)." |
+## Key classes
 
-## `habit:meeting_length`
+Each metric declares one class per `.`-separated key segment; a key with the wrong number
+of segments is dropped.
 
-| | |
-|---|---|
-| Kind / category | `habit` / `work/meetings` |
-| Statistic | `duration_5min_hist`: duration rounded to 5 min, 37 buckets (0 to 180+) |
-| Formula | top bucket share ≥ 0.75 → one length; otherwise top two buckets ≥ 0.75 → two lengths |
-| Example | "Meetings are typically 25 or 50 min (100% of 138)." |
+- `numeric`: digits and `:_-` only (hours, histogram edges, day of month).
+- `vocab`: audience names and IDs, weekday names (`mon`…`sun`, `monday`…), the category's
+  labels (`category_labels`), and the reserved `_`.
+- `text` (default): passes the guard's regex part (no email, phone, URL, handle); is not
+  name-like (no digit, no mixed case, not capitalised in ≥ 50% of its non-initial
+  occurrences in the batch); and occurs in ≥ 5 distinct episodes on ≥ 3 distinct days of
+  the batch. Multi-word keys (bigrams) check each word. Statistics come from in-memory
+  episode text (default `said`). Residual risk: a lowercase name used that often passes
+  (SPEC §2).
 
-## `habit:meeting_free_slots`
+## time_activity
 
-| | |
-|---|---|
-| Kind / category | `habit` / `work/meetings` |
-| Statistic | `weekday_halfday_hist`: attended events by local weekday × half-day (morning before 13:00, afternoon from 13:00), 14 buckets |
-| Formula | mean = average of the 10 Mon–Fri slots (must be ≥ 3). A slot is free when its count ≤ 0.25 × mean, i.e. share = 1 − count/mean ≥ 0.75. Up to two free slots are reported, emptiest first. |
-| Example | "No meetings on Friday afternoons." / "Rarely has meetings on Monday mornings (2 of 120 meetings)." |
+**Scope** category. **State:** `wd_hour` = `<weekday>.<HH>` (vocab, numeric), episode
+count by local weekday and hour; `audience_weekday` = `<audience_id>.<weekday>` (`_` when
+the episode named no audience); `days` = `DD`. Per-audience detail is kept per weekday, not
+per hour, so a month stays under the contract's 200 keys per metric.
 
-## `rule:accept_buffer`
+- Facet `hours`: Mon–Fri hourly counts; drop the earliest and latest 10% of activity; the
+  remaining window `[start, end)` holds share `s`. If `s ≥ 0.75`:
+  *"work/meetings: active 10:00–15:00 on weekdays (100% of 84 weekday episodes)."*
+- Facet `slots` (old `meeting_free_slots`): Mon–Fri split into mornings and afternoons
+  (from 13:00). With mean ≥ 3 per half-day, the (at most two) half-days with at most
+  `0.25 × mean`, share `min(1 − count/mean)`: *"work/meetings: none on Friday afternoons
+  (0 of 84 episodes)."* or *"… rarely on Monday mornings (2 of 140 episodes)."*
+- Facet `weekends`: none at all, or the weekend daily average ≤ 15% of the weekday daily
+  average: *"work/meetings: none on weekends (0 of 84 episodes)."* / *"… rarely on
+  weekends (3 of 200 episodes)."*
 
-| | |
-|---|---|
-| Kind / category | `decision_rule` / `work/meetings` |
-| Input | invites with at least one other attended event the same local day |
-| Statistic | gap to the nearest attended event that day (overlap = 0), in buckets `[0,5) [5,10) [10,15) [15,30) [30,∞)`, split into `declined_gap_hist` and `other_gap_hist` |
-| Formula | for T in 15, 10, 5: tight = invites with gap < T. The rule holds when tight declines / tight ≥ 0.75, at least 10 invites on each side, and declines among the other invites ≤ 0.25. The first T that holds wins. |
-| Example | "Declines invites that leave less than 10 min of buffer (100% of 30 such invites)." |
+**Test:** 6 weeks of meetings at 10:00 (25 min), 11:00 (50 min) and 14:00 (25 min) except
+Friday afternoons produce exactly the three texts above; the DST test checks hours stay
+local across 2026-10-25.
 
-## `rule:accept_size`
+## time_duration
 
-| | |
-|---|---|
-| Kind / category | `decision_rule` / `work/meetings` |
-| Statistic | `declined_by_size`, `other_by_size`: invites by attendee count `≤2, 3–4, 5–8, 9–15, 16+` |
-| Formula | for S in 2, 4, 8, 15: big = invites with more than S attendees. The rule holds when big declines / big ≥ 0.75, at least 10 invites on each side, and declines among the smaller ones ≤ 0.25. The smallest such S wins. |
-| Example | "Usually declines meetings with more than 8 attendees (100% of 24)." |
+**Scope** category. **State:** `length` = `<minutes>` (numeric), non-reply interval length
+rounded to 5 min, `180` = 180+; `latency` = `<audience_id>.<1|0>.<edge>` (vocab, numeric,
+numeric) for reply intervals, `1` when the message came in Mon–Fri 09:00–18:00, edges 0, 5,
+15, 60, 240, 1440 min (latencies over 14 days and replies without an audience are
+ignored); `days`.
 
-## `habit:active_hours`
+- Facet `length` (old `meeting_length`): the most common bucket holds ≥ 0.75 →
+  *"work/meetings: typically 25 min (80% of 212)."*; else the top two together →
+  *"work/meetings: typically 25 or 50 min (100% of 84)."*
+- Facet `latency:<audience_id>` (style, applies to that audience only; old
+  `reply_latency`): per side with ≥ 10 replies, the smallest edge with a cumulative share
+  ≥ 0.75: *"communication/style: replies within 5 min in work hours (100% of 30
+  replies)."*, *"… within 15 min in work hours, within 4 hours otherwise (…)"*, or one side.
 
-| | |
-|---|---|
-| Kind / category | `habit` / `schedule/routine` |
-| Input | owner message timestamps and attended event starts |
-| Statistic | `weekday_halfhour_hist`: 7 × 48 half-hour buckets in local time |
-| Formula | Over Mon–Fri combined (≥ 30 samples), drop the earliest and the latest 10% of activity. The remaining window (≥ 0.75 of activity) is the active window. A day is "rare" when its activity is ≤ 15% of the average weekday's. |
-| Example | "Active 09:00–15:30 on weekdays, rarely on Saturday and Sunday (88% of 210 weekday events and messages)." |
+**Test:** the 6-week synthetic calendar gives *"typically 25 or 50 min (100% of 84)"*;
+30 replies after 3 minutes give the latency text above with audience `work-chat`.
 
-## `habit:reply_latency:<audience>`
+## time_gaps
 
-| | |
-|---|---|
-| Kind / category | `style` / `communication/style`, audiences `[<audience>]` |
-| Input | messages of one audience, grouped by the batch-local `thread` label and sorted by `ts`, then `position`. The first unanswered non-owner message is paired with the next owner message. |
-| Statistic | latency in buckets `[0,5) [5,15) [15,60) [60,240) [240,1440) [1440,∞)` minutes, split into `in_hours_hist` (the non-owner message arrived Mon–Fri 09:00–18:00 local) and `off_hours_hist` |
-| Formula | Each side needs ≥ 10 replies; together they need ≥ 30. A side's bound is the smallest bucket edge E with replies < E ≥ 0.75. |
-| Example | "Replies to work-slack within 5 min in work hours, within 4 hours otherwise (81% of 64 replies)." |
+**Scope** category. **State:** `gap` = `<edge>` (numeric, edges 0, 5, 10, 15, 30, 60 min);
+`days`. Per local day, non-reply intervals sorted by start; gap = start − latest end so far
+(overlap = 0); gaps of 120 min or more are not "between" items. Gaps are computed within
+one job: two intervals of one day sent in different jobs add no gap.
 
-## `habit:message_length:<audience>`
+- For 15, 10, 5 min in that order, share of gaps ≥ that: if ≥ 0.75 →
+  *"work/meetings: keeps at least 15 min between items (100% of 30 same-day gaps)."*
+- Else gaps under 5 min ≥ 0.75 → *"work/meetings: usually back to back (80% of 90 gaps
+  under 5 min)."*
 
-| | |
-|---|---|
-| Kind / category | `style` / `communication/style`, audiences `[<audience>]` |
-| Statistic | `chars_hist`: owner message length in buckets `[0,40) [40,100) [100,200) [200,400) [400,800) [800,∞)`. `lines_hist`: non-empty lines `1, 2, 3–5, 6+`. |
-| Formula | The smallest edge E with messages shorter than E ≥ 0.75 gives the length. "usually one line" is added when 1-line messages ≥ 0.75; "usually 1–2 lines" when 1–2-line messages ≥ 0.75. |
-| Example | "Writes to family in messages under 40 characters, usually one line (92% of 120 messages)." |
+**Test:** the synthetic calendar's 35-minute gaps give the 15-minute text; a later month
+of 0- and 20-minute gaps turns the approved claim into a proposal and archives the pending
+length claim.
 
-Unknown audiences in a batch are mapped to the default audience, so their messages count
-toward the default audience's keys.
+## Not ported (no input in the episode model)
+
+The old `accept_buffer` and `accept_size` rules needed invite responses and attendee
+counts; `message_length` moves into the stylometry builtin (M7b).

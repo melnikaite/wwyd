@@ -35,12 +35,14 @@ def _parser() -> argparse.ArgumentParser:
 
 def _runtime() -> None:
     """Shared startup for the non-HTTP commands: logging, limits and the LLM backend."""
+    from wwyd.config import configure_thresholds
     from wwyd.limits import configure as configure_limits
     from wwyd.logs import configure_logging
 
     configure_logging()
     config = _config()
     configure_limits(config.limits)
+    configure_thresholds(config.thresholds)
     config.llm.apply()
 
 

@@ -29,7 +29,7 @@ from wwyd.auth.middleware import AuthSurfaceMiddleware, BodyLimitMiddleware, mcp
 from wwyd.auth.provider import Resolver, WwydProvider, WwydTokenVerifier, http_caller_provider
 from wwyd.auth.revoke import revocation_route
 from wwyd.auth.throttle import Throttles
-from wwyd.config import Config, ConfigError, db_path
+from wwyd.config import Config, ConfigError, configure_thresholds, db_path
 from wwyd.db import open_db
 from wwyd.limits import configure as configure_limits
 from wwyd.mcp.server import WwydServer, build_server
@@ -112,6 +112,7 @@ def create_app(
     from wwyd.web.pages import router as pages_router
 
     configure_limits(config.limits)
+    configure_thresholds(config.thresholds)
     config.llm.apply()
     if conn is None:
         conn = open_db(db_path())

@@ -22,6 +22,21 @@ uv run ruff check . && uv run ruff format --check .
 Tests must pass and lint must be clean before review. The default test run needs no
 network; tests that need a live LLM are marked `llm` and skipped by default.
 
+### Sandbox assets
+
+LLM-written analyzers run in CPython-for-WASI under wasmtime ([SPEC.md §7.5](SPEC.md)).
+The interpreter and stdlib zip are build artifacts in `src/wwyd/sandbox/assets/`
+(gitignored, shipped in the wheel). Without them the server still starts and LLM analyzers
+are skipped, and `tests/test_sandbox.py` is skipped. To build them:
+
+```sh
+uv run python -I scripts/build_sandbox.py              # downloads the sha256-pinned archive
+uv run python -I scripts/build_sandbox.py --zip PATH   # or use a local copy of it
+```
+
+The helper module `src/wwyd/sandbox/helpers/wwyd_helpers.py` is injected into the guest at
+run time, so editing it needs no rebuild.
+
 ## Privacy invariants
 
 Every pull request must respect these ([SPEC.md §2](SPEC.md#2-privacy-invariants)):

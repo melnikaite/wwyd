@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Privacy canary for ingest_raw (SPEC §2 P1/P2, §13).
 
-Unique strings go into every free-text and label field of every record type; a fake LLM
-echoes its input back as claim text. Neither string may appear anywhere afterwards.
+Unique strings go into every free-text field of every episode shape (situation, decision,
+said, where) and into audience; a fake LLM echoes its input back as claim texts, proposed
+categories and category descriptions. Neither string may appear anywhere afterwards.
+Category paths are client-supplied labels like audience names (SPEC §2 residual risk): they
+carry no canary here.
 """
 
 from __future__ import annotations
@@ -43,58 +46,72 @@ def captured(caplog):
     root.setLevel(logging.WARNING)
 
 
-def records():
+def episodes():
     say = f"please ask {NAME} about {TOKEN} before the call"
     reply = f"ok, will ping {NAME} and check {TOKEN} later"
     ts = "2026-02-03T10:00:00+01:00"
+    span = {"start": ts, "end": "2026-02-03T10:04:00+01:00"}
     return [
-        # message: text, thread and audience (unknown audience) carry canaries
+        # chat reply (unknown audience carries a canary)
         {
-            "type": "message",
-            "from_owner": False,
+            "when": span,
+            "where": f"{TOKEN} chat",
             "audience": NAME,
-            "text": say,
-            "ts": ts,
-            "thread": f"{TOKEN} {NAME}",
-            "position": 1,
+            "category": "chat",
+            "situation": say,
+            "said": reply,
         },
         {
-            "type": "message",
-            "from_owner": True,
-            "audience": NAME,
-            "text": reply,
-            "ts": "2026-02-03T10:04:00+01:00",
-            "thread": f"{TOKEN} {NAME}",
-            "position": 2,
-        },
-        {
-            "type": "message",
-            "from_owner": True,
+            "when": ts,
+            "where": NAME,
             "audience": "work-slack",
-            "text": reply,
-            "ts": ts,
-            "thread": TOKEN,
+            "category": "chat/work",
+            "situation": reply,
+            "said": reply,
         },
+        # call: others' turns in situation, the owner's in said
         {
-            "type": "call_transcript",
+            "when": span,
             "audience": TOKEN,
-            "ts": ts,
-            "turns": [{"speaker": "other", "text": say}, {"speaker": "owner", "text": reply}],
+            "category": "work/calls",
+            "situation": say,
+            "said": reply,
         },
-        {"type": "decision", "situation": say, "choice": reply, "audience": NAME, "ts": ts},
-        {"type": "decision", "situation": reply, "choice": say},
+        # choices, with and without a situation
         {
-            "type": "note",
-            "text": f"My friend {NAME} gave me the code {TOKEN} to remember.",
-            "ts": ts,
+            "when": ts,
+            "audience": NAME,
+            "category": "work/meetings",
+            "situation": say,
+            "decision": reply,
+            "where": f"office of {NAME}",
         },
-        {"type": "note", "text": say},
+        {"category": "work/meetings", "situation": reply, "decision": say},
+        {"category": "hobbies/films", "decision": f"watched {NAME} twice, {TOKEN}"},
+        # statements about self
+        {
+            "when": ts,
+            "category": "food",
+            "said": f"My friend {NAME} gave me the code {TOKEN} to remember.",
+        },
+        {"category": "food", "said": say},
+        # reply and decision at once
+        {"category": "chat", "situation": say, "said": reply, "decision": say},
     ] + calendar()
 
 
 def echo(call):
     """Echo the input back: the whole prompt, then line by line."""
     user = call["user"]
+    if call["purpose"] == "describe_categories":
+        paths = [line[2:] for line in user.splitlines()]
+        return {
+            "descriptions": [
+                {"path": p, "description": d}
+                for p in paths
+                for d in (f"Films seen with {NAME}.", f"Codes like {TOKEN}.", user[:100])
+            ]
+        }
     texts = [user[:500]] + [line[:500] for line in user.splitlines() if line.strip()][:6]
     texts.append(f"Often works with {NAME}.")
     texts.append(f"Uses the code {TOKEN.upper()} at work.")
@@ -122,28 +139,38 @@ def assert_clean(blob: str | bytes, where: str) -> None:
 
 async def test_ingest_canary(client, conn, pid, fake_llm, captured, tmp_path):
     upsert_audience(conn, pid, "work-slack")
-    for purpose in ("style", "notes", "decisions"):
+    for purpose in ("statements", "replies", "decisions", "describe_categories"):
         fake_llm.on(purpose, echo)
 
-    out = await call(client, "ingest_raw", {"records": records()})
+    out = await call(client, "ingest_raw", {"episodes": episodes()})
     await jobs.wait(out["job_id"])
     status = await call(client, "job_status", {"job_id": out["job_id"]})
     assert status["status"] == "done"
     counts = status["counts"]
     assert counts["dropped_by_guard"] >= 10
-    assert counts["unknown_audiences"] == 4
-    assert counts["claims_created"] >= 5  # the detectors still produced claims
-    # The echo really reached the guard.
+    assert counts["unknown_audiences"] == 3
+    assert counts["categories_created"] >= 3
+    # The echo really reached the guard, through every pass and the description call.
+    assert {c["purpose"] for c in fake_llm.calls} >= {
+        "statements",
+        "replies",
+        "decisions",
+        "describe_categories",
+    }
     assert any(TOKEN in c["user"] for c in fake_llm.calls)
+    assert any(NAME in c["user"] for c in fake_llm.by_purpose("decisions"))
 
     assert_clean(json.dumps(status), "job_status")
     listed = await call(client, "list_claims", {"status": "any", "limit": 200})
-    assert listed["claims"]
     assert_clean(json.dumps(listed, ensure_ascii=False), "list_claims")
     exported = await call(client, "export_persona")
     assert_clean(json.dumps(exported, ensure_ascii=False), "export_persona")
     settings = await call(client, "get_settings")
     assert_clean(json.dumps(settings, ensure_ascii=False), "get_settings")
+    tree = await call(client, "list_categories")
+    assert_clean(json.dumps(tree, ensure_ascii=False), "list_categories")
+    changes = [dict(r) for r in conn.execute("SELECT * FROM changes")]
+    assert_clean(json.dumps(changes, ensure_ascii=False), "changes")
     rows = [dict(r) for r in conn.execute("SELECT * FROM jobs")]
     assert_clean(json.dumps(rows, ensure_ascii=False), "jobs row")
     usage = [dict(r) for r in conn.execute("SELECT * FROM usage_daily")]

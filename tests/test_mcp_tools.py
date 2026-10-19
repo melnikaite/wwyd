@@ -37,6 +37,9 @@ OWNER_TOOLS = {
     "list_audit",
     "get_persona",
     "predict",
+    "list_analyzers",
+    "get_analyzer",
+    "update_analyzer",
 }
 # SPEC §5: everything is owner-only except get_persona (read) and predict (respond).
 SCOPED_TOOLS = {"respond": {"predict"}, "read": {"get_persona"}}

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Ingest tools: ingest_raw, job_status, list_sources, reset_source (SPEC §6.1).
 
-Records are never logged or stored."""
+Episodes are never logged or stored."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from pydantic import Field
 
 from wwyd.ingest import jobs
-from wwyd.ingest.jobs import MAX_RECORDS
+from wwyd.ingest.jobs import MAX_EPISODES
 from wwyd.limits import get_limiter
 from wwyd.mcp.caller import current_caller
 from wwyd.mcp.tools._types import Id, Name
@@ -26,56 +26,62 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(owner)
     async def ingest_raw(
-        records: Annotated[
+        episodes: Annotated[
             list[dict[str, Any]],
             Field(
-                max_length=MAX_RECORDS,
+                max_length=MAX_EPISODES,
                 description=(
-                    "1-1000 records, <= 2 MB serialized. Each is one of: "
-                    '{type: "message", from_owner, audience?, text (<= 4000), ts, thread '
-                    "(opaque batch-local label, <= 64), position?}; "
-                    '{type: "call_transcript", audience?, ts, turns: [{speaker: "owner"|'
-                    '"other", text}]}; {type: "calendar_event", start, end, attendees (count), '
-                    "response: accepted|declined|tentative|organizer|none, recurring?, online?}; "
-                    '{type: "decision", situation, choice, audience?, ts?}; '
-                    '{type: "note", text, ts?}. No other fields are accepted: never send '
-                    "names, emails, phones, titles or locations. Datetimes are ISO 8601; "
-                    "without an offset they are read in the persona's timezone."
+                    "1-1000 episodes, <= 2 MB serialized. Each episode is {when?: datetime | "
+                    "{start, end?}, where? (coarse context such as home, online, work Slack; "
+                    "<= 100, never an address), audience? (audience name or default), "
+                    "category (required; a path such as hobbies/films, created if unknown), "
+                    "situation? (what happened or was said to the owner, <= 8000), decision? "
+                    "(what the owner did, described by you, <= 4000), said? (the owner's "
+                    "verbatim words, <= 20000)}, with decision or said. Shapes: statement "
+                    "about self = said only; chat reply = situation + said; choice = "
+                    "situation + decision; call = situation (others) + said (owner). An "
+                    "interval when is the span (meeting length, or incoming message -> "
+                    "reply); never mix both meanings in one category. No other fields are "
+                    "accepted: never put names, emails, phones or addresses in any field or "
+                    "category path. Datetimes are ISO 8601; without an offset they are read "
+                    "in the persona's timezone."
                 ),
             ),
         ],
         llm_for_ingest: Annotated[
             bool | None,
-            Field(description="false: derive with code detectors only for this batch."),
+            Field(description="false: no LLM step for this batch (analyzers only)."),
         ] = None,
         source: Annotated[
             Name | None,
             Field(
                 description=(
-                    "Owner-chosen slug for where the records come from ([a-z0-9][a-z0-9_-]"
-                    "{0,39}, e.g. telegram, gcal). Records with a timestamp at or below the "
+                    "Owner-chosen slug for where the episodes come from ([a-z0-9][a-z0-9_-]"
+                    "{0,39}, e.g. telegram, gcal). Episodes with a timestamp at or below the "
                     "source's watermark are skipped (counts.skipped_seen); see list_sources."
                 )
             ),
         ] = None,
     ) -> dict[str, Any]:
-        """Derive claims from raw records in the background, then drop the records.
+        """Derive claims from episodes in the background, then drop the episodes.
 
         Returns {job_id, accepted, estimated_tokens, remaining_tokens} at once; poll
-        job_status. accepted = valid records received; estimated_tokens = conservative estimate of
-        the LLM tokens the job will use (0 without an LLM step); remaining_tokens = today's
-        remaining LLM token budget (null: unlimited, 0: spend cap reached). Size batches so
-        estimated_tokens fits remaining_tokens; a job that runs out ends partial with
-        remaining_records to resend. Raw records are never stored. Derived claims land as
-        pending for review_claims; habit detectors update their keyed claims instead of
-        duplicating them.
+        job_status. accepted = valid episodes received; estimated_tokens = conservative
+        estimate of the LLM tokens the job will use (0 without an LLM step);
+        remaining_tokens = today's remaining LLM token budget (null: unlimited, 0: spend cap
+        reached). Size batches so estimated_tokens fits remaining_tokens; a job that runs
+        out ends partial with remaining_records to resend. Unknown category paths are
+        created (limits: max_categories, new_categories_per_job; beyond them an episode
+        goes to the closest existing ancestor or other, counted in unmapped_categories).
+        Raw episodes are never stored. Derived claims land as pending for review_claims;
+        analyzers update their keyed claims instead of duplicating them.
         """
         caller = current_caller()
         return jobs.submit(
             server.conn,
             caller.user_id,
             caller.persona_id,
-            records,
+            episodes,
             llm_for_ingest=llm_for_ingest,
             source=source,
         )
@@ -83,12 +89,14 @@ def register(server: WwydServer) -> None:
     @server.scoped_tool(owner, read_only=True)
     async def job_status(job_id: Id) -> dict[str, Any]:
         """Status of an ingest job: queued | running | done | partial | failed | interrupted,
-        progress 0..1, counts (records by type, claims_created, claims_updated, absorbed,
-        dropped_by_guard, unknown_audiences, skipped_seen, skipped_saturated,
-        saturated_audiences, llm_calls, ...) and error_code when it did not finish.
+        progress 0..1, counts (episodes by class: total, statement, reply, decision;
+        claims_created, claims_updated, absorbed, dropped_by_guard, unknown_audiences,
+        categories_created, unmapped_categories, skipped_seen, skipped_saturated,
+        saturated_audiences, llm_calls, analyzer counters, ...) and error_code when it did
+        not finish.
         partial: stopped by the daily token limit (rate_limited), the spend cap (spend_cap)
         or an unavailable LLM (llm_unavailable) after storing what it derived; resend
-        exactly the records at remaining_records (indices into the original batch), after
+        exactly the episodes at remaining_records (indices into the original batch), after
         retry_after seconds when given. An interrupted job (server restart) must be sent
         again in full."""
         conn = server.conn
@@ -107,7 +115,7 @@ def register(server: WwydServer) -> None:
     @server.scoped_tool(owner, read_only=True)
     async def list_sources() -> dict[str, Any]:
         """Per-source ingest watermarks: {sources: [{source, last_ts (largest processed
-        record timestamp, UTC), last_job_at, records_total}]}."""
+        episode timestamp, UTC), last_job_at, records_total}]}."""
         return {"sources": source_store.list_sources(server.conn, current_caller().persona_id)}
 
     @server.scoped_tool(owner, destructive=True)

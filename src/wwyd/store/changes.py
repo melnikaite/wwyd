@@ -37,11 +37,15 @@ OPS = (
     "archive_budget",
     "purge",
     "restore",
+    "category_create",
     "category_merge",
     "category_rename",
+    "category_split",
 )
 STATES = ("applied", "proposed", "dismissed", "undone", "expired")
-_CATEGORY_OPS = ("category_merge", "category_rename")
+# Tree changes that must be undone newest first. ``category_create`` is not among them:
+# its undo checks the live state of the categories it created instead (SPEC §4.4).
+_CATEGORY_OPS = ("category_merge", "category_rename", "category_split")
 _SKIP_COLUMNS = {"seq", "norm_text"}
 
 
@@ -391,7 +395,11 @@ def undo_change(conn: sqlite3.Connection, persona_id: str, change_id: str) -> di
             " AND rowid > ? ORDER BY rowid",
             (persona_id, row["seq"]),
         ).fetchall()
-        if row["op"] in _CATEGORY_OPS:
+        if row["op"] == "category_create":
+            from wwyd.store import categories as cats
+
+            cats.undo_create(conn, persona_id, payload)
+        elif row["op"] in _CATEGORY_OPS:
             blocking = [r["id"] for r in later if r["op"] in _CATEGORY_OPS]
             if blocking:
                 raise Conflict(
@@ -430,12 +438,20 @@ def _undo_category(
         row = cats.get_category(conn, persona_id, root["to"])
         cats._rename(conn, persona_id, row, root["from"], record=False)
         return
+    if op != "category_merge":
+        raise Conflict(f"{op} cannot be undone yet")
     # category_merge: recreate the removed categories (parents first), move claims back.
     before = payload["before"]
     for cat in reversed(before["categories"]):
         if cats._row(conn, persona_id, cat["path"]) is not None:
             raise Conflict(f"category {cat['path']!r} exists again", path=cat["path"])
-        cats.create_category(conn, persona_id, cat["path"], cat.get("description") or "")
+        cats.create_category(
+            conn,
+            persona_id,
+            cat["path"],
+            cat.get("description") or "",
+            origin=cat.get("origin", "owner"),
+        )
     ids = cats.category_ids_by_path(conn, persona_id)
     ts = now_iso()
     for claim in before["claims"]:

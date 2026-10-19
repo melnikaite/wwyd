@@ -1,9 +1,12 @@
 # Releasing wwyd
 
 A pushed tag `vX.Y.Z` runs [`.github/workflows/release.yml`](.github/workflows/release.yml):
-lint and tests, a check that the tag equals the `version` in `pyproject.toml`, `uv build`,
+lint and tests, a check that the tag equals the `version` in `pyproject.toml`, the sandbox
+assets (`scripts/build_sandbox.py`: downloads the sha256-pinned CPython-for-WASI archive and
+builds `src/wwyd/sandbox/assets/`), `uv build` with a check that the wheel contains them,
 upload to PyPI (Trusted Publishing, no token), a multi-arch image
-`ghcr.io/melnikaite/wwyd` (linux/amd64, linux/arm64; tags `X.Y.Z`, `X.Y`, `latest`), and a
+`ghcr.io/melnikaite/wwyd` (linux/amd64, linux/arm64; the assets are built in the job
+before `docker build`, so `COPY src` includes them; tags `X.Y.Z`, `X.Y`, `latest`), and a
 GitHub Release whose body is the `## [X.Y.Z]` section of `CHANGELOG.md`, with the sdist
 and wheel attached.
 
@@ -37,8 +40,12 @@ and wheel attached.
    `## [X.Y.Z] - YYYY-MM-DD` (today's date), and update the compare links at the bottom.
 3. Bump the pinned image version in `deploy/docker-compose.yml`,
    `deploy/cloud-init.yaml`, `docs/install.md` and `README.md`.
-4. Check locally: `uv run ruff check . && uv run ruff format --check . && uv run pytest`,
-   and `uv build` (inspect `dist/` if packaging changed).
+4. Check locally: `uv run python -I scripts/build_sandbox.py` (once; the assets are
+   gitignored), `uv run ruff check . && uv run ruff format --check . && uv run pytest`,
+   and `uv build` (inspect `dist/` if packaging changed; the wheel must contain
+   `wwyd/sandbox/assets/python.wasm` and `lib/python315.zip`, ~3 MB compressed).
+   Moving to a new upstream CPython-for-WASI release means updating `UPSTREAM_*` and
+   `UPSTREAM_SHA256` in `scripts/build_sandbox.py` together.
 5. Commit (`Release vX.Y.Z`) and push to `main`; wait for CI to pass.
 6. Create a signed tag and push it:
 
