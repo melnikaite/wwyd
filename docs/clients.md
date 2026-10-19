@@ -127,9 +127,12 @@ What to do with it is up to you:
 - send `answer` as is (simple auto-responders);
 - refine the answer yourself from `depends_on` with your own LLM and tools;
 - or look things up and call `predict` again with the same `situation`, `audience` and
-  `kind`, plus `context`: what you found out, as a conclusion in plain words ("free today
-  from 19:30"), never raw data such as a whole schedule. The answer then comes in the
-  owner's wording. The server keeps no state between calls.
+  `kind`, plus `context`: what you found out, as a conclusion in plain words, never raw
+  data such as a whole schedule. Best is the direct answer to the condition in
+  `depends_on` ("14:55–15:25 tomorrow is free", "rain all day on Saturday"): small local
+  models settle that reliably, while working the condition out from a wider window ("free
+  14:00–16:00") they may get wrong or leave open. The answer then comes in the owner's
+  wording. The server keeps no state between calls.
 
 ```
 -> predict {situation: "созвонимся завтра в 15:00?", audience: "default"}
@@ -143,7 +146,7 @@ What to do with it is up to you:
 <- {type: "answer", answer: "звучит здорово, посмотрю по погоде",
     depends_on: "Ходит на озеро только в тёплую погоду без дождя.", ...}
 -> predict {situation: "созвонимся завтра в 15:00?", audience: "default",
-            context: "завтра свободен с 14:00 до 16:00"}
+            context: "завтра с 14:55 до 15:25 свободно"}
 <- {type: "answer", answer: "давай, в 15:00 норм", depends_on: null, ...}
 ```
 
@@ -230,7 +233,8 @@ Shapes (the `category` in the examples is optional):
 
 | Shape | Fields | Example |
 |---|---|---|
-| statement about self | `said`, no `situation` | `{"category": "food", "said": "I never eat breakfast."}` |
+| outgoing message the owner started | `said` + `audience`, no `situation` (counts as a reply to that audience) | `{"audience": "colleagues", "said": "running 15 min late, sorry"}` |
+| statement about self | `said`, no `situation`, no `audience` | `{"category": "food", "said": "I never eat breakfast."}` |
 | chat reply | `situation` = the incoming message(s), `said` = the reply | `{"situation_at": "2026-10-02T10:00:00+02:00", "when": "2026-10-02T10:04:00+02:00", "audience": "colleagues", "category": "communication/chat", "situation": "Can you review this today?", "said": "sure, after lunch"}` |
 | choice | `situation` + `decision` | `{"when": {"start": "2026-10-02T19:30:00+02:00", "end": "2026-10-02T20:00:00+02:00"}, "where": "online", "category": "work/meetings", "situation": "invite, 12 attendees", "decision": "declined"}` |
 | call | `situation` = what the others said, `said` = the owner's turns | `{"when": "...", "category": "work/calls", "situation": "...", "said": "..."}` |

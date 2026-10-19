@@ -474,6 +474,17 @@ async def _derive(job: Job) -> None:
             try:
                 if first:
                     await _llm_calls(job, persona, touched, first, guard, labeler, placer)
+                if placer is not None:
+                    # Placed paths the model left without a usable description get one
+                    # from a single batched describe call (§4.4).
+                    bare = [
+                        c for c in placer.resolver.created if c["id"] not in placer.descriptions
+                    ]
+                    describe = passes.describe_call(bare)
+                    if describe is not None:
+                        first = [*first, describe]
+                        job.calls = first + annotation + old_passes
+                        await _llm_calls(job, persona, touched, [describe], guard, labeler)
                 min_eps = thresholds().analyzer_min_episodes
                 if placer is not None:
                     new_annotation = annotate.plan(

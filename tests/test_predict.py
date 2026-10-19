@@ -190,9 +190,10 @@ def test_depends_on_cut_to_400():
 
 
 def test_answer_schema_key_sorts_before_answer():
-    from wwyd.predict.prompts import ANSWER_SCHEMA, DEPENDS_KEY
+    from wwyd.predict.prompts import ANSWER_SCHEMA, CHECK_KEY, DEPENDS_KEY
 
-    assert DEPENDS_KEY < "answer"
+    assert CHECK_KEY < DEPENDS_KEY < "answer"
+    assert CHECK_KEY in ANSWER_SCHEMA["required"]
     assert DEPENDS_KEY in ANSWER_SCHEMA["properties"] and DEPENDS_KEY in ANSWER_SCHEMA["required"]
     assert "absent_facts" not in ANSWER_SCHEMA["properties"]
     assert ANSWER_SCHEMA["properties"]["type"]["enum"] == ["answer", "escalate"]
@@ -201,8 +202,9 @@ def test_answer_schema_key_sorts_before_answer():
 def test_interpret_maps_internal_key():
     from wwyd.predict.answer import interpret
 
-    out = interpret(_reply("depends on the weather"), set())
+    out = interpret({**_reply("depends on the weather"), "a_check": "rain unknown"}, set())
     assert out["depends_on"] == "depends on the weather" and "a_depends_on" not in out
+    assert "rain unknown" not in str(out)  # the scratch note is never returned
     # A non-empty depends_on is never a reason to escalate.
     assert out["type"] == "answer"
     # The old "needs" type (or any unknown type) is a failure to commit: low_confidence.

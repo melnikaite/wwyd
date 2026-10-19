@@ -4,7 +4,7 @@
 Batched calls (at most :data:`MAX_EPISODES` episodes and about :data:`MAX_CHARS` characters
 of episode text each; ``situation`` and ``said`` cut to 300 chars, ``decision`` to 200) see
 the persona's category paths with their descriptions and return, per episode, an existing
-or a new path, plus a one-line description for each new path. The system prompt is static
+or a new path, with a one-line description when the path is new (one item per episode). The system prompt is static
 (prefix caching); the category list and the episodes are in the user message.
 
 A returned path goes through the job's :class:`~wwyd.store.categories.CategoryResolver`
@@ -29,34 +29,36 @@ from wwyd.ingest.guard import BatchGuard
 from wwyd.ingest.rare import RareWords
 from wwyd.store.categories import CategoryResolver, normalize_category_path
 
-MAX_EPISODES = 50
+# 25 episodes per call bounds the reply size: each item is short and the list is one item
+# per episode, so a small model cannot run on to max_tokens.
+MAX_EPISODES = 25
 MAX_CHARS = 6000
 SITUATION_CHARS = 300
 SAID_CHARS = 300
 DECISION_CHARS = 200
 MAX_DESCRIPTION_CHARS = 200
 
+# One item per episode. Key order matters: JSON-schema grammars emit object keys in
+# alphabetical order, so "i" < "path" < "path_description" makes the model commit to the
+# episode number, then the path, and only then describe a new path (same reason as
+# predict's ``a_depends_on``). A separate list of new categories generated first made
+# small models invent categories in a loop before placing anything.
 SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["placements", "new_categories"],
+    "required": ["placements"],
     "properties": {
         "placements": {
             "type": "array",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["i", "path"],
-                "properties": {"i": {"type": "integer"}, "path": {"type": "string"}},
-            },
-        },
-        "new_categories": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["path", "description"],
-                "properties": {"path": {"type": "string"}, "description": {"type": "string"}},
+                "required": ["i", "path", "path_description"],
+                "properties": {
+                    "i": {"type": "integer"},
+                    "path": {"type": "string"},
+                    "path_description": {"type": "string"},
+                },
             },
         },
     },
@@ -69,28 +71,38 @@ The input lists the existing categories (path: description), then numbered episo
 SITUATION is what happened or was said to the owner, SAID the owner's words, CHOICE what
 the owner did.
 Rules:
-- For every episode return one path. Prefer an existing category; propose a new path only
-  when none fits, preferably below an existing parent ("hobbies/films").
-- New paths name an area of life, never a person, company, place, product or account:
-  "work/hiring", not the name of an employer.
-- For every new path add one item to new_categories with a one-line description (at most
-  120 characters) of what it holds, in the language of the path. Never mention names,
+- Return exactly one item per episode, in order: {"i": <episode number>, "path": ...,
+  "path_description": ...}. Never add items for paths no episode needs.
+- Prefer an existing category. Propose a new path only when none fits, preferably below an
+  existing parent.
+- Before proposing a new path, check whether an existing category already covers that area
+  under another parent, and use it.
+- Place by what the owner is doing, not by who is involved. A friend, relative, colleague or
+  company in the situation does not make it family or work: going fishing with a friend is
+  a hobby, a lunch invitation is food or social life, a recruiter's job offer is work.
+- New paths name an area of life, never a person, company, place, product or account.
+- path_description is "" when the path already exists. For a new path it is one line (at
+  most 120 characters, in the language of the path) saying what the category holds, written
+  for this episode's area; do not copy descriptions from this prompt. Never mention names,
   companies, places, links, emails or phone numbers.
-- Return JSON {"placements": [{"i": 1, "path": ...}, ...], "new_categories": [{"path": ...,
-  "description": ...}]}, one placement per episode.
 
 Example:
 Input:
 Categories:
-- work/meetings: Which meetings the owner accepts and how long they last.
-- food: What the owner eats and drinks.
+- money: How the owner spends, saves and lends money.
+- sport: Which sports the owner does and how often.
+- family: How the owner handles matters with relatives.
 - other
 Episodes:
-1. SITUATION: Invitation to a planning call at 19:30. CHOICE: declined
-2. SITUATION: Film night, a slow drama. CHOICE: watched to the end, 4/5
+1. SITUATION: A cousin asks to borrow money for a car. CHOICE: lent half, no interest
+2. SITUATION: Colleague suggests a 10 km run on Sunday. CHOICE: joined
+3. SITUATION: Choosing a birthday present for a brother. CHOICE: bought a book voucher
+4. SITUATION: Train or plane for a two-day trip. CHOICE: took the night train
 Answer:
-{"placements": [{"i": 1, "path": "work/meetings"}, {"i": 2, "path": "hobbies/films"}],
-"new_categories": [{"path": "hobbies/films", "description": "Which films the owner watches and how they rate them."}]}
+{"placements": [{"i": 1, "path": "money", "path_description": ""}, {"i": 2, "path": "sport",
+"path_description": ""}, {"i": 3, "path": "money/gifts", "path_description": "What presents
+the owner picks and how much they spend."}, {"i": 4, "path": "travel", "path_description":
+"How the owner chooses transport and plans trips."}]}
 """
 
 
@@ -207,22 +219,9 @@ class Placer:
         if not isinstance(data, dict) or not isinstance(data.get("placements"), list):
             counts.failed_calls += 1
             data = {}
-        described: dict[str, str] = {}
-        for item in data.get("new_categories") or ():
-            path = _normalized(item.get("path")) if isinstance(item, dict) else None
-            text = item.get("description") if isinstance(item, dict) else None
-            if path is None or not isinstance(text, str):
-                counts.invalid += 1
-                continue
-            text = _one_line(text)
-            if not text or len(text) > MAX_DESCRIPTION_CHARS:
-                counts.invalid += 1
-                continue
-            if self.guard.check(text) is not None:  # parts 1-3, as every description
-                counts.dropped_by_guard += 1
-                continue
-            described.setdefault(path, text)
         chosen: dict[int, str] = {}
+        described: dict[str, str] = {}
+        failed: set[str] = set()  # new paths with a description already dropped (count once)
         for item in data.get("placements") or ():
             if not isinstance(item, dict) or not isinstance(item.get("i"), int):
                 counts.invalid += 1
@@ -231,7 +230,24 @@ class Placer:
             if path is None:
                 counts.invalid += 1
                 continue
-            chosen.setdefault(item["i"], path)
+            if item["i"] in chosen:
+                continue
+            chosen[item["i"]] = path
+            text = item.get("path_description")
+            if not isinstance(text, str) or path in described or resolver.known(path):
+                continue
+            text = _one_line(text)
+            if not text:
+                continue
+            if len(text) > MAX_DESCRIPTION_CHARS:
+                counts.invalid += 1
+                continue
+            if self.guard.check(text) is not None:  # parts 1-3, as every description
+                if path not in failed:
+                    failed.add(path)
+                    counts.dropped_by_guard += 1
+                continue
+            described[path] = text  # the first non-empty description passing the guard wins
         rejected: set[str] = set()
         for n, ep in enumerate(meta.episodes, start=1):
             path = chosen.get(n)
@@ -252,3 +268,4 @@ class Placer:
                     self.descriptions[c["id"]] = described[c["path"]]
         described.clear()
         chosen.clear()
+        failed.clear()

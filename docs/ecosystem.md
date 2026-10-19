@@ -48,7 +48,9 @@ covers every source; the domain goes into `category`, which you may leave out (s
   {"category": "hobbies/films", "when": "2026-10-03T21:00:00+02:00",
    "decision": "watched to the end, 4/5"},
   {"corrects": "adt_…", "situation": "Can we talk tomorrow at 15:00?",
-   "said": "15:05 works, I need a few minutes after my previous call"}
+   "said": "15:05 works, I need a few minutes after my previous call"},
+  {"when": "2026-10-04T08:50:00+02:00", "audience": "colleagues",
+   "said": "running 15 min late, sorry, start without me"}
 ]}
 ```
 
@@ -64,6 +66,9 @@ covers every source; the domain goes into `category`, which you may leave out (s
 - A call: what the others said in `situation`, the owner's turns in `said`, the call's
   span in `when`.
 - Something the owner wrote about themselves: `said` only.
+- A message the owner started (dictated to a voice assistant, the first message of an
+  email or chat thread): `said` + `audience`, no `situation`. It counts as a reply to that
+  audience; do not invent a placeholder situation.
 - A correction: when the owner says a `predict` answer was wrong ("no, I'd say …"), send
   the situation again with the owner's version and `corrects` set to the answer's
   `prediction_id`. It weighs more than an ordinary episode and is checked against the
@@ -124,8 +129,9 @@ The result is one of:
   as is; when it depends on things wwyd cannot know (the owner's free time, the weather) it
   stays non-committal and `depends_on` says in plain words what it depends on ("agrees if
   Tuesday 14:50–15:40 is free"), `null` otherwise. Send `answer` as is, refine it with your
-  own tools, or call again with the same situation plus what you found out as
-  `"context": "free on Tuesday 15:00–16:00"` for the owner's wording. The server keeps no
+  own tools, or call again with the same situation plus what you found out for the owner's
+  wording, best as the direct answer to the condition: `"context": "Tuesday 14:50–15:40 is
+  free"`. The server keeps no
   state between the calls; `context` is used once and never stored.
 - `{"type": "escalate", "escalate": "low_confidence"|"boundary"|"rate_limited"|…}` — do not
   answer automatically; notify the owner.

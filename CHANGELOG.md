@@ -107,6 +107,9 @@ shapes (see Changed), so the first release bumps the minor version.
 
 ### Changed
 
+- An episode with `said` and an explicit `audience` but no `situation` is an outgoing
+  message the owner started and feeds the reply/style side for that audience; `said` alone
+  stays a statement about self.
 - `predict` latency: claims are shown to the model under short labels instead of claim IDs
   (fewer output tokens), and routing is skipped when the visible claims span at most three
   categories.

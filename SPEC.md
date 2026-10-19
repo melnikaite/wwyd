@@ -193,11 +193,15 @@ food  travel  money  health  family  hobbies  tech  other
   ancestor of its path, or to `other` when none exists, and is counted in
   `unmapped_categories`.
 - **Placement by the server (D23).** `category` is optional. Episodes without one are
-  placed by the job's first LLM step: batched calls (≤ 50 episodes and ~6000 chars of
+  placed by the job's first LLM step: batched calls (≤ 25 episodes and ~6000 chars of
   episode text per call; `situation` and `said` cut to 300 chars, `decision` to 200) see
-  the persona's category paths and descriptions and return, per episode, an existing path
-  or a new one, plus a one-line description for each new path (so placed paths need no
-  separate description call). A returned path goes through the same resolution and limits
+  the persona's category paths and descriptions and return one item per episode:
+  `{"placements": [{"i", "path", "path_description"}]}`, an existing path or a new one,
+  with `path_description` empty for an existing path and a one-line description for a new
+  one; a new path left without a description that passes the guard gets one from a single
+  batched description call after placement. Only paths used by an episode
+  are created; when several episodes propose the same new path, the first description
+  that passes the guard is kept. A returned path goes through the same resolution and limits
   as a client's path (over a limit it maps like one and counts in `unmapped_categories`).
   A new path is checked by the full verbatim guard, including the concentrated-word check
   (§7.7); a description by the guard's parts 1–3, like every category description (the
@@ -418,7 +422,10 @@ Every episode has `additionalProperties: false` and at least one of `decision` /
 An unknown `audience` is mapped to the default audience and counted in the job's
 `unknown_audiences` counter. Shapes (one type for every data source; the domain lives in
 `category`, D17):
-- a statement about self (the former note): `said`, no `situation`;
+- a statement about self (the former note): `said`, no `situation`, no `audience`;
+- an outgoing message the owner started (a dictated "tell them I'll be late", the first
+  message of a thread): `said` + `audience`, no `situation`; it is a reply to that
+  audience for every purpose (style, passes, analyzers) except latency;
 - a chat reply: `situation` = the incoming message(s), `said` = the reply;
 - a choice (meeting invite, film, purchase): `situation` + `decision` ("declined",
   "watched to the end, 4/5");
@@ -555,7 +562,10 @@ matters. There is no structure in it and no domain vocabulary: the client decide
 use it. A simple client sends `answer` as is; a client with its own LLM and tools refines
 the answer from `depends_on`; a client that wants the final wording in the owner's voice
 calls `predict` again with the same situation and what it found out in `context`, as a
-conclusion in plain words ("free today from 19:30"), never raw data such as a schedule.
+conclusion in plain words, never raw data such as a schedule. Best is the direct answer
+to the condition in `depends_on` ("14:55–15:25 tomorrow is free", "rain all day on
+Saturday"): small models settle that reliably, while working the condition out from a
+wider window ("free 14:00–16:00") they may get wrong or leave open.
 The server keeps no state between calls.
 
 ### 6.6 Persona lifecycle and settings (owner)
@@ -592,8 +602,9 @@ nothing to resume because nothing was saved (P1).
 
 - **Preparation.** Before anything else the host converts every time to the persona
   timezone, resolves audiences and category paths (§4.4) and classifies each episode:
-  *statement* (no `situation`), *reply* (`said` + `situation`), *decision* (`decision` +
-  `situation`); an episode with both `said` and `decision` is a reply and a decision. New
+  *statement* (`said`, no `situation`, no `audience`), *reply* (`said` + `situation`, or
+  `said` + an explicit `audience` and no `situation`: an outgoing message; `"default"` and
+  an unknown name count as explicit), *decision* (`decision` + `situation`); an episode with both `said` and `decision` is a reply and a decision. New
   categories get their descriptions in one batched call first (§4.4). A `corrects` ID is
   resolved against the persona's audit rows here (D23); a resolved episode is also a
   *correction*, counted in `corrections`.
@@ -833,7 +844,12 @@ through it.
    parameters: typical length, lowercase-start share, ending punctuation, emoji habits,
    favourite words and phrases (D22). The model returns strict JSON:
    `{"type":"answer","answer","depends_on","confidence","used_claims","language"}` or
-   `{"type":"escalate","escalate":"out_of_persona"|"boundary","reason"}`.
+   `{"type":"escalate","escalate":"out_of_persona"|"boundary","reason"}`. Internally the
+   reply also starts with a one-line scratch note (`a_check`: the claims applied to the
+   situation and the context, and whether that settles it), which is never returned,
+   stored or logged; on small local models it is what lets a `context` that answers the
+   condition actually settle the answer. The context line comes after the situation in
+   the prompt.
 7. **Post-process:** drop `used_claims` IDs not in the context; `confidence <
    escalate_below` (default 0.6) → `escalate: "low_confidence"`; add the `disclosure`;
    write the audit row; count usage.
@@ -1403,6 +1419,10 @@ works against one generic model for every area of life.
   area of life (money, health included) are welcome, including thresholds the owner
   applies; records about the owner (diagnoses, balances, amounts, account data) are not
   (`docs/ecosystem.md` §5).
+- *Outgoing messages.* A message the owner started had no shape: clients sent it as a reply
+  with an invented placeholder situation. `said` + `audience` without `situation` is now
+  read as an outgoing message to that audience (reply class); `said` alone stays a
+  statement about self. A classification rule over existing fields, no new field.
 
 ### Implementation notes
 
@@ -1525,6 +1545,12 @@ Deviations and details recorded while implementing M8:
   paths left; it records its own `category_create` change with the `job_id` (a job can
   have two), whatever ended the LLM phase. The system prompt is static; the category list
   and the episodes are in the user message.
+- **Place reply shape.** One item per episode, keys `i`, `path`, `path_description`, in
+  that (alphabetical) order: JSON-schema grammars emit keys alphabetically, and a separate
+  list of new categories generated before the placements made small local models invent
+  categories in a loop until the reply was cut. For the same reason a call holds at most
+  25 episodes. The prompt's example covers several areas of life and tells the model to
+  place by what the owner is doing, not by who is involved.
 - **Estimate for unplaced episodes.** `estimated_tokens` includes the place calls and,
   for the episodes still to be placed, stand-in pass calls: all of an audience's unplaced
   episodes in one category, decisions always included (never left to annotation), and

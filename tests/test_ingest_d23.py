@@ -167,13 +167,15 @@ def films(n=3, **extra):
 
 
 def placing(fake_llm, paths, new=()):
+    described = dict(new)
+
     def handler(c):
         lines = c["user"].split("Episodes:\n", 1)[1].splitlines()
-        return {
-            "placements": [{"i": i, "path": paths[(i - 1) % len(paths)]}
-                           for i in range(1, len(lines) + 1)],
-            "new_categories": [{"path": p, "description": d} for p, d in new],
-        }  # fmt: skip
+        items = []
+        for i in range(1, len(lines) + 1):
+            path = paths[(i - 1) % len(paths)]
+            items.append({"i": i, "path": path, "path_description": described.get(path, "")})
+        return {"placements": items}
 
     fake_llm.on("place", handler)
 
@@ -205,6 +207,19 @@ async def test_place_new_path_with_description(client, conn, pid, fake_llm):
     ).fetchone()
     assert change["job_id"] == out["job_id"]
     assert json.loads(change["payload"])["categories"][0]["path"] == "hobbies/cinema"
+
+
+async def test_place_empty_description_gets_describe_call(client, conn, pid, fake_llm):
+    placing(fake_llm, ["hobbies/cinema"])
+    fake_llm.on(
+        "describe_categories",
+        {"descriptions": [{"path": "hobbies/cinema", "description": "Which films are seen."}]},
+    )
+    _, status = await ingest(client, films())
+    (describe,) = fake_llm.by_purpose("describe_categories")
+    assert describe["user"] == "- hobbies/cinema"
+    assert path_of(conn, pid, "hobbies/cinema")["description"] == "Which films are seen."
+    assert status["counts"]["categories_created"] == 1
 
 
 async def test_place_change_is_undoable(client, conn, pid, fake_llm):
@@ -244,7 +259,7 @@ async def test_place_description_guarded(client, conn, pid, fake_llm):
 
 
 async def test_place_no_usable_path(client, conn, pid, fake_llm):
-    fake_llm.on("place", {"placements": [{"i": 1, "path": "a//b"}], "new_categories": []})
+    fake_llm.on("place", {"placements": [{"i": 1, "path": "a//b", "path_description": ""}]})
     _, status = await ingest(client, films())
     assert status["status"] == "done" and status["counts"]["unplaced_episodes"] == 3
 
@@ -275,7 +290,7 @@ async def test_place_batches(client, conn, pid, fake_llm):
     eps = [{"situation": f"{i} {long}", "said": "x"} for i in range(60)]
     await ingest(client, eps)
     calls = fake_llm.by_purpose("place")
-    assert len(calls) > 2  # 60 episodes of ~600 chars: chars bound, not only 50
+    assert len(calls) > 3  # 60 episodes of ~600 chars: chars bound, not only 25
     for c in calls:
         episodes = c["user"].split("Episodes:\n", 1)[1]
         assert len(episodes) <= place.MAX_CHARS + 50 * 5
@@ -283,7 +298,31 @@ async def test_place_batches(client, conn, pid, fake_llm):
     eps = [{"situation": f"s{i}", "said": "x"} for i in range(120)]
     fake_llm.calls.clear()
     await ingest(client, eps)
-    assert len(fake_llm.by_purpose("place")) == 3
+    assert len(fake_llm.by_purpose("place")) == 5  # 120 / MAX_EPISODES (25)
+
+
+async def test_place_extra_paths_create_nothing(client, conn, pid, fake_llm):
+    items = [{"i": i, "path": "food", "path_description": ""} for i in (1, 2, 3)]
+    items += [{"i": 9, "path": "hobbies/tv", "path_description": "Which shows the owner watches."},
+              {"i": 10, "path": "hobbies/music", "path_description": "What the owner hears."}]  # fmt: skip
+    fake_llm.on("place", {"placements": items})
+    _, status = await ingest(client, films())
+    assert path_of(conn, pid, "hobbies/tv") is None and path_of(conn, pid, "hobbies/music") is None
+    assert status["counts"]["categories_created"] == 0
+    assert status["counts"]["unplaced_episodes"] == 0
+
+
+async def test_place_duplicate_new_path_first_description_wins(client, conn, pid, fake_llm):
+    items = [
+        {"i": 1, "path": "hobbies/cinema", "path_description": ""},
+        {"i": 2, "path": "hobbies/cinema", "path_description": "Watches with mail@example.com."},
+        {"i": 3, "path": "hobbies/cinema", "path_description": "Which films the owner sees."},
+    ]
+    fake_llm.on("place", {"placements": items})
+    _, status = await ingest(client, films())
+    row = path_of(conn, pid, "hobbies/cinema")
+    assert row["description"] == "Which films the owner sees."
+    assert status["counts"]["categories_created"] == 1
 
 
 async def test_no_llm_goes_to_other(client, conn, pid, fake_llm):

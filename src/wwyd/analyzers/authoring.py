@@ -107,8 +107,8 @@ AUTHOR_SYSTEM = (
 life, and write a small Python 3 analyzer for each that counts how often it holds.
 Return JSON {"hypotheses": [...]} with at most 5 items, each:
 - statement_template: one sentence about the owner with placeholders {share} (e.g. "87%"),
-  {n} (episodes counted), {hits}, {months}; e.g. "Declines {share} of meetings after 18:00
-  ({n} invitations)." Describe a rule-like regularity (it should hold in at least 75%).
+  {n} (episodes counted), {hits}, {months}; e.g. "Pays back {share} of borrowed money
+  within a week ({n} loans)." Describe a rule-like regularity (it should hold in at least 75%).
 - kind: habit, decision_rule, preference, style, trait or boundary.
 - source: the analyzer, a complete script (see the API below).
 Rules: never mention people's names, companies, places, links, emails or phone numbers,

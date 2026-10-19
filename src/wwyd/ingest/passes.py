@@ -119,7 +119,8 @@ Categories:
 REPLIES_SYSTEM = (
     """You describe how one person (the owner) writes and talks to one group of people (an
 "audience"). The input contains excerpts: lines starting with OWNER are the owner's words,
-lines starting with OTHER are the other side's words, given only as context.
+lines starting with OTHER are the other side's words, given only as context. An OWNER
+line with no OTHER line before it is a message the owner started.
 Return JSON {"claims": [...]} with up to 5 claims about the owner's style (tone, length,
 greetings, language, emoji, pace), boundaries (what the owner refuses or deflects) or
 preferences. kind is one of: style, boundary, preference.
@@ -152,12 +153,12 @@ style, boundary.
 
 Example (Russian):
 Input:
-NOTE: По утрам не ем, только чёрный кофе. Созвоны до 10 утра не ставлю.
+NOTE: По утрам не ем, только чёрный кофе. В долг даю только ту сумму, которую готов не получить назад.
 Answer:
 {"claims": [{"kind": "habit", "category": "food", "proposed_category": null,
 "text": "Не завтракает, по утрам пьёт только чёрный кофе.", "confidence": 0.8},
-{"kind": "decision_rule", "category": "work/meetings", "proposed_category": null,
-"text": "Не принимает созвоны раньше 10 утра.", "confidence": 0.8}]}
+{"kind": "decision_rule", "category": "money", "proposed_category": null,
+"text": "Даёт в долг только сумму, которую готов не получить обратно.", "confidence": 0.8}]}
 """
 )
 
@@ -171,15 +172,15 @@ that follow it. Return JSON {"claims": [...]}; kind is decision_rule or preferen
 
 Example (Russian):
 Input:
-1. SITUATION: Коллега просит созвониться в 19:30. CHOICE: Предложил перенести на утро.
-2. SITUATION: Клиент зовёт на встречу в 20:00. CHOICE: Отказался, предложил завтра.
-3. SITUATION: Выбор рейса. CHOICE: Взял утренний рейс подороже.
+1. SITUATION: Подарок сестре на день рождения. CHOICE: Спросил, что ей нужно, и купил это.
+2. SITUATION: Подарок другу на новоселье. CHOICE: Подарил деньги, а не вещь.
+3. SITUATION: Тренировка в дождь. CHOICE: Пошёл бегать всё равно.
 Answer:
-{"claims": [{"kind": "decision_rule", "category": "work/meetings", "proposed_category": null,
-"text": "Не соглашается на рабочие встречи вечером, переносит их на утро или следующий день.",
+{"claims": [{"kind": "decision_rule", "category": "money/gifts", "proposed_category": null,
+"text": "Дарит то, что человеку действительно нужно, а не сюрприз на свой вкус.",
 "confidence": 0.7, "support": 2},
-{"kind": "preference", "category": "travel", "proposed_category": null,
-"text": "Предпочитает утренние рейсы, даже если они дороже.", "confidence": 0.4, "support": 1}]}
+{"kind": "preference", "category": "sport", "proposed_category": null,
+"text": "Не пропускает пробежку из-за плохой погоды.", "confidence": 0.4, "support": 1}]}
 """
 )
 
@@ -194,11 +195,11 @@ Rules:
 
 Example:
 Input:
-- hobbies/films
-- кино/сериалы
+- sport/cycling
+- семья/праздники
 Answer:
-{"descriptions": [{"path": "hobbies/films", "description": "Which films the owner watches and how they rate them."},
-{"path": "кино/сериалы", "description": "Какие сериалы владелец смотрит и досматривает ли их."}]}
+{"descriptions": [{"path": "sport/cycling", "description": "How often and how far the owner rides a bike."},
+{"path": "семья/праздники", "description": "Как владелец отмечает семейные праздники и кого зовёт."}]}
 """
 
 ALLOWED_KINDS = {
@@ -394,31 +395,25 @@ def build_calls(
 
     purpose_class = {"statements": "statement", "replies": "reply", "decisions": "decision"}
 
-    # (a) Statements, grouped by audience (None: about everyone) and category.
-    groups: dict[tuple[str, str], list[Item]] = defaultdict(list)
+    # (a) Statements, grouped by category. They are about everyone: a statement never has
+    # an audience (``said`` with one is an outgoing message, SPEC §6.1).
+    groups: dict[str, list[Item]] = defaultdict(list)
     for ep in batch.episodes:
         if ep.is_statement:
             seg = f"NOTE: {_one_line(ep.said or '')}{_label_note(ep)}"
             # A correction always has a situation (SPEC §6.1): never a statement.
-            groups[(ep.audience or "", ep.category)].append(
-                (ep.start, seg, "statement", ep.index, ep.category)
-            )
-    for (audience, _), items in sorted(groups.items()):
-        emit(
-            "statements",
-            STATEMENTS_SYSTEM,
-            STATEMENTS_SCHEMA,
-            _chronological(items),
-            f"Audience: {audience}\n" if audience else "",
-            [audience] if audience else "all",
-        )
+            groups[ep.category].append((ep.start, seg, "statement", ep.index, ep.category))
+    for _, items in sorted(groups.items()):
+        emit("statements", STATEMENTS_SYSTEM, STATEMENTS_SCHEMA, _chronological(items), "", "all")
 
     # (b) Replies per audience in chronological order (the default audience for style).
     replies: dict[str, list[Item]] = defaultdict(list)
     for ep in batch.episodes:
         if ep.is_reply:
-            context = _one_line(ep.situation or "")[:CONTEXT_CHARS]
-            seg = f"OTHER: {context}\nOWNER: {_one_line(ep.said or '')}{_label_note(ep)}"
+            other = ""
+            if ep.situation is not None:  # an outgoing message (SPEC §6.1) has no OTHER line
+                other = f"OTHER: {_one_line(ep.situation)[:CONTEXT_CHARS]}\n"
+            seg = f"{other}OWNER: {_one_line(ep.said or '')}{_label_note(ep)}"
             item = (ep.start, seg, "reply", ep.index, ep.category)
             if ep.is_correction:
                 own["replies"].append((item, ep.audience or default_audience, ep))

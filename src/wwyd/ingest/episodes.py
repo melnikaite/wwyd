@@ -77,11 +77,20 @@ class Episode:
 
     @property
     def is_statement(self) -> bool:
-        return self.said is not None and self.situation is None
+        """``said`` with neither ``situation`` nor an explicit ``audience``: about self."""
+        return self.said is not None and self.situation is None and self.audience is None
 
     @property
     def is_reply(self) -> bool:
-        return self.said is not None and self.situation is not None
+        """``said`` with a ``situation`` (a reply), or with an explicit ``audience`` and no
+        ``situation``: an outgoing message the owner started (SPEC §6.1). Both feed the
+        reply/style side for that audience."""
+        return self.said is not None and (self.situation is not None or self.audience is not None)
+
+    @property
+    def is_outgoing(self) -> bool:
+        """A reply-class episode the owner started: ``said`` + ``audience``, no situation."""
+        return self.is_reply and self.situation is None
 
     @property
     def is_decision(self) -> bool:
@@ -97,7 +106,7 @@ class Episode:
         """The pass classes (SPEC §7.1). An episode with ``decision`` but no ``situation``
         (a self-describing choice: "watched to the end, 4/5") goes to the decision pass as
         well: the decision text carries its own context. With ``said`` too it is also a
-        statement."""
+        statement, or a reply (an outgoing message) when an audience is named."""
         out = []
         if self.is_statement:
             out.append("statement")
