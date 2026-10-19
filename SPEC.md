@@ -93,12 +93,19 @@ persona can switch `ingest_raw` to code-only derivation (`llm_for_ingest: false`
 - **Single process by design.** In-process rate-limit buckets, the job queue and the LLM
   semaphore all rely on it. Horizontal scaling is a later option.
 - **Data dir:** `~/.wwyd/` by default (`/data` in the container), override with
-  `WWYD_DATA_DIR`. It holds `wwyd.db`, `secret.key` (Fernet key, generated on first run)
-  and optional `wwyd.toml`.
+  `WWYD_DATA_DIR`. It holds `wwyd.db`, `secret.key` (Fernet key for stored backend API
+  keys, generated atomically on first use) and optional `wwyd.toml`. The key can instead
+  come from `WWYD_SECRET_KEY` (the key itself) or `WWYD_SECRET_KEY_FILE` (a path outside
+  the data dir); otherwise a backup of the data dir contains the key next to the values it
+  protects. An empty or corrupt key is a startup error.
 - **Config:** built-in defaults → `wwyd.toml` → `WWYD_*` env vars. The important keys are
   `public_url` (OAuth issuer; required for anything but localhost), `host`/`port` (default
   `127.0.0.1:8740`), `trusted_proxies` (peers whose `X-Forwarded-For` is trusted for the
-  client IP; empty by default), the instance default LLM (`[llm]`), default limits
+  client IP; empty by default — behind a reverse proxy on the same host, e.g. Caddy, set it
+  to the proxy's address such as `127.0.0.1`, or every client shares the proxy's IP and the
+  per-IP auth throttles act globally; the server logs a one-time warning when it sees
+  `X-Forwarded-For` from a loopback/private peer with `trusted_proxies` empty), the instance default LLM (`[llm]`, including
+  `allow_private_base_urls`, see §12), default limits
   (`[limits]`), and optional SMTP.
 
 ### Source of truth per subsystem
@@ -327,7 +334,8 @@ Claims land as `pending`; `status: "approved"` is honoured for owner callers. Wi
 - **`list_claims`** — `in: { category?, kind?, audience?, status?: status|"any" = "approved",
   include_archived?: bool, limit?, cursor? }` → `{ claims: Claim[], next_cursor? }`
 - **`search_claims`** — `in: { query, status?, kind?, audience?, limit? }` → FTS5 with bm25
-  ranking. `{ claims: [Claim & { score }] }`
+  ranking. `{ claims: [Claim & { score }] }`; `score` is relative to the best hit of this
+  result (1.0 = best, others in [0, 1]), not comparable across queries.
 - **`update_claim`** — `in: { id, text?, kind?, category?, audiences?, visibility?,
   confidence?, status? }` → `{ claim }`. Editing an approved claim's text keeps it approved
   (`origin` becomes `owner`). Archived claims can be restored with `status: "approved"` or
@@ -536,17 +544,22 @@ MCP SDK's auth building blocks, not Authlib:
 - **Invites:** the admin creates a one-time invite link on the users page or with
   `wwyd invite`; the invitee chooses login and password.
 - **Change password:** current + new on the account page; all other web sessions end;
-  OAuth grants and API keys stay valid unless revoked.
+  OAuth grants and API keys stay valid unless revoked. Setting a password (change or reset)
+  invalidates the user's outstanding reset links.
 - **Forgotten password:** the admin generates a one-time reset link (page or
   `wwyd reset-password <login>`); with SMTP configured users can also request one. A reset
   ends all web sessions and is shown on the user's account page ("password reset by admin
-  at …").
+  at …"). The reset form has "Also disconnect all apps and API keys", ticked by default,
+  which revokes every grant and key. A new reset link replaces the user's older ones.
+  Self-service requests are limited per IP and per login (3/hour, silently: the answer is
+  the same whether or not the login exists).
 - **Lost admin access:** `wwyd reset-password <login>` on the host.
 
 ### 9.3 Consent
 When a client connects, the user signs in and picks one scope: `owner`, `read`, or
-`respond:` with checkboxes for audiences. The page shows the client's name and redirect
-host. If the client requested a scope, it is preselected.
+`respond:` with checkboxes for audiences. The redirect host is the most prominent element.
+For DCR clients the name is marked as self-declared and unverified; CIMD clients also show
+the host of their client ID URL. If the client requested a scope, it is preselected.
 
 ### 9.4 Tokens, grants, keys
 - Opaque 256-bit random strings, stored as SHA-256 hashes, looked up on every request, so
@@ -556,6 +569,15 @@ host. If the client requested a scope, it is preselected.
 - **API keys** (`wwyd_<8-char prefix>_<secret>`) for scripts and plugins, created on the
   account page with the same scopes, shown once, revoked the same way. Sent as
   `Authorization: Bearer`.
+- `respond:` scopes bind audience *names*: deleting (or renaming) an audience revokes the
+  grants and keys whose scope names it (`tokens.revoke_for_audience`), so a later audience
+  with the same name inherits nothing.
+- **Abuse limits** (in memory, per process): per-IP keys use the IPv6 /64. `/token`
+  failures count per IP and per (client_id, IP), the latter only for registered clients;
+  `/mcp` counts per IP only bearers that match no token or key ever issued (stale ones do
+  not count). Request bodies are capped: 64 KB outside `/mcp`; on `/mcp` the largest
+  `batch_bytes` any user may have (instance default or highest admin ceiling) + 1 MB.
+  Oversized bodies get 413, also when chunked.
 - The **Connected apps** section lists every grant and key (client name, scope, created,
   last used) with a Revoke button.
 
@@ -619,8 +641,10 @@ owner` do not decay.
 ### 10.4 Size budget
 Per persona: at most 30 non-archived claims per category, and approved claims totalling at
 most 6000 tokens (chars/4). Over budget, the lowest evidence-weight claims are archived
-first; approved claims are proposed for archiving instead. Defaults live in config; the
-admin can set ceilings.
+first; approved claims are proposed for archiving instead. Both numbers are per-user limits
+(§11: `max_claims_per_category`, `max_approved_tokens`): defaults live in config, the
+admin can set ceilings, and the owner can set lower values; compaction uses the persona
+owner's effective values.
 
 ### 10.5 Purge and undo
 Archived claims are restorable for 30 days, then hard-deleted (`secure_delete` on).
@@ -646,6 +670,7 @@ lower the effective value, never raise it.
 | batch size | per call | 1000 records / 2 MB |
 | concurrent jobs | per persona | 1 |
 | spend cap | per persona per calendar month | $5 on paid backends; none on local |
+| compaction size budget (§10.4) | per persona | 30 claims per category / 6000 approved tokens |
 | LLM concurrency | global | 2, queue timeout 60 s, call timeout 120 s |
 
 - RPM uses in-memory token buckets; daily counters live in `usage_daily`.
@@ -679,6 +704,18 @@ wrap bare arrays; sanitise chat-template markers in input; generous `max_tokens`
 field the model must emit is `required` in the JSON shape we ask for; a few worked examples
 per prompt, including in Russian, since rules leak language through examples. Preflight
 `GET /models` when a backend is saved.
+
+**Private addresses (SSRF).** `[llm] allow_private_base_urls` /
+`WWYD_LLM_ALLOW_PRIVATE_BASE_URLS` (default `true`, since a self-hosted instance talks to
+LocalAI on localhost). Set it to `false` on multi-user hosted instances: a persona's own
+`base_url` must then resolve only to public unicast addresses, checked when it is saved and
+again on every request, and the connection goes to the validated IP (hostname kept in `Host`
+and TLS SNI) so DNS rebinding cannot redirect it; redirects are not followed. The admin's
+instance backend is exempt. Changing a backend's host or preset without sending `api_key`
+again is rejected rather than forwarding the stored key to the new host. Errors returned to
+callers say only "LLM backend unreachable or rejected the request" (never the upstream
+status or reachability detail); rate-limit (429) and credit (402) responses keep their
+codes.
 
 ---
 

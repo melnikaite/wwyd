@@ -161,7 +161,10 @@ def delete_persona(conn: sqlite3.Connection, persona_id: str, confirm: str) -> d
     row = _persona_row(conn, persona_id)
     if not isinstance(confirm, str) or confirm.strip().casefold() != row["login"].casefold():
         raise Invalid("confirm must equal the account login", field="confirm")
+    from wwyd.store.audiences import audience_names, revoke_vanished
+
     with transaction(conn):
+        before = audience_names(conn, persona_id)
         wipe_persona_content(conn, persona_id)
         # The persona row is kept (same ID), so ON DELETE CASCADE does not fire: remove the
         # per-persona operational rows explicitly.
@@ -173,6 +176,7 @@ def delete_persona(conn: sqlite3.Connection, persona_id: str, confirm: str) -> d
             (_default_display_name(row["login"]), json.dumps(DEFAULT_SETTINGS), persona_id),
         )
         _seed_persona_content(conn, persona_id)
+        revoke_vanished(conn, persona_id, before)
     return {"deleted": True}
 
 
@@ -333,6 +337,16 @@ def _llm_public(stored: dict[str, Any] | None) -> dict[str, Any]:
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
+def _same_destination(current: dict[str, Any], preset: str, base_url: str) -> bool:
+    old, new = urlsplit(current.get("base_url") or ""), urlsplit(base_url)
+    return (
+        current.get("preset") == preset
+        and old.scheme == new.scheme
+        and (old.hostname or "").lower() == (new.hostname or "").lower()
+        and old.port == new.port
+    )
+
+
 def _price(value: Any, field: str) -> float | None:
     if value is None:
         return None
@@ -347,7 +361,7 @@ def _llm_settings(value: Any, current: dict[str, Any] | None) -> dict[str, Any] 
     ``{preset, base_url?, model?, api_key?, price_in_per_m?, price_out_per_m?}``: base_url
     and model default from the preset; an omitted api_key keeps the stored one, null clears it.
     """
-    from wwyd.llm.client import preflight
+    from wwyd.llm.client import check_base_url, preflight
     from wwyd.llm.presets import PRESET_NAMES, PRESETS, Backend
     from wwyd.llm.secret import decrypt, encrypt
 
@@ -375,6 +389,13 @@ def _llm_settings(value: Any, current: dict[str, Any] | None) -> dict[str, Any] 
         api_key = api_key or None
     else:
         enc = (current or {}).get("api_key_enc")
+        if enc and not _same_destination(current or {}, preset, base_url):
+            # Never forward a stored key to a different host: the caller re-enters it (or
+            # sends null to go without one).
+            raise Invalid(
+                "the backend host changed: send llm.api_key again (or null for none)",
+                field="llm.api_key",
+            )
         api_key = decrypt(enc) if enc else None
     if preset == "openrouter" and not api_key:
         raise Invalid("openrouter needs your own api_key", field="llm.api_key")
@@ -386,6 +407,7 @@ def _llm_settings(value: Any, current: dict[str, Any] | None) -> dict[str, Any] 
         price_in_per_m=_price(value.get("price_in_per_m"), "price_in_per_m"),
         price_out_per_m=_price(value.get("price_out_per_m"), "price_out_per_m"),
     )
+    check_base_url(backend)
     preflight(backend)
     return {
         "preset": backend.preset,

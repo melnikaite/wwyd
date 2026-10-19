@@ -13,19 +13,26 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
+import anyio
 import httpx
 
 from wwyd.errors import Invalid, LLMUnavailable, RateLimited, SpendCap
 from wwyd.limits import estimate_cost, get_gate, get_limiter
 from wwyd.llm import LLMResult, Purpose
-from wwyd.llm.presets import Backend
+from wwyd.llm.presets import Backend, allow_private_base_urls
+from wwyd.netguard import BlockedAddress, PinnedRequest, SyncResolver, resolve_sync
 
 log = logging.getLogger(__name__)
 
 MIN_MAX_TOKENS = 1024  # small models wander; a short budget cuts JSON off mid-object
 PREFLIGHT_TIMEOUT_S = 10.0
 
+# What callers see for any transport/HTTP failure: never the upstream status or whether the
+# host answered at all (a per-persona base_url must not become a port scanner).
+BACKEND_FAILED = "LLM backend unreachable or rejected the request"
+
 _transport: httpx.AsyncBaseTransport | None = None
+_resolver: SyncResolver = resolve_sync
 _sync_transport: httpx.BaseTransport | None = None
 
 
@@ -36,6 +43,34 @@ def set_transport(
     ``sync`` is used by the preflight."""
     global _transport, _sync_transport
     _transport, _sync_transport = transport, sync
+
+
+def set_resolver(resolver: SyncResolver | None) -> None:
+    """DNS resolver for the private-address guard (tests)."""
+    global _resolver
+    _resolver = resolver or resolve_sync
+
+
+def _target(backend: Backend, path: str) -> PinnedRequest:
+    """Where to send ``path``: pinned to a validated public IP when the instance forbids
+    private base URLs for per-persona backends (the admin's instance backend is exempt)."""
+    url = f"{backend.base_url}{path}"
+    if backend.preset == "instance" or allow_private_base_urls():
+        return PinnedRequest(url)
+    from wwyd.netguard import pin_public_sync
+
+    return pin_public_sync(url, _resolver)
+
+
+def check_base_url(backend: Backend) -> None:
+    """Raise :class:`Invalid` when ``backend`` may not be used on this instance."""
+    try:
+        _target(backend, "")
+    except BlockedAddress:
+        raise Invalid(
+            "llm.base_url must resolve to a public address on this instance",
+            field="llm.base_url",
+        ) from None
 
 
 # --- robustness kit -------------------------------------------------------------------------
@@ -147,13 +182,23 @@ class OpenAICompatClient:
         self.backend = backend
 
     async def _post(self, body: dict[str, Any]) -> httpx.Response:
+        try:
+            target = await anyio.to_thread.run_sync(
+                lambda: _target(self.backend, "/chat/completions")
+            )
+        except BlockedAddress:
+            log.warning("LLM backend refused: base_url is not a public address")
+            raise LLMUnavailable(BACKEND_FAILED) from None
         async with httpx.AsyncClient(
-            transport=_transport, timeout=httpx.Timeout(120.0, connect=10.0)
+            transport=_transport,
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            follow_redirects=False,
         ) as http:
             return await http.post(
-                f"{self.backend.base_url}/chat/completions",
+                target.url,
                 json=body,
-                headers=_headers(self.backend),
+                headers={**_headers(self.backend), **target.headers},
+                extensions=target.extensions,
             )
 
     async def _call(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -167,7 +212,7 @@ class OpenAICompatClient:
                 response = await get_gate().run(self._post(body))
         except httpx.HTTPError as exc:
             log.warning("LLM backend unreachable (%s)", type(exc).__name__)
-            raise LLMUnavailable("LLM backend unreachable") from None
+            raise LLMUnavailable(BACKEND_FAILED) from None
         status = response.status_code
         if status == 429:
             raise RateLimited("LLM backend rate limit", retry_after=_retry_after(response))
@@ -175,7 +220,7 @@ class OpenAICompatClient:
             raise SpendCap("LLM backend reports insufficient credit")
         if status >= 400:
             log.warning("LLM backend returned HTTP %d", status)
-            raise LLMUnavailable("LLM backend error", status=status)
+            raise LLMUnavailable(BACKEND_FAILED)
         try:
             payload = response.json()
         except ValueError:
@@ -269,14 +314,24 @@ Preflight = Callable[[Backend], None]
 def http_preflight(backend: Backend) -> None:
     """``GET /models``; raises :class:`Invalid` when the backend is unusable."""
     try:
-        with httpx.Client(transport=_sync_transport, timeout=PREFLIGHT_TIMEOUT_S) as http:
-            response = http.get(f"{backend.base_url}/models", headers=_headers(backend))
+        target = _target(backend, "/models")
+    except BlockedAddress:
+        raise Invalid(BACKEND_FAILED, field="llm") from None
+    try:
+        with httpx.Client(
+            transport=_sync_transport, timeout=PREFLIGHT_TIMEOUT_S, follow_redirects=False
+        ) as http:
+            response = http.get(
+                target.url,
+                headers={**_headers(backend), **target.headers},
+                extensions=target.extensions,
+            )
     except httpx.HTTPError:
-        raise Invalid("LLM backend is not reachable", field="llm") from None
-    if response.status_code in (401, 403):
-        raise Invalid("LLM backend rejected the API key", field="llm")
+        log.info("LLM preflight: backend unreachable")
+        raise Invalid(BACKEND_FAILED, field="llm") from None
     if response.status_code >= 400:
-        raise Invalid("LLM backend preflight failed", field="llm", status=response.status_code)
+        log.info("LLM preflight: backend returned HTTP %d", response.status_code)
+        raise Invalid(BACKEND_FAILED, field="llm")
     try:
         models = [m.get("id") for m in response.json().get("data") or [] if isinstance(m, dict)]
     except (ValueError, AttributeError):

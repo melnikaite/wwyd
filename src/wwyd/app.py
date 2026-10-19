@@ -25,7 +25,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from wwyd.auth import accounts
-from wwyd.auth.middleware import AuthSurfaceMiddleware
+from wwyd.auth.middleware import AuthSurfaceMiddleware, BodyLimitMiddleware, mcp_body_cap
 from wwyd.auth.provider import Resolver, WwydProvider, WwydTokenVerifier, http_caller_provider
 from wwyd.auth.throttle import Throttles
 from wwyd.config import Config, ConfigError, db_path
@@ -198,6 +198,13 @@ def create_app(
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     app.mount("/", mcp_app)  # /mcp and /.well-known/oauth-protected-resource/mcp
     app.add_middleware(
-        AuthSurfaceMiddleware, throttles=throttles, trusted_proxies=config.trusted_proxies
+        AuthSurfaceMiddleware,
+        throttles=throttles,
+        trusted_proxies=config.trusted_proxies,
+        conn=conn,
+    )
+    # Outermost, so no layer (including the /token body read above) sees an oversized body.
+    app.add_middleware(
+        BodyLimitMiddleware, mcp_cap=lambda: mcp_body_cap(conn, config.limits.batch_bytes)
     )
     return app

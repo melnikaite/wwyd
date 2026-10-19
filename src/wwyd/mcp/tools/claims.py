@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from wwyd.mcp.caller import current_caller
+from wwyd.mcp.tools._types import ClaimText, Cursor, Id, Ids, Name, Names, Path, Query
 from wwyd.store import claims as store
+from wwyd.store.claims import MAX_ADD
 
 if TYPE_CHECKING:
     from wwyd.mcp.server import WwydServer
@@ -16,7 +18,7 @@ if TYPE_CHECKING:
 Kind = Literal["trait", "preference", "habit", "decision_rule", "style", "boundary"]
 Status = Literal["pending", "approved", "rejected", "archived"]
 Visibility = Literal["owner_only", "shared"]
-Audiences = Literal["all"] | list[str]
+Audiences = Literal["all"] | Names
 Limit = Annotated[int | None, Field(description="Page size, 1-200 (default 50).")]
 
 
@@ -25,21 +27,23 @@ class ClaimIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: str = Field(description="trait | preference | habit | decision_rule | style | boundary")
-    category: str = Field(description="Existing category path, e.g. communication/style.")
-    text: str = Field(description="One statement, <= 500 chars, owner in third person or neutral.")
+    kind: Name = Field(description="trait | preference | habit | decision_rule | style | boundary")
+    category: Path = Field(description="Existing category path, e.g. communication/style.")
+    text: ClaimText = Field(
+        description="One statement, <= 500 chars, owner in third person or neutral."
+    )
     audiences: Audiences | None = Field(
         default=None, description='"all" (default) or a list of audience names it applies to.'
     )
-    visibility: str | None = Field(default=None, description="owner_only | shared (default).")
+    visibility: Name | None = Field(default=None, description="owner_only | shared (default).")
     confidence: float | None = Field(default=None, description="0..1, default 0.5.")
     evidence: dict[str, Any] | None = Field(
         default=None,
         description="Aggregates only: {sources: {type: count}, share, period: "
         '"2026-04..2026-10", stats: {name: number | [number]}}.',
     )
-    status: str | None = Field(default=None, description="pending (default) | approved.")
-    proposed_category: str | None = Field(
+    status: Name | None = Field(default=None, description="pending (default) | approved.")
+    proposed_category: Path | None = Field(
         default=None, description="Path of a category that does not exist yet (see review_claims)."
     )
 
@@ -52,7 +56,9 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(owner)
     async def add_claims(
-        claims: Annotated[list[ClaimIn], Field(description="Up to 200 claims.")],
+        claims: Annotated[
+            list[ClaimIn], Field(max_length=MAX_ADD, description="Up to 200 claims.")
+        ],
         absorb: Annotated[
             bool,
             Field(description="Strengthen an existing claim that says the same instead of adding."),
@@ -76,15 +82,17 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(owner, read_only=True)
     async def list_claims(
-        category: Annotated[str | None, Field(description="Path; includes sub-categories.")] = None,
+        category: Annotated[
+            Path | None, Field(description="Path; includes sub-categories.")
+        ] = None,
         kind: Kind | None = None,
-        audience: Annotated[str | None, Field(description="Claims that apply to it.")] = None,
+        audience: Annotated[Name | None, Field(description="Claims that apply to it.")] = None,
         status: Status | Literal["any"] = "approved",
         include_archived: Annotated[
             bool, Field(description='With status "any", also return archived claims.')
         ] = False,
         limit: Limit = None,
-        cursor: str | None = None,
+        cursor: Cursor | None = None,
     ) -> dict[str, Any]:
         """List claims (default: approved), oldest first, paginated with next_cursor."""
         return store.list_claims(
@@ -101,13 +109,14 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(owner, read_only=True)
     async def search_claims(
-        query: Annotated[str, Field(description="Free text; any word may match.")],
+        query: Annotated[Query, Field(description="Free text; any word may match.")],
         status: Status | Literal["any"] = "approved",
         kind: Kind | None = None,
-        audience: str | None = None,
+        audience: Name | None = None,
         limit: Limit = None,
     ) -> dict[str, Any]:
-        """Full-text search over claim texts, best matches first (bm25 score)."""
+        """Full-text search over claim texts, best matches first; score is relative to the
+        best hit (1.0 = best, 0..1), not comparable across queries."""
         return store.search_claims(
             server.conn,
             persona_id(),
@@ -120,10 +129,10 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(owner)
     async def update_claim(
-        id: str,
-        text: str | None = None,
+        id: Id,
+        text: ClaimText | None = None,
         kind: Kind | None = None,
-        category: str | None = None,
+        category: Path | None = None,
         audiences: Audiences | None = None,
         visibility: Visibility | None = None,
         confidence: float | None = None,
@@ -146,14 +155,14 @@ def register(server: WwydServer) -> None:
         return {"claim": claim}
 
     @server.scoped_tool(owner, destructive=True)
-    async def delete_claims(ids: list[str]) -> dict[str, Any]:
+    async def delete_claims(ids: Ids) -> dict[str, Any]:
         """Permanently delete claims (owner intent; only the count is kept)."""
         return store.delete_claims(server.conn, persona_id(), ids)
 
     @server.scoped_tool(owner)
     async def review_claims(
-        approve: list[str] | None = None,
-        reject: list[str] | None = None,
+        approve: Ids | None = None,
+        reject: Ids | None = None,
         create_category: Annotated[
             bool, Field(description="Create a claim's proposed_category when approving it.")
         ] = False,

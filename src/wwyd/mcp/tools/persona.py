@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from wwyd.mcp.caller import current_caller
+from wwyd.mcp.tools._types import Name, Path, Short
 from wwyd.store import personas, portable
 
 if TYPE_CHECKING:
@@ -21,9 +22,9 @@ class LLMBackendIn(BaseModel):
         description="instance = the server's shared default; the others are presets whose"
         " base_url/model can be overridden."
     )
-    base_url: str | None = Field(default=None, description="OpenAI-compatible base URL.")
-    model: str | None = None
-    api_key: str | None = Field(
+    base_url: Short | None = Field(default=None, description="OpenAI-compatible base URL.")
+    model: Path | None = None
+    api_key: Short | None = Field(
         default=None, description="Stored encrypted; omit to keep the current key, null to clear."
     )
     price_in_per_m: float | None = Field(default=None, description="USD per 1M input tokens.")
@@ -53,7 +54,7 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(owner, destructive=True)
     async def delete_persona(
-        confirm: Annotated[str, Field(description="Must equal the account login.")],
+        confirm: Annotated[Short, Field(description="Must equal the account login.")],
     ) -> dict[str, Any]:
         """Delete all claims, audiences, categories, changes and settings, and start again with
         an empty seeded persona. The account itself stays."""
@@ -67,19 +68,21 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(owner)
     async def update_settings(
-        display_name: Annotated[str | None, Field(description="Used in the disclosure.")] = None,
-        timezone: Annotated[str | None, Field(description="IANA name, e.g. Europe/Berlin.")] = None,
+        display_name: Annotated[Name | None, Field(description="Used in the disclosure.")] = None,
+        timezone: Annotated[
+            Name | None, Field(description="IANA name, e.g. Europe/Berlin.")
+        ] = None,
         escalate_below: Annotated[
             float | None, Field(description="predict escalates below this confidence (0..1).")
         ] = None,
         disclosure_template: Annotated[
-            str | None, Field(description="Must contain {owner}.")
+            Short | None, Field(description="Must contain {owner}.")
         ] = None,
         llm_for_ingest: Annotated[
             bool | None, Field(description="false: derive claims from code detectors only.")
         ] = None,
         limits: Annotated[
-            dict[str, int | float | None] | None,
+            Annotated[dict[Name, int | float | None], Field(max_length=50)] | None,
             Field(
                 description='Your own lower limits, e.g. {"predict_per_day": 100}; values above'
                 " the default or admin ceiling are rejected; null removes one."

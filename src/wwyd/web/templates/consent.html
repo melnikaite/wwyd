@@ -2,11 +2,17 @@
 {% extends "base.html" %}
 {% block title %}Allow access?{% endblock %}
 {% block main %}
-<h1>Connect <span class="client">{{ client_name }}</span>?</h1>
+<h1>Allow an app to connect, then return you to <span class="host">{{ redirect_host }}</span>?</h1>
 <p class="lead">
-  After you decide, you will be sent back to <span class="host">{{ redirect_host }}</span>.
-  {% if client_id_url %}<br><span class="small">App identity: {{ client_id_url }}</span>{% endif %}
-  Only continue if you started this connection yourself.
+  {% if self_declared %}
+  It calls itself <span class="client">{{ client_name }}</span>
+  <span class="small">(name chosen by the app itself, not verified)</span>.
+  Check that the address above is where you expect to go back to.
+  {% else %}
+  App: <span class="client">{{ client_name }}</span>, published by <span class="host">{{ client_id_host }}</span>
+  <br><span class="small">App identity: {{ client_id_url }}</span>
+  {% endif %}
+  <br>Only continue if you started this connection yourself.
 </p>
 {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
 <form method="post" action="/consent">

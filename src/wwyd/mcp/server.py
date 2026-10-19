@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from pydantic.fields import FieldInfo
 
 from wwyd import __version__
-from wwyd.errors import Forbidden, Invalid, NotFound, RateLimited, WwydError
+from wwyd.errors import Forbidden, Invalid, NotFound, RateLimited, TooLarge, WwydError
 from wwyd.limits import get_limiter
 from wwyd.logs import install_privacy_filter
 from wwyd.mcp.caller import Caller, CallerProvider, bind_caller, unbind_caller
@@ -168,6 +168,11 @@ class WwydServer(MCPServer):
                         for err in cause.errors()
                     }
                 )
+                if any(err["type"] == "too_long" for err in cause.errors()):
+                    # A list over its schema max_length: same code the store uses.
+                    return error_result(
+                        TooLarge(f"too many items: {', '.join(fields)}", fields=fields)
+                    )
                 return error_result(
                     Invalid(f"invalid arguments: {', '.join(fields)}", fields=fields)
                 )

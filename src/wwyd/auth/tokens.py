@@ -404,3 +404,93 @@ def principal_by_subject(conn: sqlite3.Connection, subject_id: str) -> Principal
         row["resource"],
         None,
     )
+
+
+# --- bulk revocation and lookups --------------------------------------------------------
+
+
+def is_known_bearer(conn: sqlite3.Connection, token: str) -> bool:
+    """Whether ``token`` is (or was) a real credential: an access token we issued or an API
+    key whose secret matches, regardless of expiry or revocation. Used to tell guessing apart
+    from clients presenting a stale token."""
+    if token.startswith("wwyd_"):
+        match = API_KEY_RE.match(token)
+        if not match:
+            return False
+        row = conn.execute(
+            "SELECT key_hash FROM api_keys WHERE prefix = ?", (match.group(1),)
+        ).fetchone()
+        return row is not None and hmac.compare_digest(
+            row["key_hash"], clock.digest(match.group(2))
+        )
+    return (
+        conn.execute(
+            "SELECT 1 FROM tokens WHERE token_hash = ? AND kind = 'access'", (clock.digest(token),)
+        ).fetchone()
+        is not None
+    )
+
+
+def _revoke_grants(conn: sqlite3.Connection, grant_ids: list[str], ts: str) -> None:
+    for grant_id in grant_ids:
+        conn.execute(
+            "UPDATE grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", (ts, grant_id)
+        )
+        conn.execute(
+            "UPDATE tokens SET revoked_at = ? WHERE grant_id = ? AND revoked_at IS NULL",
+            (ts, grant_id),
+        )
+
+
+def revoke_all(conn: sqlite3.Connection, user_id: str) -> int:
+    """Revoke every live grant and API key of the user; returns how many."""
+    ts = clock.now_iso()
+    with transaction(conn):
+        grant_ids = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM grants WHERE user_id = ? AND revoked_at IS NULL", (user_id,)
+            )
+        ]
+        _revoke_grants(conn, grant_ids, ts)
+        keys = conn.execute(
+            "UPDATE api_keys SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+            (ts, user_id),
+        ).rowcount
+    return len(grant_ids) + keys
+
+
+def revoke_for_audience(conn: sqlite3.Connection, user_id: str, audience_name: str) -> int:
+    """Revoke the user's live grants and API keys whose ``respond:`` scope names
+    ``audience_name``. Scopes bind audience *names*, so call this when an audience is deleted
+    or renamed: a later audience with the same name must not inherit old tokens. Returns
+    how many credentials were revoked."""
+
+    def names(scope: str) -> bool:
+        parsed = parse_scope(scope)
+        return parsed is not None and parsed.kind == "respond" and audience_name in parsed.audiences
+
+    ts = clock.now_iso()
+    with transaction(conn):
+        grant_ids = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT id, scope FROM grants WHERE user_id = ? AND revoked_at IS NULL"
+                " AND scope LIKE 'respond:%'",
+                (user_id,),
+            )
+            if names(r["scope"])
+        ]
+        _revoke_grants(conn, grant_ids, ts)
+        key_ids = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT id, scope FROM api_keys WHERE user_id = ? AND revoked_at IS NULL"
+                " AND scope LIKE 'respond:%'",
+                (user_id,),
+            )
+            if names(r["scope"])
+        ]
+        for key_id in key_ids:
+            conn.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ?", (ts, key_id))
+    return len(grant_ids) + len(key_ids)

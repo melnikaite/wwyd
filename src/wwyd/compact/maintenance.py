@@ -11,8 +11,6 @@ from wwyd.compact.constants import (
     DECAY_FLOOR,
     DECAY_HALF_LIFE_DAYS,
     DECAY_MIN_STEP,
-    MAX_APPROVED_TOKENS,
-    MAX_CLAIMS_PER_CATEGORY,
     PURGE_AFTER,
 )
 from wwyd.compact.run import Run, evidence_weight
@@ -74,20 +72,32 @@ def _lightest_first(rows):  # type: ignore[no-untyped-def]
 def budget(run: Run) -> None:
     """At most N live claims per category and M approved tokens per persona. Claims that
     already have an open proposal count as on their way out."""
+    from wwyd.limits import get_limiter
+
+    owner = run.conn.execute(
+        "SELECT user_id FROM personas WHERE id = ?", (run.persona_id,)
+    ).fetchone()
+    limits = get_limiter(run.conn).effective_limits(owner["user_id"]) if owner else {}
+    max_claims = limits.get("max_claims_per_category")
+    max_tokens = limits.get("max_approved_tokens")
     by_category = defaultdict(list)
     for row in run.live_rows():
         by_category[row["category_id"]].append(row)
     for rows in by_category.values():
-        excess = len(rows) - MAX_CLAIMS_PER_CATEGORY
+        if max_claims is None:
+            break
+        excess = len(rows) - int(max_claims)
         for row in _lightest_first(rows):
             if excess <= 0:
                 break
             _archive_for_budget(run, row, "category_budget")
             excess -= 1
+    if max_tokens is None:
+        return
     approved = run.live_rows(statuses=("approved",))
     tokens = sum(len(r["text"]) for r in approved) / CHARS_PER_TOKEN
     for row in _lightest_first(approved):
-        if tokens <= MAX_APPROVED_TOKENS:
+        if tokens <= max_tokens:
             break
         _archive_for_budget(run, row, "token_budget")
         tokens -= len(row["text"]) / CHARS_PER_TOKEN

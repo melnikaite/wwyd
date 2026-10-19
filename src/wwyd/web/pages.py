@@ -326,10 +326,18 @@ def _consent_ctx(request: Request, sess: WebSession, req: str, client, params) -
     auds = _audiences(_conn(request), sess.user.persona_id)
     requested = pick_requested(params.scopes)
     known = {a["name"] for a in auds}
+    row = (
+        _conn(request)
+        .execute("SELECT source FROM oauth_clients WHERE client_id = ?", (client.client_id,))
+        .fetchone()
+    )
+    is_cimd = row is not None and row["source"] == "cimd"
     return {
         "req": req,
         "client_name": client_display_name(client),
-        "client_id_url": client.client_id if client.client_id.startswith("https://") else None,
+        "self_declared": not is_cimd,
+        "client_id_host": urlsplit(client.client_id).netloc if is_cimd else None,
+        "client_id_url": client.client_id if is_cimd else None,
         "redirect_host": urlsplit(str(params.redirect_uri)).netloc,
         "kinds": [(k, *DESCRIPTIONS[k]) for k in KINDS],
         "audiences": auds,
@@ -504,6 +512,8 @@ LIMIT_LABELS = {
     "batch_bytes": "Bytes per import call",
     "concurrent_jobs": "Background jobs at a time",
     "spend_cap_usd": "Spending cap per month (USD)",
+    "max_claims_per_category": "Kept statements per category",
+    "max_approved_tokens": "Approved statements, total tokens",
 }
 
 
@@ -744,12 +754,21 @@ async def _landing_post(request: Request, kind: accounts.LinkKind) -> Response:
             400,
             error="The two passwords are different.",
             login=form.get("login", ""),
+            disconnect_apps=bool(form.get("disconnect_apps")),
         )
     try:
         accounts.check_new_password(password)
         login = None if kind == "reset" else accounts.check_login(str(form.get("login", "")))
     except AccountError as exc:
-        return _landing(request, kind, token, 400, error=str(exc), login=form.get("login", ""))
+        return _landing(
+            request,
+            kind,
+            token,
+            400,
+            error=str(exc),
+            login=form.get("login", ""),
+            disconnect_apps=bool(form.get("disconnect_apps")),
+        )
     pw_hash = await anyio.to_thread.run_sync(accounts.hash_password, password)
     conn = _conn(request)
     try:
@@ -764,6 +783,9 @@ async def _landing_post(request: Request, kind: accounts.LinkKind) -> Response:
                     conn, link.user_id, pw_hash, by_admin=link.created_by != "self"
                 )
                 accounts.end_sessions(conn, link.user_id)
+                if form.get("disconnect_apps"):
+                    revoked = tokens.revoke_all(conn, link.user_id)
+                    log.info("password reset revoked %d apps and keys", revoked)
                 user_id = link.user_id
             else:
                 if kind == "setup" and accounts.user_count(conn) > 0:
@@ -771,7 +793,15 @@ async def _landing_post(request: Request, kind: accounts.LinkKind) -> Response:
                 assert login is not None
                 user_id = accounts.create_account(conn, login, pw_hash).id
     except AccountError as exc:
-        return _landing(request, kind, token, 400, error=str(exc), login=form.get("login", ""))
+        return _landing(
+            request,
+            kind,
+            token,
+            400,
+            error=str(exc),
+            login=form.get("login", ""),
+            disconnect_apps=bool(form.get("disconnect_apps")),
+        )
     log.info("%s link used for user %s", kind, user_id)
     return _sign_in(request, user_id, "/account?welcome=1" if kind != "reset" else "/account")
 
@@ -823,7 +853,13 @@ async def reset_request(request: Request) -> Response:
         return render(request, "reset_request.html", 400, smtp=False)
     _throttle(request, (state.throttles.reset_request_ip, _ip(request)))
     state.throttles.reset_request_ip.hit(_ip(request))
-    user = accounts.user_by_login(state.conn, str(form.get("login", "")))
+    login = str(form.get("login", "")).strip()
+    # Per login, silently: the answer is the same whether or not the login exists.
+    login_key, per_login = login.casefold()[:254], state.throttles.reset_request_login
+    allowed = per_login.retry_after(login_key) == 0
+    if allowed:
+        per_login.hit(login_key)
+    user = accounts.user_by_login(state.conn, login) if allowed else None
     if user is not None and user.disabled_at is None:
         token = accounts.create_link(state.conn, "reset", user_id=user.id, created_by="self")
         url = f"{state.config.public_url}/reset?t={token}"

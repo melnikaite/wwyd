@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from wwyd.mcp.caller import current_caller
+from wwyd.mcp.tools._types import Cursor, Name, Paths
 from wwyd.predict import predict as run_predict
 from wwyd.predict.persona import get_persona as build_persona
 from wwyd.store import audit
@@ -67,9 +68,9 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(("owner", "read"), read_only=True)
     async def get_persona(
-        audience: Annotated[str | None, Field(description="Only claims that apply to it.")] = None,
+        audience: Annotated[Name | None, Field(description="Only claims that apply to it.")] = None,
         categories: Annotated[
-            list[str] | None, Field(description="Category paths; sub-categories included.")
+            Paths | None, Field(description="Category paths; sub-categories included.")
         ] = None,
         max_tokens: Annotated[int, Field(description="Budget, estimated as chars/4.")] = 1500,
         format: Literal["text", "json"] = "text",
@@ -87,14 +88,14 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(("owner",), read_only=True)
     async def list_audit(
-        since: Annotated[str | None, Field(description="ISO 8601 timestamp.")] = None,
-        audience: str | None = None,
+        since: Annotated[Name | None, Field(description="ISO 8601 timestamp.")] = None,
+        audience: Name | None = None,
         outcome: Annotated[
-            str | None,
+            Name | None,
             Field(description='answer | needs | escalate | "escalate:<code>".'),
         ] = None,
         limit: Annotated[int | None, Field(description="Page size, 1-200 (default 50).")] = None,
-        cursor: str | None = None,
+        cursor: Cursor | None = None,
     ) -> dict[str, Any]:
         """predict audit log, newest first (kept 90 days; never contains any text)."""
         return audit.list_audit(

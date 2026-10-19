@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet
 
 from wwyd.errors import Invalid, LLMUnavailable, RateLimited, SpendCap
 from wwyd.limits import get_limiter
@@ -225,7 +226,7 @@ def test_api_key_encrypted_and_masked(conn, pid, backend, data_dir):
 def test_secret_round_trip(data_dir):
     token = encrypt("hello")
     assert token != "hello" and decrypt(token) == "hello"
-    (data_dir / "secret.key").write_bytes(b"x" * 44)
+    (data_dir / "secret.key").write_bytes(Fernet.generate_key())
     assert decrypt(token) is None
     assert mask("short") == "****" and mask(None) is None
 
@@ -253,3 +254,148 @@ def test_preflight_skippable(conn, pid):
     finally:
         llm_client.reset_preflight()
     assert llm_backend(conn, pid).base_url == "http://127.0.0.1:1234/v1"
+
+
+# --- private base URLs, key re-entry, secret key handling ------------------------------------
+
+
+@pytest.fixture
+def no_private(backend):
+    from wwyd.llm import presets
+
+    dns = {"llm.example.org": ["93.184.216.34"], "localhost": ["127.0.0.1"]}
+    set_instance_backend(allow_private_base_urls=False)
+    llm_client.set_resolver(lambda host, port: dns.get(host) or [host])
+    yield dns
+    llm_client.set_resolver(None)
+    set_instance_backend()
+    assert presets.allow_private_base_urls()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/v1",
+        "http://10.0.0.5:8080/v1",
+        "http://localhost:1240/v1",
+        "http://[::1]/v1",
+        "http://[::ffff:127.0.0.1]/v1",
+    ],
+)
+def test_private_base_url_rejected_when_disabled(conn, pid, no_private, url):
+    with pytest.raises(Invalid) as info:
+        update_settings(conn, pid, llm={"preset": "localai", "base_url": url, "model": "m1"})
+    assert info.value.details["field"] == "llm.base_url"
+    with pytest.raises(Invalid):
+        update_settings(conn, pid, llm={"preset": "localai"})
+
+
+async def test_public_base_url_is_pinned_and_rechecked(conn, pid, backend, no_private):
+    url = "https://llm.example.org/v1"
+    update_settings(
+        conn,
+        pid,
+        llm={"preset": "openrouter", "base_url": url, "model": "m1", "api_key": KEY},
+    )
+    llm = get_llm(conn, pid)
+    backend.replies.append(content('{"categories": []}'))
+    await complete(llm)
+    assert backend.headers[-1]["host"] == "llm.example.org"
+    # DNS now points inside: refused on the request itself, with a generic message.
+    no_private["llm.example.org"] = ["10.1.2.3"]
+    with pytest.raises(LLMUnavailable) as info:
+        await complete(llm)
+    assert info.value.message == llm_client.BACKEND_FAILED and not info.value.details
+
+
+async def test_instance_backend_exempt_from_private_check(conn, pid, backend, no_private):
+    backend.replies.append(content('{"categories": []}'))
+    await complete(get_llm(conn, pid))  # instance default is LocalAI on 127.0.0.1
+
+
+async def test_backend_errors_do_not_echo_status(conn, pid, backend, openrouter):
+    backend.replies.append(lambda body: httpx.Response(503))
+    with pytest.raises(LLMUnavailable) as info:
+        await complete(openrouter)
+    assert info.value.message == llm_client.BACKEND_FAILED and "status" not in info.value.details
+    for status in (401, 404, 500):
+        backend.models_status = status
+        with pytest.raises(Invalid) as err:
+            update_settings(conn, pid, llm={"preset": "ollama", "model": "m1", "api_key": None})
+        assert err.value.message == llm_client.BACKEND_FAILED
+        assert "status" not in err.value.details
+
+
+def test_api_key_dropped_when_host_changes(conn, pid, backend):
+    update_settings(conn, pid, llm={"preset": "openrouter", "model": "m1", "api_key": KEY})
+    other = "https://evil.example.net/v1"
+    with pytest.raises(Invalid) as info:
+        update_settings(conn, pid, llm={"preset": "openrouter", "base_url": other, "model": "m1"})
+    assert info.value.details["field"] == "llm.api_key"
+    assert not any("evil" in str(h.get("host", "")) for h in backend.headers)
+    with pytest.raises(Invalid):  # preset change to a local backend: key not carried over
+        update_settings(conn, pid, llm={"preset": "localai"})
+    assert llm_backend(conn, pid).api_key == KEY  # nothing changed
+    # Same host, other path: key is kept. Explicit null: allowed, no key.
+    same = "https://openrouter.ai/api/v1/"
+    update_settings(conn, pid, llm={"preset": "openrouter", "base_url": same, "model": "m1"})
+    assert llm_backend(conn, pid).api_key == KEY
+    update_settings(conn, pid, llm={"preset": "localai", "api_key": None})
+    assert llm_backend(conn, pid).api_key is None
+
+
+def test_allow_private_flag_config():
+    from wwyd.config import ConfigError, load_llm
+
+    assert load_llm(None, {}).allow_private_base_urls is True
+    env = {"WWYD_LLM_ALLOW_PRIVATE_BASE_URLS": "false"}
+    assert load_llm(None, env).allow_private_base_urls is False
+    assert load_llm({"allow_private_base_urls": False}, {}).allow_private_base_urls is False
+    with pytest.raises(ConfigError):
+        load_llm(None, {"WWYD_LLM_ALLOW_PRIVATE_BASE_URLS": "maybe"})
+
+
+def test_secret_key_from_env_and_file(data_dir, tmp_path, monkeypatch):
+    from wwyd.llm import secret
+
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv("WWYD_SECRET_KEY", key)
+    assert Fernet(key.encode()).decrypt(encrypt("a").encode()) == b"a"
+    assert not (data_dir / "secret.key").exists()
+    monkeypatch.delenv("WWYD_SECRET_KEY")
+    key_file = tmp_path / "elsewhere" / "wwyd.key"
+    monkeypatch.setenv("WWYD_SECRET_KEY_FILE", str(key_file))
+    from wwyd.config import ConfigError
+
+    with pytest.raises(ConfigError):  # a configured file must exist
+        secret.check_key()
+    key_file.parent.mkdir()
+    key_file.write_text(key + "\n")
+    secret.check_key()
+    assert decrypt(encrypt("b")) == "b" and not (data_dir / "secret.key").exists()
+
+
+@pytest.mark.parametrize("content_", [b"", b"   \n", b"x" * 44])
+def test_corrupt_secret_key_is_a_clear_error(data_dir, content_):
+    from wwyd.config import ConfigError
+    from wwyd.llm import secret
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "secret.key").write_bytes(content_)
+    with pytest.raises(ConfigError, match="not a valid Fernet key"):
+        secret.check_key()
+    with pytest.raises(ConfigError):
+        encrypt("x")
+
+
+def test_secret_key_creation_race(data_dir):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from wwyd.llm import secret
+
+    with ThreadPoolExecutor(8) as pool:
+        keys = set(pool.map(lambda _: secret._load_or_create_key(), range(32)))
+    assert keys == {(data_dir / "secret.key").read_bytes()}
+    assert [p.name for p in data_dir.iterdir() if p.name.startswith(".secret.")] == []
+    # The loser of a race reads the winner's key instead of overwriting it.
+    assert secret._create(data_dir / "secret.key") == keys.pop()

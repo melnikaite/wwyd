@@ -17,6 +17,8 @@ USER_LIMIT_KEYS: tuple[str, ...] = (
     "batch_bytes",
     "concurrent_jobs",
     "spend_cap_usd",
+    "max_claims_per_category",
+    "max_approved_tokens",
 )
 # Limits whose value is a float; the rest are integers.
 FLOAT_LIMIT_KEYS = frozenset({"spend_cap_usd"})
@@ -36,6 +38,9 @@ class LimitDefaults:
     # Per persona per calendar month (UTC); only backends that report or price cost count.
     # None means no cap.
     spend_cap_usd: float | None = 5.0
+    # Compaction size budget per persona (SPEC §10.4).
+    max_claims_per_category: int = 30
+    max_approved_tokens: int = 6000
     # Instance-level only, never per user.
     llm_concurrency: int = 2
     llm_queue_timeout_s: float = 60.0

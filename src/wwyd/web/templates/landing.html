@@ -30,6 +30,12 @@
       <label for="password2">Repeat password</label>
       <input id="password2" name="password2" type="password" autocomplete="new-password" minlength="{{ min_password }}" required>
     </div>
+    {% if kind == "reset" %}
+    <label class="choice">
+      <input type="checkbox" name="disconnect_apps" value="1" {% if disconnect_apps is not defined or disconnect_apps %}checked{% endif %}>
+      <span><strong>Also disconnect all apps and API keys</strong><span class="hint">Recommended if someone else may have used your account. Apps will ask you to connect again.</span></span>
+    </label>
+    {% endif %}
     <div class="actions"><button type="submit">{{ button }}</button></div>
   </form>
 </section>

@@ -116,13 +116,17 @@ def import_persona(
         ),
         0,
     )
+    from wwyd.store.audiences import audience_names, revoke_vanished
+
     with transaction(conn):
+        before = audience_names(conn, persona_id)
         if mode == "replace":
             wipe_persona_content(conn, persona_id)
         _import_persona_fields(conn, persona_id, document["persona"])
         _import_audiences(conn, persona_id, document["audiences"], defaults, counts)
         _import_categories(conn, persona_id, document["categories"], counts)
         _import_claims(conn, persona_id, document["claims"], counts)
+        revoke_vanished(conn, persona_id, before)
     return {"mode": mode, **counts}
 
 

@@ -19,7 +19,7 @@ from authkit import (  # noqa: F401
 
 from wwyd.auth import accounts, tokens
 from wwyd.auth.scopes import parse_scope
-from wwyd.auth.throttle import Throttle, client_ip
+from wwyd.auth.throttle import Throttle, client_ip, ip_key
 
 pytestmark = pytest.mark.anyio
 
@@ -51,6 +51,16 @@ def test_client_ip_trusted_proxies():
     assert (
         client_ip("10.0.0.2", "6.6.6.6, 198.51.100.7, 10.0.0.3", ["10.0.0.0/8"]) == "198.51.100.7"
     )
+    # Every hop trusted: the peer, never the client-controlled left-most hop.
+    assert client_ip("10.0.0.2", "10.0.0.9, 10.0.0.3", ["10.0.0.0/8"]) == "10.0.0.2"
+
+
+def test_ip_key_groups_ipv6_by_64():
+    assert ip_key("198.51.100.7") == "198.51.100.7"
+    assert ip_key("2001:db8:1:2:aaaa::1") == ip_key("2001:db8:1:2:ffff::9") == "2001:db8:1:2::/64"
+    assert ip_key("2001:db8:1:3::1") != ip_key("2001:db8:1:2::1")
+    assert ip_key("::ffff:198.51.100.7") == "198.51.100.7"
+    assert ip_key("unknown") == "unknown"
 
 
 async def test_login_locked_per_login(web, fake_clock):  # noqa: F811
@@ -123,7 +133,7 @@ async def _bad_token(b, client_id: str):  # noqa: ANN202
     )
 
 
-async def test_token_endpoint_limited_per_ip_and_client(web, fake_clock):  # noqa: F811
+async def test_token_endpoint_limited_per_ip(web, fake_clock):  # noqa: F811
     async with web.browser(ip="198.51.100.30") as b:
         cid = (await register(b))["client_id"]
         for _ in range(20):
@@ -134,14 +144,36 @@ async def test_token_endpoint_limited_per_ip_and_client(web, fake_clock):  # noq
             and r.json()["error"] == "rate_limited"
             and r.headers["retry-after"]
         )
-    # Same client from elsewhere: per-client limit.
+    # The same (possibly shared, public) client from elsewhere is not locked out.
     async with web.browser(ip="198.51.100.31") as b:
-        assert (await _bad_token(b, cid)).status_code == 429
-        other = (await register(b))["client_id"]
-        assert (await _bad_token(b, other)).status_code == 400
+        assert (await _bad_token(b, cid)).status_code == 400
     fake_clock.advance(minutes=11)
     async with web.browser(ip="198.51.100.30") as b:
         assert (await _bad_token(b, cid)).status_code == 400
+
+
+async def test_token_client_throttle_keyed_on_client_and_ip(web):  # noqa: F811
+    web.state.throttles.token_client.limit = 5
+    async with web.browser(ip="198.51.100.32") as b:
+        cid = (await register(b))["client_id"]
+        other = (await register(b))["client_id"]
+        for _ in range(5):
+            assert (await _bad_token(b, cid)).status_code == 400
+        assert (await _bad_token(b, cid)).status_code == 429
+        assert (await _bad_token(b, other)).status_code == 400  # other client, same IP
+    async with web.browser(ip="198.51.100.33") as b:
+        assert (await _bad_token(b, cid)).status_code == 400  # same client, other IP
+
+
+async def test_token_client_ignores_unknown_clients(web):  # noqa: F811
+    web.state.throttles.token_client.limit = 3
+    async with web.browser(ip="198.51.100.34") as b:
+        for _ in range(5):
+            assert (await _bad_token(b, "https://unknown.example/app.json")).status_code in (
+                400,
+                401,
+            )
+    assert not web.state.throttles.token_client._events
 
 
 async def test_successful_token_requests_not_counted(web):  # noqa: F811
@@ -253,3 +285,63 @@ async def test_forwarded_for_honoured_from_trusted_proxy():
                 headers={"Authorization": "Bearer bogus", "X-Forwarded-For": "192.0.2.2"},
             )
         assert blocked.status_code == 429 and other.status_code == 401
+
+
+async def test_known_but_stale_bearers_not_counted(web):  # noqa: F811
+    user = web.user()
+    key_id, key = tokens.create_api_key(web.conn, user.id, "k", parse_scope("owner"))
+    tokens.revoke_api_key(web.conn, key_id, user.id)
+    _, live = tokens.create_api_key(web.conn, user.id, "k2", parse_scope("owner"))
+    async with web.browser(ip="198.51.100.62") as b:
+        async with web.browser() as w:
+            await login(w)
+            tok = await oauth_flow(w)
+        tokens.revoke_grant(web.conn, tokens.grant_of_token(web.conn, tok["access_token"]))
+        for _ in range(40):
+            assert (await _mcp(b, key)).status_code == 401
+            assert (await _mcp(b, tok["access_token"])).status_code == 401
+        assert (await _mcp(b, live)).status_code not in (401, 429)
+        # A forged key reusing a real prefix is still a guess.
+        forged = key.rsplit("_", 1)[0] + "_" + "x" * 43
+        for _ in range(30):
+            await _mcp(b, forged)
+        assert (await _mcp(b, live)).status_code == 429
+
+
+async def test_warns_once_when_proxy_untrusted(web, caplog):  # noqa: F811
+    async with web.browser(ip="127.0.0.1") as b:
+        for _ in range(2):
+            await b.get("/healthz", headers={"X-Forwarded-For": "198.51.100.1"})
+    warnings = [r for r in caplog.records if "trusted_proxies is empty" in r.getMessage()]
+    assert len(warnings) == 1
+    caplog.clear()
+    async with web.browser(ip="198.51.100.80") as b:
+        await b.get("/healthz", headers={"X-Forwarded-For": "198.51.100.1"})
+    assert not [r for r in caplog.records if "trusted_proxies" in r.getMessage()]
+
+
+async def test_reset_request_limited_per_login_silently(monkeypatch):
+    from wwyd.web import pages
+
+    sent: list[str] = []
+    monkeypatch.setattr(pages, "send_reset_link", lambda cfg, login, url: sent.append(login))
+    w, stack = await make_web(smtp_host="smtp.example.com", smtp_from="wwyd@example.com")
+    async with stack:
+        w.user()
+        for i in range(5):
+            async with w.browser(ip=f"198.51.100.{90 + i}") as b:
+                csrf = csrf_of((await b.get("/reset")).text)
+                r = await b.post(
+                    "/reset/request", data={"csrf": csrf, "login": "owner@example.com"}
+                )
+                ghost = await b.post(
+                    "/reset/request", data={"csrf": csrf, "login": "no@example.com"}
+                )
+                assert r.status_code == ghost.status_code == 200
+                assert "If that login exists" in r.text and "If that login exists" in ghost.text
+        assert sent == ["owner@example.com"] * 3
+        # Only the newest of those links still works.
+        live = w.conn.execute(
+            "SELECT COUNT(*) FROM one_time_links WHERE kind = 'reset' AND used_at IS NULL"
+        ).fetchone()[0]
+        assert live == 1

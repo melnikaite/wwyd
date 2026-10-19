@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING, Annotated, Any
 from pydantic import Field
 
 from wwyd.ingest import jobs
+from wwyd.ingest.jobs import MAX_RECORDS
 from wwyd.mcp.caller import current_caller
+from wwyd.mcp.tools._types import Id
 from wwyd.store import jobs as job_store
 
 if TYPE_CHECKING:
@@ -23,6 +25,7 @@ def register(server: WwydServer) -> None:
         records: Annotated[
             list[dict[str, Any]],
             Field(
+                max_length=MAX_RECORDS,
                 description=(
                     "1-1000 records, <= 2 MB serialized. Each is one of: "
                     '{type: "message", from_owner, audience?, text (<= 4000), ts, thread '
@@ -34,7 +37,7 @@ def register(server: WwydServer) -> None:
                     '{type: "note", text, ts?}. No other fields are accepted: never send '
                     "names, emails, phones, titles or locations. Datetimes are ISO 8601; "
                     "without an offset they are read in the persona's timezone."
-                )
+                ),
             ),
         ],
         llm_for_ingest: Annotated[
@@ -58,7 +61,7 @@ def register(server: WwydServer) -> None:
         )
 
     @server.scoped_tool(owner, read_only=True)
-    async def job_status(job_id: str) -> dict[str, Any]:
+    async def job_status(job_id: Id) -> dict[str, Any]:
         """Status of an ingest job: queued | running | done | failed | interrupted, progress
         0..1, counts (records by type, claims_created, claims_updated, absorbed,
         dropped_by_guard, unknown_audiences, ...) and error_code when it failed. An

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from pydantic import Field
 
 from wwyd.mcp.caller import current_caller
+from wwyd.mcp.tools._types import Description, Name
 from wwyd.store import audiences as store
 
 if TYPE_CHECKING:
@@ -25,15 +26,15 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(owner)
     async def upsert_audience(
-        name: Annotated[str, Field(description="Slug: [a-z0-9][a-z0-9_-]{0,39}.")],
+        name: Annotated[Name, Field(description="Slug: [a-z0-9][a-z0-9_-]{0,39}.")],
         description: Annotated[
-            str | None, Field(description="Who belongs here and how to talk to them.")
+            Description | None, Field(description="Who belongs here and how to talk to them.")
         ] = None,
         is_default: Annotated[
             bool | None,
             Field(description="Make this the default audience (exactly one exists)."),
         ] = None,
-        rename_to: str | None = None,
+        rename_to: Name | None = None,
     ) -> dict[str, Any]:
         """Create an audience or update its description, default flag or name."""
         return store.upsert_audience(
@@ -47,9 +48,9 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(owner, destructive=True)
     async def delete_audience(
-        name: str,
+        name: Name,
         reassign_to: Annotated[
-            str | None, Field(description="Audience for claims that applied only to this one.")
+            Name | None, Field(description="Audience for claims that applied only to this one.")
         ] = None,
     ) -> dict[str, Any]:
         """Delete a non-default audience. Fails with conflict (and the count) if claims apply

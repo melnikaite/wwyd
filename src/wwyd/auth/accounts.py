@@ -143,6 +143,7 @@ def set_password(
         " WHERE id = ?",
         (pw_hash, ts, int(by_admin), ts, user_id),
     )
+    invalidate_reset_links(conn, user_id)
 
 
 def create_account(conn: sqlite3.Connection, login: str, pw_hash: str) -> User:
@@ -244,8 +245,11 @@ def create_link(
     user_id: str | None = None,
     created_by: str | None = None,
 ) -> str:
-    """Create a link; returns the raw token (shown once)."""
+    """Create a link; returns the raw token (shown once). A new reset link replaces the
+    user's other outstanding reset links."""
     token = clock.new_secret()
+    if kind == "reset" and user_id is not None:
+        invalidate_reset_links(conn, user_id)
     conn.execute(
         "INSERT INTO one_time_links(token_hash, kind, user_id, created_by, created_at, expires_at)"
         " VALUES (?, ?, ?, ?, ?, ?)",
@@ -259,6 +263,14 @@ def create_link(
         ),
     )
     return token
+
+
+def invalidate_reset_links(conn: sqlite3.Connection, user_id: str) -> int:
+    """Drop the user's unused reset links (after a password change or a newer link)."""
+    return conn.execute(
+        "DELETE FROM one_time_links WHERE kind = 'reset' AND user_id = ? AND used_at IS NULL",
+        (user_id,),
+    ).rowcount
 
 
 def peek_link(conn: sqlite3.Connection, kind: LinkKind, token: str | None) -> Link | None:

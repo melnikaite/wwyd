@@ -235,3 +235,20 @@ def test_store_settings_limits(conn, user):
     assert s["spend_capped"] is False and s["usage_today"] == {} and s["privacy_note"]
     with pytest.raises(Invalid):
         personas.update_settings(conn, user.persona_id, limits={"predict_per_day": 10_000})
+
+
+def test_compaction_budget_limits(conn, user):
+    from dataclasses import replace
+
+    from wwyd.config import load_limits
+
+    d = load_limits({"max_claims_per_category": 12}, {"WWYD_LIMIT_MAX_APPROVED_TOKENS": "900"})
+    assert (d.max_claims_per_category, d.max_approved_tokens) == (12, 900)
+    assert DEFAULTS.max_claims_per_category == 30 and DEFAULTS.max_approved_tokens == 6000
+    lim = Limiter(conn, replace(DEFAULTS, max_claims_per_category=12))
+    uid = user.user_id
+    assert lim.effective_limits(uid)["max_claims_per_category"] == 12
+    lim.set_admin_ceilings(uid, {"max_claims_per_category": 50})  # above the default
+    assert lim.effective_limits(uid)["max_claims_per_category"] == 50
+    lim.set_own_limits(uid, {"max_claims_per_category": 20})
+    assert lim.effective_limits(uid)["max_claims_per_category"] == 20

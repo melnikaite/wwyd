@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import re
 
-EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", re.UNICODE)
+# Every pattern may only start where its leading run starts (the lookbehinds), so a long run
+# such as "a.a.a.a..." is scanned once rather than once per position: linear time.
+EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+", re.UNICODE)
 URL = re.compile(
-    r"(?:\b[a-z][a-z0-9+.-]*://\S+)"  # scheme://...
+    r"(?:(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://\S+)"  # scheme://...
     r"|(?:\bwww\.\S+)"
-    r"|(?:\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|ai|dev|app|me|co|de|ru|uk|info|biz)"
-    r"(?:/\S*)?\b)",
+    r"|(?:(?<![a-z0-9-])(?<![a-z0-9-]\.)[a-z0-9-]+(?:\.[a-z0-9-]+)*"
+    r"\.(?:com|net|org|io|ai|dev|app|me|co|de|ru|uk|info|biz)(?:/\S*)?\b)",
     re.IGNORECASE,
 )
 # 7+ digits, optionally with a leading + and common separators; avoids years and times.

@@ -9,9 +9,9 @@ from conftest import call, call_error
 
 from wwyd.compact import compact, run_after_job
 from wwyd.compact import scheduler as sched
-from wwyd.compact.constants import MAX_CLAIMS_PER_CATEGORY
 from wwyd.errors import Conflict, LLMUnavailable
 from wwyd.ids import format_ts
+from wwyd.limits import DEFAULTS, get_limiter
 from wwyd.store import changes as chg
 from wwyd.store import claims as cl
 from wwyd.store.categories import merge_categories, upsert_category
@@ -291,6 +291,12 @@ async def test_decay(conn, pid):
 
 # --- budget -----------------------------------------------------------------------------
 
+MAX_CLAIMS_PER_CATEGORY = DEFAULTS.max_claims_per_category
+
+
+def owner_of(conn, pid):
+    return conn.execute("SELECT user_id FROM personas WHERE id = ?", (pid,)).fetchone()[0]
+
 
 async def test_category_budget(conn, pid):
     ids = []
@@ -305,10 +311,25 @@ async def test_category_budget(conn, pid):
     assert get(conn, pid, ids[0])["archive_reason"] == "budget"
 
 
-async def test_token_budget(conn, pid, monkeypatch):
-    from wwyd.compact import maintenance
+async def test_category_budget_follows_effective_limits(conn, pid):
+    uid = owner_of(conn, pid)
+    lim = get_limiter(conn)
+    n = MAX_CLAIMS_PER_CATEGORY + 5
+    ids = [
+        add(conn, pid, f"Distinct claim number {i} zz{i}", confidence=0.5 + i / 100)[0]
+        for i in range(n)
+    ]
+    # Admin ceiling above the default: nothing over budget.
+    lim.set_admin_ceilings(uid, {"max_claims_per_category": n})
+    assert (await compact(conn, pid, apply=False, steps=["budget"]))["changes"] == []
+    # The owner's own lower setting wins.
+    lim.set_own_limits(uid, {"max_claims_per_category": n - 3})
+    res = await compact(conn, pid, apply=True, steps=["budget"])
+    assert sorted(c["claims"][0] for c in res["changes"]) == sorted(ids[:3])
 
-    monkeypatch.setattr(maintenance, "MAX_APPROVED_TOKENS", 10)
+
+async def test_token_budget(conn, pid):
+    get_limiter(conn).set_own_limits(owner_of(conn, pid), {"max_approved_tokens": 10})
     a, _ = add(conn, pid, "x" * 30 + " alpha", status="approved", confidence=0.2)
     b, _ = add(conn, pid, "y" * 30 + " beta", status="approved", confidence=0.9)
     res = await compact(conn, pid, apply=True, steps=["budget"])

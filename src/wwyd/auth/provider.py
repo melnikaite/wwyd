@@ -19,10 +19,8 @@ be enumerated, and the user picks the scope on the consent page anyway, so:
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import logging
-import socket
 import sqlite3
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
@@ -50,6 +48,9 @@ from wwyd.auth.scopes import Scope, parse_scope
 from wwyd.auth.throttle import Throttled, Throttles
 from wwyd.config import Config
 from wwyd.mcp.caller import Caller, CallerProvider
+from wwyd.netguard import blocked_ip as _blocked_ip
+from wwyd.netguard import default_resolver
+from wwyd.netguard import pinned_url as _pinned_url
 
 log = logging.getLogger("wwyd.auth.provider")
 
@@ -98,31 +99,6 @@ def client_display_name(client: OAuthClientInformationFull) -> str:
     if client.client_id.startswith("https://"):
         return urlsplit(client.client_id).hostname or "Unnamed app"
     return "Unnamed app"
-
-
-def _blocked_ip(addr: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(addr.split("%", 1)[0])
-    except ValueError:
-        return True
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-        ip = ip.ipv4_mapped
-    return (
-        not ip.is_global
-        or ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
-
-
-async def default_resolver(host: str, port: int) -> list[str]:
-    infos = await anyio.to_thread.run_sync(
-        lambda: socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    )
-    return sorted({info[4][0] for info in infos})
 
 
 class WwydProvider:
@@ -238,12 +214,20 @@ class WwydProvider:
         if not addrs or any(_blocked_ip(a) for a in addrs):
             log.warning("CIMD URL rejected: resolves to a non-public address")
             return None
+        # Connect to the address we just validated, not to whatever a second DNS lookup
+        # returns (DNS rebinding). ``Host`` and TLS SNI/certificate checks keep the hostname.
+        pinned = _pinned_url(parts, addrs[0])
         try:
             async with (
                 httpx.AsyncClient(
                     transport=self.http_transport, timeout=CIMD_TIMEOUT, follow_redirects=False
                 ) as http,
-                http.stream("GET", url, headers={"Accept": "application/json"}) as resp,
+                http.stream(
+                    "GET",
+                    pinned,
+                    headers={"Accept": "application/json", "Host": parts.netloc},
+                    extensions={"sni_hostname": host},
+                ) as resp,
             ):
                 if resp.status_code != 200:
                     log.info("CIMD fetch returned HTTP %s", resp.status_code)

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from pydantic import Field
 
 from wwyd.mcp.caller import current_caller
+from wwyd.mcp.tools._types import Description, Path, Paths
 from wwyd.store import categories as store
 
 if TYPE_CHECKING:
@@ -25,10 +26,10 @@ def register(server: WwydServer) -> None:
 
     @server.scoped_tool(owner)
     async def upsert_category(
-        path: Annotated[str, Field(description="e.g. work/meetings; at most 3 levels.")],
-        description: str | None = None,
+        path: Annotated[Path, Field(description="e.g. work/meetings; at most 3 levels.")],
+        description: Description | None = None,
         rename_to: Annotated[
-            str | None, Field(description="New path; moves the whole subtree.")
+            Path | None, Field(description="New path; moves the whole subtree.")
         ] = None,
     ) -> dict[str, Any]:
         """Create a category (its parent must exist) or update its description or path."""
@@ -43,9 +44,9 @@ def register(server: WwydServer) -> None:
     @server.scoped_tool(owner, destructive=True)
     async def merge_categories(
         from_: Annotated[
-            list[str], Field(alias="from", description="Paths to merge (with sub-categories).")
+            Paths, Field(alias="from", description="Paths to merge (with sub-categories).")
         ],
-        into: str,
+        into: Path,
     ) -> dict[str, Any]:
         """Move all claims of the given categories into another one and delete the sources.
         Recorded in the change log."""

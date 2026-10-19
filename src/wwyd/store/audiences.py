@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from typing import Any
 
 from wwyd.db import transaction
@@ -104,6 +105,7 @@ def upsert_audience(
                 if _row(conn, persona_id, rename_to) is not None:
                     raise Conflict(f"audience {rename_to!r} already exists", name=rename_to)
                 conn.execute("UPDATE audiences SET name = ? WHERE id = ?", (rename_to, audience_id))
+                revoke_tokens_for(conn, persona_id, [name])
             if description is not None:
                 conn.execute(
                     "UPDATE audiences SET description = ? WHERE id = ?", (description, audience_id)
@@ -155,4 +157,31 @@ def delete_audience(
                 [(cid, target["id"]) for cid in only_here],
             )
         conn.execute("DELETE FROM audiences WHERE id = ?", (row["id"],))
+        revoke_tokens_for(conn, persona_id, [name])
     return {"deleted": name, "reassigned": len(only_here)}
+
+
+# --- token revocation ------------------------------------------------------------------------
+# respond tokens bind audience *names*: when a name disappears (delete, rename, replace-import,
+# delete_persona) the tokens naming it are revoked in the same transaction, so a later
+# audience with that name does not inherit them.
+
+
+def audience_names(conn: sqlite3.Connection, persona_id: str) -> set[str]:
+    return {
+        r[0] for r in conn.execute("SELECT name FROM audiences WHERE persona_id = ?", (persona_id,))
+    }
+
+
+def revoke_tokens_for(conn: sqlite3.Connection, persona_id: str, names: Iterable[str]) -> int:
+    from wwyd.auth.tokens import revoke_for_audience
+
+    row = conn.execute("SELECT user_id FROM personas WHERE id = ?", (persona_id,)).fetchone()
+    if row is None:
+        return 0
+    return sum(revoke_for_audience(conn, row[0], name) for name in sorted(set(names)))
+
+
+def revoke_vanished(conn: sqlite3.Connection, persona_id: str, before: set[str]) -> int:
+    """Revoke tokens for audience names in ``before`` that no longer exist."""
+    return revoke_tokens_for(conn, persona_id, before - audience_names(conn, persona_id))

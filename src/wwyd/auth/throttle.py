@@ -105,7 +105,7 @@ class Throttle:
 def _loggable(key: str) -> str:
     """IPs and the global key are logged; anything else (logins, client ids) is not."""
     try:
-        ipaddress.ip_address(key)
+        ipaddress.ip_network(key, strict=False)
         return key
     except ValueError:
         return "*" if key == "*" else "(key)"
@@ -121,6 +121,7 @@ class Throttles:
         self.password_change = Throttle("password_change", 5, 15 * m, lockout=15 * m)
         self.link_ip = Throttle("link_ip", 10, 15 * m)
         self.reset_request_ip = Throttle("reset_request_ip", 5, h)
+        self.reset_request_login = Throttle("reset_request_login", 3, h)
         self.token_ip = Throttle("token_ip", 20, 10 * m)
         self.token_client = Throttle("token_client", 20, 10 * m)
         self.register_ip = Throttle("register_ip", 20, h)
@@ -140,7 +141,8 @@ class Throttles:
 
 def client_ip(peer: str | None, forwarded_for: str | None, trusted: list[str]) -> str:
     """The socket peer, or the right-most untrusted ``X-Forwarded-For`` hop when the peer is
-    a trusted proxy."""
+    a trusted proxy. When every hop is trusted, the peer (never the client-controlled
+    left-most hop)."""
     peer = peer or "unknown"
     if not forwarded_for or not _in(peer, trusted):
         return peer
@@ -148,7 +150,30 @@ def client_ip(peer: str | None, forwarded_for: str | None, trusted: list[str]) -
     for hop in reversed(hops):
         if not _in(hop, trusted):
             return hop
-    return hops[0] if hops else peer
+    return peer
+
+
+def ip_key(ip: str) -> str:
+    """Throttle key for a client IP: IPv4 as is, IPv6 as its /64 (one host usually owns a
+    whole /64, so per-address keys would be trivial to rotate)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return ip
+
+
+def is_internal(addr: str | None) -> bool:
+    """Loopback or private address (where a reverse proxy usually sits)."""
+    try:
+        ip = ipaddress.ip_address(addr or "")
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private
 
 
 def _in(addr: str, networks: list[str]) -> bool:

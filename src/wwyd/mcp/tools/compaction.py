@@ -9,6 +9,7 @@ from pydantic import Field
 
 from wwyd.compact import compact as run_compact
 from wwyd.mcp.caller import current_caller
+from wwyd.mcp.tools._types import Cursor, Id
 from wwyd.store import changes as store
 
 if TYPE_CHECKING:
@@ -55,7 +56,7 @@ def register(server: WwydServer) -> None:
         state: State | None = None,
         op: Op | None = None,
         limit: Annotated[int | None, Field(description="Page size, 1-200 (default 50).")] = None,
-        cursor: str | None = None,
+        cursor: Cursor | None = None,
     ) -> dict[str, Any]:
         """The change log, newest first, with before/after claim snapshots."""
         return store.list_changes(
@@ -63,7 +64,7 @@ def register(server: WwydServer) -> None:
         )
 
     @server.scoped_tool(owner)
-    async def undo_change(id: str) -> dict[str, Any]:
+    async def undo_change(id: Id) -> dict[str, Any]:
         """Restore the before-snapshot of an applied change. Fails with conflict if a later
         applied change touched the same claims (undo that one first)."""
         return {"change": store.undo_change(server.conn, persona_id(), id)}

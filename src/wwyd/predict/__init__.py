@@ -112,7 +112,13 @@ async def predict(
             (persona_id,),
         ).fetchone()
         run.audience_fallback = True
-        run.hints.append(f"unknown audience; used the default audience {row['name']!r}")
+        if row is None:
+            # The store keeps exactly one default audience; this guards a hand-edited DB.
+            return run.finish(_escalate("out_of_persona", "the persona has no default audience"))
+        if caller.scope == "owner":
+            run.hints.append(f"unknown audience; used the default audience {row['name']!r}")
+        else:  # do not name an audience this token may not be permitted to see
+            run.hints.append("unknown audience; used the default audience")
     run.audience_id = row["id"]
     if caller.scope != "owner" and row["name"] not in (caller.audiences or ()):
         return run.finish(

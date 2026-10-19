@@ -43,7 +43,10 @@ class Server:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.fetches += 1
-        assert str(request.url) == CID
+        # Pinned to the validated address; Host and SNI keep the hostname.
+        assert str(request.url) == CID.replace("app.example", self.ips[0])
+        assert request.headers["host"] == "app.example"
+        assert request.extensions["sni_hostname"] == "app.example"
         body = self.body if self.body is not None else json.dumps(self.doc).encode()
         return httpx.Response(
             self.status, content=body, headers=self.headers or {"content-type": "application/json"}
@@ -166,3 +169,39 @@ async def test_cache_refreshes_after_a_day(fake_clock):  # noqa: F811
         assert (await provider.get_client(CID)).client_name == "Example App"
         fake_clock.advance(hours=25)
         assert (await provider.get_client(CID)).client_name == "Renamed"
+
+
+@pytest.mark.parametrize(
+    ("url", "ip", "expected"),
+    [
+        (CID, "93.184.216.34", "https://93.184.216.34/oauth/client.json"),
+        (
+            "https://app.example:8443/c.json?x=1",
+            "2606:2800:220:1:248:1893:25c8:1946",
+            "https://[2606:2800:220:1:248:1893:25c8:1946]:8443/c.json?x=1",
+        ),
+    ],
+)
+async def test_fetch_is_pinned_to_validated_address(url, ip, expected):
+    """DNS rebinding: the request goes to the address that passed the check, never to a
+    second lookup; Host and TLS SNI stay the hostname."""
+    seen: list[httpx.Request] = []
+    lookups = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_doc(client_id=url))
+
+    async def resolve(host: str, port: int) -> list[str]:
+        lookups.append((host, port))
+        return [ip] if len(lookups) == 1 else ["127.0.0.1"]  # rebinding on a second lookup
+
+    w, stack = await make_web(cimd_transport=httpx.MockTransport(handler), cimd_resolver=resolve)
+    async with stack:
+        client = await w.state.provider.get_client(url)
+    assert client is not None and len(lookups) == 1
+    (req,) = seen
+    assert str(req.url) == expected
+    netloc = urlsplit(url).netloc
+    assert req.headers["host"] == netloc
+    assert req.extensions["sni_hostname"] == "app.example"

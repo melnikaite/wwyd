@@ -177,9 +177,10 @@ def validate_record(index: int, record: Any) -> str:
     error = next(iter(_VALIDATORS[kind].iter_errors(record)), None)
     if error is not None:
         # Never use error.message: it quotes the offending value.
-        path = ".".join(str(p) for p in error.absolute_path)
         if error.validator == "additionalProperties":
-            raise _invalid(index, path, "unknown field")
+            # The path could lead through caller-chosen keys: report the record index only.
+            raise _invalid(index, "", "unknown field")
+        path = ".".join(str(p) for p in error.absolute_path)
         raise _invalid(index, path, f"failed {error.validator}")
     return kind
 

@@ -48,6 +48,9 @@ class LlmSettings:
     api_key: str | None = field(default=None, repr=False)
     price_in_per_m: float | None = None
     price_out_per_m: float | None = None
+    # May a persona's own backend point at loopback/private/link-local addresses? True suits
+    # a self-hosted instance (LocalAI on localhost); set false on multi-user hosted instances.
+    allow_private_base_urls: bool = True
 
     def apply(self) -> None:
         """Install these settings as the instance backend (``wwyd.llm.presets``)."""
@@ -59,6 +62,7 @@ class LlmSettings:
             api_key=self.api_key,
             price_in_per_m=self.price_in_per_m,
             price_out_per_m=self.price_out_per_m,
+            allow_private_base_urls=self.allow_private_base_urls,
         )
 
 
@@ -172,6 +176,7 @@ def load_limits(table: Any = None, environ: dict[str, str] | None = None) -> Lim
 
 _LLM_FIELDS = {f.name for f in fields(LlmSettings)}
 _LLM_PRICES = {"price_in_per_m", "price_out_per_m"}
+_LLM_BOOLS = {"allow_private_base_urls"}
 
 
 def load_llm(table: Any = None, environ: dict[str, str] | None = None) -> LlmSettings:
@@ -191,7 +196,17 @@ def load_llm(table: Any = None, environ: dict[str, str] | None = None) -> LlmSet
         if raw is not None and raw != "":
             values[name] = raw
     for name, raw in list(values.items()):
-        if name in _LLM_PRICES:
+        if name in _LLM_BOOLS:
+            if isinstance(raw, bool):
+                continue
+            text = str(raw).strip().lower() if isinstance(raw, str) else None
+            if text in ("1", "true", "yes", "on"):
+                values[name] = True
+            elif text in ("0", "false", "no", "off"):
+                values[name] = False
+            else:
+                raise ConfigError(f"[llm] {name} must be true or false")
+        elif name in _LLM_PRICES:
             try:
                 price = float(raw)
             except (TypeError, ValueError):

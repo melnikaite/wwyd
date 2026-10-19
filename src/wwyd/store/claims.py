@@ -217,8 +217,9 @@ def _filters(
     if category is not None:
         check_category_path(category)
         get_category(conn, persona_id, category)
-        where.append("(cat.path = ? OR cat.path LIKE ?)")
-        args += [category, category + "/%"]
+        where.append("(cat.path = ? OR cat.path LIKE ? ESCAPE '\\')")
+        escaped = category.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        args += [category, escaped + "/%"]
     if audience is not None:
         aud = get_audience(conn, persona_id, audience)
         where.append(
@@ -349,8 +350,12 @@ def search_claims(
         [match, *args, limit],
     ).fetchall()
     claims = _to_dicts(conn, rows)
+    # bm25() is negative (more negative = better) and its magnitude depends on corpus size
+    # (tiny for small personas), so report it relative to the best hit: 1.0 = best match of
+    # this result, other hits in (0, 1]. Not comparable across queries.
+    best = min((row["rank"] for row in rows), default=0.0)
     for claim, row in zip(claims, rows, strict=True):
-        claim["score"] = round(-row["rank"], 6)
+        claim["score"] = round(row["rank"] / best, 3) if best < 0 else 1.0
     return {"claims": claims}
 
 

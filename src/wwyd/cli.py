@@ -82,9 +82,12 @@ def run_stdio(login: str) -> int:
 
 def _config(**overrides):  # noqa: ANN003, ANN202
     from wwyd.config import ConfigError, load_config
+    from wwyd.llm.secret import check_key
 
     try:
-        return load_config(**overrides)
+        config = load_config(**overrides)
+        check_key()
+        return config
     except ConfigError as exc:
         print(f"wwyd: {exc}", file=sys.stderr)
         raise SystemExit(2) from None

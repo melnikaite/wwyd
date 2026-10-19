@@ -33,6 +33,7 @@ PRESETS: dict[str, tuple[str, str | None]] = {
 
 _DEFAULT_INSTANCE = Backend("instance", *PRESETS["localai"])
 _instance: Backend = _DEFAULT_INSTANCE
+_allow_private = True
 
 
 def set_instance_backend(
@@ -42,13 +43,15 @@ def set_instance_backend(
     api_key: str | None = None,
     price_in_per_m: float | None = None,
     price_out_per_m: float | None = None,
+    allow_private_base_urls: bool = True,
 ) -> Backend:
     """Override the shared default used by personas without their own backend (startup).
 
     Arguments left as None keep the built-in LocalAI default; calling with no arguments
     restores it.
     """
-    global _instance
+    global _instance, _allow_private
+    _allow_private = allow_private_base_urls
     _instance = replace(
         _DEFAULT_INSTANCE,
         base_url=(base_url or _DEFAULT_INSTANCE.base_url).rstrip("/"),
@@ -62,3 +65,8 @@ def set_instance_backend(
 
 def instance_backend() -> Backend:
     return _instance
+
+
+def allow_private_base_urls() -> bool:
+    """Whether per-persona backends may use non-public addresses (``[llm]`` flag)."""
+    return _allow_private

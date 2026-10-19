@@ -16,9 +16,8 @@ DECAY_HALF_LIFE_DAYS = 6 * 30.4375  # six months
 DECAY_FLOOR = 0.2
 DECAY_MIN_STEP = 0.005  # smaller drops are not written (they accumulate until next night)
 
-# §10.4 size budget
-MAX_CLAIMS_PER_CATEGORY = 30
-MAX_APPROVED_TOKENS = 6000
+# §10.4 size budget: the per-category and token ceilings are limits (wwyd.limits,
+# ``max_claims_per_category`` / ``max_approved_tokens``), configurable per user.
 CHARS_PER_TOKEN = 4
 
 # §10.5 purge
