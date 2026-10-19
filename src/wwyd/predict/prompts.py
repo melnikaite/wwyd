@@ -45,12 +45,7 @@ Answer: {"categories": ["travel", "money"]}
 ANSWER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "type": {"type": "string", "enum": ["answer", "needs", "escalate"]},
-        "answer": {"type": "string"},
-        "confidence": {"type": "number"},
-        "used_claims": {"type": "array", "items": {"type": "string"}},
-        "language": {"type": "string"},
-        "needs": {
+        "absent_facts": {
             "type": "array",
             "items": {
                 "type": "object",
@@ -59,16 +54,21 @@ ANSWER_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
             },
         },
+        "type": {"type": "string", "enum": ["answer", "needs", "escalate"]},
+        "answer": {"type": "string"},
+        "confidence": {"type": "number"},
+        "used_claims": {"type": "array", "items": {"type": "string"}},
+        "language": {"type": "string"},
         "escalate": {"type": "string", "enum": ["", "out_of_persona", "boundary"]},
         "reason": {"type": "string"},
     },
     "required": [
+        "absent_facts",
         "type",
         "answer",
         "confidence",
         "used_claims",
         "language",
-        "needs",
         "escalate",
         "reason",
     ],
@@ -80,20 +80,32 @@ situation. You only know the owner through the claims listed in the input; each 
 an ID in square brackets. Act exactly as the owner would, following their style and
 boundaries. Do not invent facts about the owner, their schedule or their plans.
 
-Choose one type:
+Work in two steps.
+
+Step 1, "absent_facts" (always first). For every claim of kind decision_rule that applies
+to the situation, check whether each condition of the rule can be checked from the Facts
+block of the input. The situation text only says what the other person wants; it is never
+evidence of the owner's calendar, free time, prices or plans. A rule about meetings, calls,
+slots, buffers or availability can only be checked from facts such as the owner's free
+slots or other calls. List every fact the rule needs that the Facts block does not
+contain, with "what" (the fact to look up, specific to the situation's date and time) and
+"why" ("decision_rule" and the claim ID). If no decision rule applies, or all its facts
+are given, use [].
+
+Step 2, "type":
+- If "absent_facts" is not empty, the type is "needs". Do not answer, do not ask the other
+  person for details, do not escalate: the caller will look up the facts and ask again.
 - "answer": you can predict the reply or decision. Write it in "answer" as the owner would
   write it (their language, tone and length; for kind "reply" the actual message text, for
   kind "decision" a short statement of what the owner decides). Put the IDs of the claims
   you relied on in "used_claims", your confidence (0 to 1) that this is what the owner would
   really do in "confidence", and the ISO 639-1 code of the answer's language in "language".
   Reply in the language of the situation unless a claim says otherwise.
-- "needs": a decision rule depends on facts you were not given (free time slots, prices,
-  dates). List each missing fact in "needs" with "what" (the fact to look up) and "why"
-  (which claim needs it, e.g. "decision_rule clm_..."). Do not guess such facts. Missing
-  facts are never a reason to escalate: ask for them with "needs".
-- "escalate": set "escalate" to "boundary" only when a claim of kind boundary says the owner would not
-  handle this automatically, or "out_of_persona" when the claims say nothing useful about
-  this situation. Explain briefly in "reason".
+- "escalate": set "escalate" to "boundary" only when a claim of kind boundary says the
+  owner would not handle this automatically, or "out_of_persona" when no claim is about
+  the topic of the situation. Style claims only say how the owner writes, not what they
+  think: a question asking for the owner's opinion, taste, advice or plans on a topic no
+  other claim covers is "out_of_persona". Explain briefly in "reason".
 Fill fields that do not apply to the chosen type with "" , 0 or [].
 
 Example 1
@@ -104,9 +116,9 @@ Claims:
 Facts: none
 Kind: reply
 Situation: Can we sync for 30 min on Tuesday afternoon?
-Output: {"type": "needs", "answer": "", "confidence": 0, "used_claims": ["clm_a2"],
-"language": "en", "needs": [{"what": "free slots on Tuesday afternoon of at least 30
-minutes with 10 minute buffers", "why": "decision_rule clm_a2"}], "escalate": "",
+Output: {"absent_facts": [{"what": "owner's free slots on Tuesday afternoon of at least 30
+minutes with 10 minute buffers", "why": "decision_rule clm_a2"}], "type": "needs",
+"answer": "", "confidence": 0, "used_claims": ["clm_a2"], "language": "en", "escalate": "",
 "reason": ""}
 
 Example 2
@@ -118,11 +130,24 @@ Facts:
 - free slots on Tuesday afternoon: 14:00-15:30
 Kind: reply
 Situation: Can we sync for 30 min on Tuesday afternoon?
-Output: {"type": "answer", "answer": "Tue 14:10 works.", "confidence": 0.8,
-"used_claims": ["clm_a1", "clm_a2"], "language": "en", "needs": [], "escalate": "",
+Output: {"absent_facts": [], "type": "answer", "answer": "Tue 14:10 works.",
+"confidence": 0.8, "used_claims": ["clm_a1", "clm_a2"], "language": "en", "escalate": "",
 "reason": ""}
 
 Example 3
+Claims:
+[clm_d1] (style, communication/style) Пишет коротко и дружелюбно, без приветствий.
+[clm_d2] (decision_rule, work/meetings) Соглашается на созвон, только если в календаре есть
+свободное окно от 20 минут и 10 минут запаса до и после других звонков.
+Facts: none
+Kind: reply
+Situation: Созвонимся в среду в 11:00? Нужно обсудить договор.
+Output: {"absent_facts": [{"what": "свободные окна владельца в среду около 11:00 и звонки
+до и после", "why": "decision_rule clm_d2"}], "type": "needs", "answer": "",
+"confidence": 0, "used_claims": ["clm_d2"], "language": "ru", "escalate": "",
+"reason": ""}
+
+Example 4
 Claims:
 [clm_b1] (style, communication/style) Пишет неформально, на «ты», коротко, часто без
 заглавных букв.
@@ -130,19 +155,31 @@ Claims:
 Facts: none
 Kind: reply
 Situation: Привет! Поедешь с нами в Прагу на выходные? На поезде 3,5 часа.
-Output: {"type": "answer", "answer": "о, давай! во сколько выезжаем?", "confidence": 0.75,
-"used_claims": ["clm_b1", "clm_b2"], "language": "ru", "needs": [], "escalate": "",
-"reason": ""}
+Output: {"absent_facts": [], "type": "answer", "answer": "о, давай! во сколько
+выезжаем?", "confidence": 0.75, "used_claims": ["clm_b1", "clm_b2"], "language": "ru",
+"escalate": "", "reason": ""}
 
-Example 4
+Example 5
 Claims:
 [clm_c1] (boundary, communication/boundaries) Never discusses salary in writing.
 Facts: none
 Kind: reply
 Situation: Hey, what's your salary at the new job?
-Output: {"type": "escalate", "answer": "", "confidence": 0, "used_claims": ["clm_c1"],
-"language": "en", "needs": [], "escalate": "boundary", "reason": "salary is never
-discussed in writing"}
+Output: {"absent_facts": [], "type": "escalate", "answer": "", "confidence": 0,
+"used_claims": ["clm_c1"], "language": "en", "escalate": "boundary", "reason": "salary is
+never discussed in writing"}
+
+Example 6
+Claims:
+[clm_a1] (style, communication/style) Short, no greeting, answers within minutes.
+[clm_a2] (decision_rule, work/meetings) Accepts a meeting only with a free slot of at least
+20 minutes and 10 minutes of buffer around it.
+Facts: none
+Kind: reply
+Situation: Which laptop should I buy for my son?
+Output: {"absent_facts": [], "type": "escalate", "answer": "", "confidence": 0,
+"used_claims": [], "language": "en", "escalate": "out_of_persona", "reason": "no claim
+covers buying advice"}
 """
 
 

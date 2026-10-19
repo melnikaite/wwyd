@@ -42,7 +42,7 @@ def answer(text: str = "Sure, Tuesday works.", confidence: float = 0.9, used=Non
             "confidence": confidence,
             "used_claims": ids,
             "language": lang,
-            "needs": [],
+            "absent_facts": [],
             "escalate": "",
             "reason": "",
         }
@@ -136,7 +136,7 @@ async def test_needs_facts_round_trip(conn, user, pid, fake_llm):
                 "confidence": 0,
                 "used_claims": [meeting],
                 "language": "en",
-                "needs": [{"what": "free slots Tuesday", "why": f"decision_rule {meeting}"}],
+                "absent_facts": [{"what": "free slots Tuesday", "why": f"decision_rule {meeting}"}],
                 "escalate": "",
                 "reason": "",
             }
@@ -156,6 +156,27 @@ async def test_needs_facts_round_trip(conn, user, pid, fake_llm):
     )
     assert second["type"] == "answer" and second["answer"] == "Tue 14:10 works."
     assert "- free slots Tuesday: 14:00-15:30" in fake_llm.calls[-1]["user"]
+
+
+def test_escalate_with_absent_facts_becomes_needs():
+    from wwyd.predict.answer import interpret
+
+    data = {
+        "type": "escalate",
+        "escalate": "out_of_persona",
+        "reason": "x",
+        "used_claims": ["clm_m"],
+        "absent_facts": [{"what": "free slots tomorrow", "why": "decision_rule clm_m"}],
+    }
+    out = interpret(data, {"clm_m"})
+    assert out == {
+        "type": "needs",
+        "needs": [{"what": "free slots tomorrow", "why": "decision_rule clm_m"}],
+        "used_claims": ["clm_m"],
+    }
+    assert interpret({**data, "escalate": "boundary"}, {"clm_m"})["type"] == "escalate"
+    data["absent_facts"] = []
+    assert interpret(data, {"clm_m"})["type"] == "escalate"
 
 
 @pytest.mark.parametrize(
@@ -186,7 +207,7 @@ async def test_model_escalations_and_junk(conn, user, pid, fake_llm):
         "confidence": 0,
         "used_claims": [],
         "language": "en",
-        "needs": [],
+        "absent_facts": [],
         "escalate": "boundary",
         "reason": "never in writing",
     }
@@ -433,7 +454,7 @@ async def test_predict_privacy_canary(conn, user, pid, fake_llm, audiences, capl
             "confidence": 0.9,
             "used_claims": [call["user"]],
             "language": call["user"][:20],
-            "needs": [],
+            "absent_facts": [],
             "escalate": "",
             "reason": call["user"],
         }

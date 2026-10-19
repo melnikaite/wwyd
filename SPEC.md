@@ -860,3 +860,10 @@ Deviations and details recorded while implementing M2–M6:
   SDK version.
 - **Self-service resets** do not show the admin-reset notice on the account page.
 - **`/healthz`** is an unauthenticated liveness endpoint that does not touch the DB.
+- **Answer shape.** The answer call's JSON has an `absent_facts: [{what, why}]` field
+  (replacing `needs`) that the model fills first: the facts the applicable decision rules
+  need but `facts` lacks. The name sorts before `answer` on purpose, since some backends'
+  JSON grammars emit keys alphabetically and the field only helps if it is generated
+  before the model commits to an answer. Post-processing turns `type: "escalate"` with a
+  non-empty `absent_facts` into `needs` (small models list the gap, then escalate),
+  except `escalate: "boundary"`, which always stands.

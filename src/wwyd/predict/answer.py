@@ -42,6 +42,10 @@ def used_claims(data: dict[str, Any], context_ids: set[str]) -> list[str]:
     return out
 
 
+def _has_facts(raw: Any) -> bool:
+    return isinstance(raw, list) and any(isinstance(i, dict) and _str(i.get("what")) for i in raw)
+
+
 def interpret(
     data: dict[str, Any], context_ids: set[str], *, has_boundary: bool = True
 ) -> dict[str, Any]:
@@ -51,10 +55,18 @@ def interpret(
     out_of_persona (small models use it for "I lack information").
     """
     kind = data.get("type")
+    if (
+        kind == "escalate"
+        and data.get("escalate") != "boundary"
+        and _has_facts(data.get("absent_facts"))
+    ):
+        # Small models list the missing facts and still pick escalate; the facts win,
+        # except over a boundary, which always stands.
+        kind = "needs"
     used = used_claims(data, context_ids)
     if kind == "needs":
         needs = []
-        raw = data.get("needs")
+        raw = data.get("absent_facts", data.get("needs"))
         for item in raw if isinstance(raw, list) else []:
             if isinstance(item, dict) and _str(item.get("what")):
                 needs.append({"what": _str(item.get("what")), "why": _str(item.get("why"))})

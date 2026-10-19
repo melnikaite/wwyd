@@ -21,3 +21,28 @@ async def test_live_predict_localai(conn, user, pid):
         assert out["escalate"] != "llm_unavailable", out
     if out["type"] == "answer":
         assert out["disclosure"]
+
+
+async def test_live_needs_round_trip(conn, user, pid):
+    seed(
+        conn,
+        pid,
+        [
+            STYLE,
+            {
+                **MEETING,
+                "text": "Accepts a meeting only if there is a free slot of at least 20 minutes "
+                "and 10 minutes of buffer before and after other calls.",
+            },
+        ],
+    )
+    situation = "Can you join a call tomorrow at 3pm?"
+    first = await predict(conn, owner(user), situation=situation, audience="everyone")
+    assert first["type"] == "needs", first
+    assert first["needs"] and all(n["what"] for n in first["needs"])
+    facts = [
+        {"what": "free slots tomorrow", "value": "14:00-16:00"},
+        {"what": "other calls tomorrow", "value": "none between 13:00 and 17:00"},
+    ]
+    second = await predict(conn, owner(user), situation=situation, audience="everyone", facts=facts)
+    assert second["type"] == "answer", second
