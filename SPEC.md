@@ -1,6 +1,8 @@
 # wwyd — "what would you do"
 
 Status: **approved** design (2026-10-18). Key decisions and their reasoning are in §17.
+Revised and approved 2026-10-19: episode records, organic categories, analyzers (D17–D22);
+code follows at M7 and implements the typed records of the 2026-10-18 design until then.
 Implementation progress is tracked in §16 and CHANGELOG.md.
 
 wwyd is an MCP server that holds one person's character and ways of acting: how they
@@ -47,14 +49,22 @@ These are the rules the whole design is checked against. Each one has a test (§
 
 | # | Invariant | How it is enforced |
 |---|---|---|
-| P1 | **Raw input is never persisted.** `ingest_raw` records live only in process memory until the job finishes or fails. They never reach the DB, logs, error reports, exports or the change log. | Raw records are held only by the job object; no SQL table has a column for them. Logging filter drops tool arguments at every level; tracebacks are logged without locals or argument reprs; the SDK's request logging is disabled. `PRAGMA secure_delete=ON`. Privacy canary test. |
-| P2 | **No contact identities.** No names, phone numbers, emails, messenger IDs or hashes of them. | Record schemas have no such fields (`additionalProperties: false`). Audiences are owner-defined names. Derived claims pass the **verbatim guard** (§7.4) before they are stored. |
-| P3 | **No live data.** Calendar events carry times, attendee counts and the owner's response, never titles, attendees or locations. | Record schemas reject unknown fields. Facts passed to `predict` are used for that call only and never stored. |
+| P1 | **Raw input is never persisted.** `ingest_raw` episodes live only in process memory (the job object, and a sandboxed analyzer's stdin) until the job finishes or fails. They never reach the DB, logs, error reports, exports or the change log. What is persisted is derived: claims, analyzer sources and statements, analyzer state counters, category paths and descriptions, label vocabularies. | Episodes are held only by the job object and reach the sandbox as in-memory stdin bytes, never a file; no SQL table has a column for them. Every persisted derived text passes the **verbatim guard** (§7.7); analyzer state keys pass the host key filter (§7.2). Logging filter drops tool arguments at every level; tracebacks are logged without locals or argument reprs; the SDK's request logging is disabled; sandbox stderr is discarded. `PRAGMA secure_delete=ON`. Privacy canary test. |
+| P2 | **No contact identities.** No names, phone numbers, emails, messenger IDs or hashes of them. | Episode free-text fields (`situation`, `decision`, `said`, `where`) are never stored; every persisted derived artefact passes the guard or the key filter (P1). Episodes have no identity fields (`additionalProperties: false`). Audiences are owner-defined names. `docs/ecosystem.md` tells clients to leave names out of episodes and category paths. Residual risk below. |
+| P3 | **No live data.** An episode may describe live data (a meeting, a mail) for derivation, but none of it is kept. | Free-text fields are never stored, only guarded derived artefacts; `where` is coarse context by contract (never an address). Facts passed to `predict` are used for that call only and never stored. |
 | P4 | **Third parties see only what the owner allowed.** | Claim filtering happens in SQL before the LLM call (§8.3). The prompt is never relied on to hide anything. |
 | P5 | **Answers to third parties are disclosed as automated.** | `predict` always returns a server-built `disclosure` string (EU AI Act Art. 50). |
 | P6 | **Audit without content.** Every `predict` call is logged with time, client, audience, outcome and confidence, never the situation text, facts or answer. | Audit table has no text columns. |
 
-One flow leaves the server on purpose: **raw input and `predict` situations are sent to the
+**Residual risk (P2).** The key filter (§7.2) cannot recognise a name the owner always
+writes in lowercase and uses often (≥ 5 episodes on ≥ 3 days): it can survive as a
+stylometry or analyzer state key. Mitigations: every derived claim starts `pending` for
+owner review, `get_analyzer` shows every state key, and the canary suite includes a
+lowercase-but-concentrated name (§13). Category paths are client-supplied labels like
+audience names: they pass the guard's regex part, and keeping names out of them is the
+client's job (§4.4).
+
+One flow leaves the server on purpose: **raw episodes and `predict` situations are sent to the
 LLM backend the persona is configured with.** With a local backend (LocalAI, Ollama,
 LM Studio) nothing leaves the machine. With OpenRouter or the instance's shared default the
 provider sees that text. The settings tool and the account page state this plainly, and a
@@ -71,7 +81,7 @@ persona can switch `ingest_raw` to code-only derivation (`llm_for_ingest: false`
   harness, script) │ /login /consent /account /admin /setup /invite /reset   (4 HTML pages)  │
                    │                                                                         │
                    │ store (SQL)   predict   ingest jobs   compaction   limits   LLM client  │
-                   │      │                     ▲  raw records live only here (memory)      │
+                   │      │                     ▲  raw episodes live only here (memory)     │
                    └──────┼─────────────────────┼────────────────────────────────────────────┘
                           ▼                     │
                  ~/.wwyd/wwyd.db (SQLite, WAL)   └── nightly scheduler (asyncio task)
@@ -80,7 +90,8 @@ persona can switch `ingest_raw` to code-only derivation (`llm_for_ingest: false`
 - **Stack:** Python ≥ 3.12, uv, FastAPI, official MCP Python SDK `mcp>=2.3,<3`
   (`mcp.server.MCPServer`, formerly FastMCP), SQLite in WAL mode with plain SQL migrations,
   `argon2-cffi`, `httpx` for the OpenAI-compatible LLM client, `cryptography` (Fernet) to
-  encrypt LLM API keys at rest, Jinja2 for the four pages.
+  encrypt LLM API keys at rest, Jinja2 for the four pages, `wasmtime>=49,<50` with a
+  shipped CPython 3.15 WASI build for the analyzer sandbox (§7.5).
 - **Transports:** Streamable HTTP at `/mcp` (multi-user, OAuth or API key) and stdio
   (`wwyd stdio --user <login>`: local, single user, owner scope, no OAuth, per the MCP
   spec's guidance for stdio). Limits still apply on stdio. If the login does not exist yet,
@@ -113,7 +124,8 @@ persona can switch `ingest_raw` to code-only derivation (`llm_for_ingest: false`
 | Subsystem | Source of truth | Derived from it |
 |---|---|---|
 | Persona content | `claims` rows (+ `claim_audiences`) | FTS index, `get_persona` text, exports, predict context |
-| Habit statistics | per-claim sufficient statistics in `evidence.stats` (fixed-size histograms) | the claim's numbers and wording |
+| Habit and style statistics | `analyzer_state` counters (per analyzer, month, metric, key) | keyed claims' numbers and text, rendered by code |
+| Categories | `categories` + `category_aliases` | routing paths, claim placement of old paths |
 | Consolidation history | `changes` rows (with before/after snapshots of the claims touched) | undo, proposals |
 | Access | `grants`, `api_keys` (hashed) | access/refresh tokens; every request re-checks the DB |
 | Limits | admin ceilings + user overrides + config defaults | effective limit = min of the three |
@@ -124,7 +136,7 @@ persona can switch `ingest_raw` to code-only derivation (`llm_for_ingest: false`
 ## 4. Data model
 
 IDs are random and kind-prefixed (`usr_`, `aud_`, `cat_`, `clm_`, `chg_`, `job_`, `key_`,
-`grt_`), following MacPaw Portable Memory. Timestamps are ISO-8601 UTC with `Z`.
+`grt_`, `anl_`), following MacPaw Portable Memory. Timestamps are ISO-8601 UTC with `Z`.
 Field names are snake_case everywhere (SQL, MCP tools, export); see D3.
 
 ### 4.1 user
@@ -133,7 +145,7 @@ password_changed_at`. One persona per user, created with the user.
 
 ### 4.2 persona
 `id, user_id (unique), display_name` (used in the disclosure), `timezone` (IANA, used by
-detectors and the nightly pass), `settings` (JSON: LLM backend, `llm_for_ingest`,
+analyzers and the nightly pass; the host converts every episode time to it first), `settings` (JSON: LLM backend, `llm_for_ingest`,
 `escalate_below`, `disclosure_template`, own limit overrides, budget), `spend_capped_at`,
 `created_at`.
 
@@ -146,7 +158,7 @@ detectors and the nightly pass), `settings` (JSON: LLM backend, `llm_for_ingest`
 - Exactly one audience per persona has `is_default = true`. A new persona starts with one
   default audience, `everyone` ("anyone not in another group"), which the owner can rename.
 - `default` is a reserved alias, not a name: every tool that takes an audience name
-  (`predict`, `get_persona`, `add_claims`, `list_claims`, `ingest_raw` records, …) resolves
+  (`predict`, `get_persona`, `add_claims`, `list_claims`, `ingest_raw` episodes, …) resolves
   `default` to the persona's default audience, whatever it is called, with no fallback
   hint. Creating, renaming or importing an audience named `default` fails with `invalid`.
   Scopes are different: `respond:` scopes name real audiences, and `respond:default` is
@@ -155,19 +167,41 @@ detectors and the nightly pass), `settings` (JSON: LLM backend, `llm_for_ingest`
 
 ### 4.4 category
 `id, persona_id, parent_id, name, description, path` (materialised, e.g.
-`communication/style`), at most 3 levels. Seeded per persona:
+`communication/style`), at most 3 levels. Seeded per persona as a starter vocabulary:
 
 ```
 communication/style        communication/boundaries
 work/meetings              work/decisions
 schedule/routine
-food  travel  money  health  family  hobbies  tech
+food  travel  money  health  family  hobbies  tech  other
 ```
 
-Each seeded category has a one-line description, because the routing LLM sees only paths
-and descriptions. Derivation must reuse existing categories. It may *propose* a new one by
-putting `proposed_category: "<path>"` on a pending claim (stored under the closest existing
-parent); approving the claim with `create_category: true` creates it.
+- **Path normalisation** (every tool and episode): NFKC, casefold, spaces → `-`; segments
+  of Unicode letters, digits, `-` and `_`, starting with a letter or digit, ≤ 40 chars;
+  depth ≤ 3. This is a superset of the former ASCII rule `[a-z0-9][a-z0-9_-]{0,39}`, so
+  existing paths stay valid. Audience names stay ASCII slugs (§4.3).
+- **Organic creation.** An episode's `category` is resolved in this order: an existing
+  path; an alias (longest matching prefix in `category_aliases`, the rest of the path
+  appended); otherwise the path and its missing parents are created at ingest. One batched
+  LLM call per job writes one-line descriptions for the new paths (routing sees only paths
+  and descriptions); without an LLM step the description stays empty. Creations are one
+  `category_create` change per job (undoable while the categories hold no claims).
+- **Limits.** `max_categories` per persona (200, seeds included) and
+  `new_categories_per_job` (20). Beyond either, the episode maps to the deepest existing
+  ancestor of its path, or to `other` when none exists, and is counted in
+  `unmapped_categories`.
+- **Aliases.** `category_aliases (persona_id, path, category_id)`: after a merge or rename
+  the old path keeps routing incoming episodes to the new category.
+- **Placement of derived claims.** A claim derived from an episode lands in the episode's
+  category or one of its existing descendants (the model sees that subtree). It may
+  *propose* anything else by putting `proposed_category: "<path>"` on the pending claim
+  (stored under the closest existing parent); approving it with `create_category: true`
+  creates it.
+- **Guard vocabulary.** Seeded categories and those the owner creates with
+  `upsert_category` count as the persona's own vocabulary for the guard (§7.7); categories
+  created from episodes do not, so a client cannot whitelist a name by naming a category
+  after it.
+- Nightly compaction merges synonym categories and splits large ones (§10.6).
 
 ### 4.5 claim
 
@@ -182,7 +216,7 @@ parent); approving the claim with `create_category: true` creates it.
 | `status` | `pending \| approved \| rejected \| archived` | `archived` is added for compaction |
 | `confidence` | 0..1 | |
 | `evidence` | object | aggregate only, see below |
-| `key` | string, nullable | stable key of a code detector, e.g. `habit:meeting_buffer`; unique per persona among non-archived claims |
+| `key` | string, nullable | stable key of an analyzer's claim: `builtin:<name>:<scope_id>` (builtin, §7.2) or `anl:<id>` (LLM analyzer, §7.4); unique per persona among non-archived claims |
 | `origin` | `derived \| added \| imported \| owner` | |
 | `proposed_category` | path, nullable | |
 | `superseded_by` | `clm_…`, nullable | set on the loser of a contradiction |
@@ -193,24 +227,26 @@ parent); approving the claim with `create_category: true` creates it.
 
 ```json
 {
-  "sources": {"calendar_event": 212, "message": 0, "decision": 3, "note": 0},
+  "sources": {"statement": 0, "reply": 0, "decision": 3, "analyzer": 212},
   "share": 0.87,
   "period": "2026-04..2026-10",
-  "stats": {"gap_minutes_hist": [0, 4, 31, 120, 57]}
+  "stats": {"n": {"2026-09": 40, "2026-10": 31}, "hits": {"2026-09": 35, "2026-10": 27}}
 }
 ```
 
-`sources` are counters that are summed on merge; `period` widens; `stats` holds the
-detector's fixed-size sufficient statistics (histogram buckets, counts), so two runs merge
-by adding buckets and recomputing the numbers. LLM-derived claims have `sources` and
-`period` only.
+`sources` count the episodes behind the claim by class (§7.1; `analyzer` = episodes an
+analyzer counted) and are summed on merge; `period` widens. `stats` of a keyed claim holds
+the numbers its text was rendered from (for an LLM analyzer, `n` and `hits` per month); the
+counters themselves live in `analyzer_state` (§4.6), so a re-run re-renders the keyed claim
+by code and never duplicates it. LLM-derived claims have `sources` and `period` only.
 
 Examples:
 - style, audiences `[work-slack]`: "Short, no greeting, answers within minutes during work
   hours."
 - decision_rule, audiences `all`: "Accepts a meeting only if there is a free slot of at
   least 20 minutes and 10 minutes of buffer before and after other calls."
-- habit, key `habit:meeting_free_slots`: "No meetings on Friday afternoons."
+- habit, key `builtin:time_activity:cat_…` (`work/meetings`): "No meetings on Friday
+  afternoons (0 of 212 meetings in 6 months)."
 - boundary: "Never discusses salary in writing."
 
 **Rejected claims are kept as negative memory**: a new derivation that matches a rejected
@@ -219,18 +255,30 @@ cleared) and count against no budget.
 
 ### 4.6 Other tables
 - `changes`: `id, persona_id, ts, op (merge|absorb|supersede|decay|archive_budget|purge|
-  restore|category_merge|category_rename), state (applied|proposed|dismissed|undone|
+  restore|category_create|category_merge|category_rename|category_split), state (applied|proposed|dismissed|undone|
   expired), reason, job_id, payload` (before/after snapshots of the claims touched; these
-  are derived claims, never raw input). Purge turns the entries for that claim into
+  are derived claims, never raw input; category changes also snapshot the categories,
+  aliases, analyzers and analyzer state they touch). Purge turns the entries for that claim into
   `expired` (not undoable).
 - `jobs`: `id, persona_id, status (queued|running|done|partial|failed|interrupted),
-  created_at, finished_at, counts` (records by type, claims created/absorbed/dropped_by_guard,
-  skip counters), `error_code`, `remaining_records` (JSON array of batch indices not yet
+  created_at, finished_at, counts` (episodes by class, claims created/absorbed/dropped_by_guard,
+  categories created, `unmapped_categories`, analyzer counters, skip counters), `error_code`, `remaining_records` (JSON array of batch indices not yet
   processed; written when a job ends `partial`). No content.
 - `ingest_sources`: `persona_id, source, last_ts, last_job_at, records_total` — the
-  per-source watermark of §7.1 (an owner-chosen slug, the largest processed record
-  timestamp, when a job last ended for it, and how many records it has processed in
+  per-source watermark of §7.1 (an owner-chosen slug, the largest processed episode
+  timestamp, when a job last ended for it, and how many episodes it has processed in
   total). No content.
+- `category_aliases`: `persona_id, path, category_id` (§4.4).
+- `category_labels`: `persona_id, category_id, field (decision|situation|tag), label` —
+  the guarded label and tag vocabulary of §7.3 (label = one path segment). Value → label
+  mappings are never stored.
+- `analyzers`: `id (anl_…), persona_id, scope (category_id | audience_id), origin
+  (builtin|llm), name ≤ 200, statement_template, kind, source, status
+  (candidate|active|disabled|retired), runs, failures, created_at, last_run_at, claim_id`
+  (§7.2, §7.4). `source` ≤ 20 KB, empty for builtins (shipped code, found by `name`) and for
+  `retired` LLM analyzers.
+- `analyzer_state`: `analyzer_id, month (YYYY-MM), metric, key, value` — numbers only,
+  keys filtered (§7.2).
 - `audit`: `id, persona_id, ts, client_name, grant_id|api_key_id, scope, audience_id,
   audience_fallback (bool), outcome (answer|needs|escalate:<code>), confidence,
   llm_tokens, latency_ms`. Kept 90 days.
@@ -253,16 +301,28 @@ A versioned JSON Schema (draft 2020-12). One JSON document:
   "persona": {"display_name": "…", "timezone": "Europe/Berlin"},
   "audiences": [{"name": "family", "description": "…", "is_default": false}],
   "categories": [{"path": "work/meetings", "description": "…"}],
+  "category_aliases": [{"path": "films", "category": "movies"}],
+  "category_labels": [{"category": "work/meetings", "field": "decision", "label": "declined"}],
+  "analyzers": [{"origin": "builtin", "name": "time_gaps", "scope": {"category": "work/meetings"},
+                 "status": "active", "state": {"gap_min": {"2026-10": {"10_15": 31}}}},
+                {"origin": "llm", "name": "…", "scope": {"category": "hobbies/films"},
+                 "statement_template": "…", "kind": "preference", "source": "…",
+                 "status": "active", "claim": "clm_…", "state": {…}}],
   "claims": [{"id": "clm_…", "kind": "habit", "category": "work/meetings", "text": "…",
               "audiences": "all", "visibility": "shared", "status": "approved",
-              "confidence": 0.8, "evidence": {…}, "key": "habit:meeting_buffer",
+              "confidence": 0.8, "evidence": {…}, "key": "builtin:time_gaps:cat_…",
               "origin": "derived", "superseded_by": null,
               "created_at": "…", "updated_at": "…", "last_evidence_at": "…"}]
 }
 ```
 
-Excluded: LLM keys, limits, audit, change log, auth data. Archived claims are included with
-`status: "archived"`. Import modes: `merge` (default; existing IDs are updated, new ones
+Builtin analyzers are exported by name with their state, LLM analyzers with source,
+statement, status and state; scopes and claim links are by path, audience name and claim ID.
+Excluded: LLM keys, limits, audit, change log, auth data, and raw data (none is stored).
+Archived claims are included with `status: "archived"`. Import validates analyzer state
+against the output contract (§7.2) and its keys against the guard's regex part (there is
+no batch to test frequency against); LLM analyzers keep their status, since they only ever
+run in the sandbox. The format is still v1: it is unreleased and was extended in place. Import modes: `merge` (default; existing IDs are updated, new ones
 added, audiences and categories matched by name/path) and `replace` (wipe persona content
 first).
 
@@ -298,39 +358,47 @@ schema; we use its names where they mean the same thing (`id` prefixes, `text`,
 All tools return structured JSON (`structuredContent` plus a text mirror). Errors use MCP
 tool errors with a stable `code` (`not_found`, `forbidden`, `invalid`, `rate_limited`,
 `spend_cap`, `too_large`, `conflict`). Pagination: `limit` (default 50, max 200) and an
-opaque `cursor`. 27 tools; read-only resources are a later option.
+opaque `cursor`. 30 tools; read-only resources are a later option.
 
 Shapes below are abbreviated JSON Schema. `?` marks optional fields.
 
 ### 6.1 Ingest
 
-**`ingest_raw`** (owner) — accepts a batch, returns at once, derives in the background, then
-drops the input.
+**`ingest_raw`** (owner) — accepts a batch of episodes, returns at once, derives in the
+background, then drops the input.
 ```
-in:  { records: Record[1..1000], llm_for_ingest?: bool,      // batch ≤ 2 MB serialized
+in:  { episodes: Episode[1..1000], llm_for_ingest?: bool,   // batch ≤ 2 MB serialized
        source?: slug }                                      // [a-z0-9][a-z0-9_-]{0,39}
 out: { job_id, accepted: int, estimated_tokens: int, remaining_tokens: int | null }
 
-Record = one of
-  { type: "message", from_owner: bool, audience?: string, text: string ≤ 4000,
-    ts: datetime, thread: string ≤ 64, position?: int }
-      // thread is an opaque batch-local label; it is used to pair a non-owner message
-      // with the owner's reply (latency) and is discarded with the batch
-  { type: "call_transcript", audience?: string, ts: datetime,
-    turns: [{ speaker: "owner"|"other", text: string }] }
-  { type: "calendar_event", start: datetime, end: datetime, attendees: int ≥ 0,
-    response: "accepted"|"declined"|"tentative"|"organizer"|"none",
-    recurring?: bool, online?: bool }                  // no title, no attendees, no location
-  { type: "decision", situation: string, choice: string, audience?: string, ts?: datetime }
-  { type: "note", text: string, ts?: datetime }        // owner's free text about themselves
+Episode = { when?: datetime | { start: datetime, end?: datetime },
+            where?: string ≤ 100,      // coarse context only: "home", "online", "work Slack"; never an address
+            audience?: string,         // audience name or "default"
+            category: string,          // required; a category path, created if unknown (§4.4)
+            situation?: string ≤ 8000, // what happened / was offered / was said to the owner
+            decision?: string ≤ 4000,  // what the owner did, described by the client
+            said?: string ≤ 20000 }    // the owner's verbatim words
 ```
-Every record object has `additionalProperties: false`. An unknown `audience` is mapped to
-the default audience and counted in the job's `unknown_audiences` counter.
+Every episode has `additionalProperties: false` and at least one of `decision` / `said`.
+An unknown `audience` is mapped to the default audience and counted in the job's
+`unknown_audiences` counter. Shapes (one type for every data source; the domain lives in
+`category`, D17):
+- a statement about self (the former note): `said`, no `situation`;
+- a chat reply: `situation` = the incoming message(s), `said` = the reply;
+- a choice (meeting invite, film, purchase): `situation` + `decision` ("declined",
+  "watched to the end, 4/5");
+- a call: `situation` = what the others said, `said` = the owner's turns.
 
-`accepted` is the number of valid records received. `estimated_tokens` is a conservative
+`situation` may contain others' words; `decision` is written by the client, not the owner.
+Only `said` counts as owner text (stylometry, guard; §7.7). An interval `when` is the
+episode's span: a meeting's length, or incoming message → reply (reply latency). The two
+meanings must not be mixed in one category. An episode's timestamp is `when` or
+`when.start`.
+
+`accepted` is the number of valid episodes received. `estimated_tokens` is a conservative
 estimate of the LLM tokens the job will use (0 when no LLM step runs; §7.1); `remaining_tokens` is
 what is left of today's `llm_tokens_per_day` for the user (0 when the spend cap is reached,
-`null` when unlimited). With `source`, records already covered by that source's watermark
+`null` when unlimited). With `source`, episodes already covered by that source's watermark
 are skipped (§7.1).
 
 **`add_claims`** (owner) — claims derived elsewhere (a local model, another AI's memory).
@@ -350,12 +418,14 @@ Claims land as `pending`; `status: "approved"` is honoured for owner callers. Wi
 error_code?, remaining_records?: int[], retry_after?: int }`. `status` is `queued |
 running | done | partial | failed | interrupted`. `partial`: the job stopped early on the
 daily token limit (`rate_limited`), the spend cap (`spend_cap`) or LLM unavailability
-(`llm_unavailable`) after storing everything derived so far and running the detectors on
-the processed records; `remaining_records` lists the
+(`llm_unavailable`) after storing everything derived so far and running the analyzers on
+the processed episodes; `remaining_records` lists the
 indices (into the original batch) that were not processed, so the harness resends exactly
 those; `retry_after` is the seconds to the daily reset (`rate_limited`) or the month end
-(`spend_cap`). An `interrupted` job is resent in full. Counters include `skipped_seen` (records at or below the source watermark),
-`skipped_saturated` (style records skipped by saturation) and `saturated_audiences`.
+(`spend_cap`). An `interrupted` job is resent in full. Counters include `skipped_seen` (episodes at or below the source watermark),
+`skipped_saturated` (replies skipped by saturation), `saturated_audiences`,
+`categories_created`, `unmapped_categories`, `analyzers_proposed` / `_accepted` /
+`_rejected`, `sandbox_errors` and `skipped_sandbox_budget`.
 
 **`list_sources`** (owner, read-only) — `out: { sources: [{ source, last_ts, last_job_at,
 records_total }] }`. **`reset_source`** (owner) — `in: { source }` → `out: { deleted: bool }`;
@@ -384,13 +454,15 @@ drops that watermark so the next batch with this `source` is processed in full.
 - **`delete_audience`** — `in: { name, reassign_to?: string }`. Refused for the default
   audience. Claims that applied only to it are reassigned or, without `reassign_to`, the call
   fails with `conflict` and the count.
-- **`list_categories`** → tree with `claim_count`.
-- **`upsert_category`** — `in: { path, description?, rename_to? }` (depth ≤ 3).
-- **`merge_categories`** — `in: { from: [path], into: path }`; recorded in the change log.
+- **`list_categories`** → tree with `claim_count` and `aliases`.
+- **`upsert_category`** — `in: { path, description?, rename_to? }` (depth ≤ 3); a rename
+  leaves the old path as an alias (§4.4).
+- **`merge_categories`** — `in: { from: [path], into: path }`; recorded in the change log;
+  the `from` paths become aliases and their analyzers move to `into` (§10.6).
 
 ### 6.4 Compaction and logs (owner)
 - **`compact`** — `in: { apply?: bool = false, steps?: ["dedupe","contradictions","decay",
-  "budget","purge"] }` → `{ changes: [{ id?, op, state, claims, reason }] }`. With
+  "budget","purge","category_merge","category_split"] }` → `{ changes: [{ id?, op, state, claims, reason }] }`. With
   `apply=false` nothing is written.
 - **`list_changes`** — `in: { state?, op?, limit?, cursor? }` → `{ changes }`
 - **`undo_change`** — `in: { id }` → restores the before-snapshot; fails with `conflict` if a
@@ -444,28 +516,42 @@ that fact (same `what`, or same non-`other` kind) again.
 - **`update_settings`** — any of the above that the user may change; limits only downward
   from the admin ceilings.
 
+### 6.7 Analyzers (owner)
+- **`list_analyzers`** — `in: { scope?: path | audience, status?, limit?, cursor? }` →
+  `{ analyzers: [{ id, origin, name, scope, kind, status, runs, failures, last_run_at,
+  claim_id }], next_cursor? }`
+- **`get_analyzer`** — `in: { id }` → the row with `statement_template`, `source` (LLM
+  analyzers) and a state summary: metrics, months, key count per metric, and the keys.
+- **`update_analyzer`** — `in: { id, status: "active"|"disabled"|"retired" }` → `{ analyzer }`.
+  Retiring clears the source and keeps the statement as negative memory (§7.4).
+
 ---
 
 ## 7. Ingest and derivation
 
 ### 7.1 Jobs
 `ingest_raw` validates and size-checks the batch, writes a `jobs` row (counts only), puts
-the records on an in-memory queue and returns. One worker per persona (limit
-`concurrent_jobs`, default 1). The records are released when the job ends, in `finally`.
+the episodes on an in-memory queue and returns. One worker per persona (limit
+`concurrent_jobs`, default 1). The episodes are released when the job ends, in `finally`.
 On restart, `running`/`queued` jobs become `interrupted` and the harness resends; there is
 nothing to resume because nothing was saved (P1).
 
-- **Order and progress.** The LLM calls run first, in order (style per audience,
-  chronological within an audience; notes; decisions); the code detectors run last, always
-  (also with no LLM step, no budget left, or after an LLM error stopped the LLM phase), over
-  the *processed* records only. Every parsed record keeps its batch index, and each call
-  knows the indices it covers. A record is processed when every call that contains it has
-  completed; records in no call (calendar events, trailing unanswered non-owner messages,
-  every record when no LLM step runs) are processed. A style segment covers the owner's
-  message and every non-owner message waiting before it in the thread, so a reply-latency
-  pair is processed or remaining as a whole. Remaining records therefore reach the habit
-  stats only through their resend: each record is counted once across a job and its
-  resends. An `interrupted` job ran no detectors and is resent in full.
+- **Preparation.** Before anything else the host converts every time to the persona
+  timezone, resolves audiences and category paths (§4.4) and classifies each episode:
+  *statement* (no `situation`), *reply* (`said` + `situation`), *decision* (`decision` +
+  `situation`); an episode with both `said` and `decision` is a reply and a decision. New
+  categories get their descriptions in one batched call first (§4.4).
+- **Order and progress.** 1. annotation (§7.3); 2. the LLM passes (§7.6): statements,
+  replies per audience in chronological order, decisions; 3. analyzer authoring (§7.4);
+  4. the analyzers (builtin and active LLM, §7.2) over the *processed* episodes only. Step
+  4 always runs (also with no LLM step, no budget left, or after an LLM error stopped the
+  LLM phase). Every parsed episode keeps its batch index, and each call knows the indices
+  it covers. An episode is processed when every annotation and pass call that contains it
+  has completed; episodes in no such call (every episode when no LLM step runs) are
+  processed. Description and authoring calls cover no episodes (authoring sees only
+  processed ones). Remaining episodes therefore reach analyzer state only through their
+  resend: each episode is counted once across a job and its resends. An `interrupted` job
+  ran no analyzers and is resent in full.
 - **Flush.** Candidates are deduplicated within a window and stored with absorb
   (`origin: derived`) every 20 LLM calls and once more when the job ends, including when an
   LLM error ends it; duplicates across windows are left to absorb and compaction.
@@ -473,75 +559,179 @@ nothing to resume because nothing was saved (P1).
 - **Budget.** Each call's cost is estimated as (chars of system + user) / 3 (conservative
   for Cyrillic and most non-English text) plus a fixed output allowance per purpose. This
   is a conservative estimate, not a bound: the job stops before a call whose estimate does
-  not fit, so the daily cap can be overrun by at most one call's actual excess. Before each call the job compares the
-  estimate with what is left of today's token budget and with the spend state, besides the
-  limiter's own check; a call that would not fit is not started. The job then ends
-  `partial` (`rate_limited` / `spend_cap`) with `remaining_records`; so does an LLM error
-  raised by the backend (`llm_unavailable` included). A batch submitted with no budget
-  left is still accepted: detectors run and the job ends `partial` before the first call.
-  `failed` is kept for real errors.
-- **Saturation (style only).** When 5 consecutive style calls of one audience produce no
+  not fit, so the daily cap can be overrun by at most one call's actual excess. Before each
+  call the job compares the estimate with what is left of today's token budget and with
+  the spend state, besides the limiter's own check; a call that would not fit is not
+  started. The job then ends `partial` (`rate_limited` / `spend_cap`) with
+  `remaining_records`; so does an LLM error raised by the backend (`llm_unavailable`
+  included). A batch submitted with no budget left is still accepted: analyzers run and the
+  job ends `partial` before the first call. `failed` is kept for real errors. Sandbox time
+  has its own daily budget (§7.5); running out of it skips LLM analyzers for the rest of
+  the job (`skipped_sandbox_budget`) without ending it `partial`.
+- **Saturation (replies only).** When 5 consecutive reply calls of one audience produce no
   new candidate (each was a duplicate of one derived earlier in the job or of an existing
   pending/approved/rejected claim: same kind and category, equal normalised text or FTS +
-  token Jaccard ≥ 0.6, no LLM judge), the audience's remaining style calls are skipped.
-  Their records count as processed (`skipped_saturated`, `saturated_audiences`). Notes and
-  decisions are never skipped.
-- **Source watermark.** With `source`, records whose timestamp (`ts`, `start` for
-  calendar events) is ≤ the stored `last_ts` are dropped before derivation
-  (`skipped_seen`); records without a timestamp are never skipped. When the job ends: `done`
-  → `last_ts` = the largest processed timestamp; `partial` → the largest processed
-  timestamp strictly below the earliest remaining record's timestamp (so resending the
-  remaining records is not skipped); `failed`/`interrupted` leave it alone. It never moves
-  backwards. `records_total` adds the processed records. Only timestamps and counts are
-  stored.
+  token Jaccard ≥ 0.6, no LLM judge), the audience's remaining reply calls are skipped.
+  Their episodes count as processed (`skipped_saturated`, `saturated_audiences`).
+  Statements and decisions are never skipped.
+- **Source watermark.** With `source`, episodes whose timestamp (`when` or `when.start`)
+  is ≤ the stored `last_ts` are dropped before derivation (`skipped_seen`); episodes
+  without a timestamp are never skipped. When the job ends: `done` → `last_ts` = the
+  largest processed timestamp; `partial` → the largest processed timestamp strictly below
+  the earliest remaining episode's timestamp (so resending the remaining episodes is not
+  skipped); `failed`/`interrupted` leave it alone. It never moves backwards.
+  `records_total` adds the processed episodes. Only timestamps and counts are stored.
 
-### 7.2 Habit detectors (code, statistics)
-Habits nobody puts into words are computed in code. Each detector has a stable `key`, a
-minimum sample size, and produces at most one or two claims with numbers in `evidence`.
-Re-runs update the keyed claim by merging `evidence.stats` (§4.5), so they never duplicate.
-Each is documented in `docs/habits.md` with its formula, thresholds and a synthetic-calendar
-test.
+### 7.2 Analyzers
+An analyzer is a stored program bound to a category subtree (or to an audience, for style)
+that runs over the processed episodes of each job and produces only mergeable counters
+(D19). Two origins:
+- **builtin** — shipped, trusted code; runs natively in the host process. Rows are created
+  lazily, one per (name, scope) the first time a job has episodes for that scope; they do
+  not count against `max_analyzers`.
+- **llm** — written by the LLM (§7.4); runs only in the sandbox (§7.5).
 
-| Key | Input | Output claim (example) |
-|---|---|---|
-| `habit:meeting_buffer` | accepted calendar events, same-day gaps | "Keeps ≥10 min between calls (87% of 212 gaps)." |
-| `habit:meeting_length` | accepted event durations | "Meetings are typically 25 or 50 min." |
-| `habit:meeting_free_slots` | weekday × half-day acceptance density | "No meetings on Friday afternoons." |
-| `rule:accept_buffer` | responses vs. the gap the event would leave | decision_rule: "Declines invites that leave <10 min buffer." |
-| `rule:accept_size` | response by attendee count | decision_rule: "Usually declines meetings with >8 attendees." |
-| `habit:active_hours` | owner message timestamps, accepted events | "Active 08:30–19:00 on weekdays, rarely on Sunday." |
-| `habit:reply_latency:<aud>` | thread pairs other → owner | style: "Replies to work-slack within ~4 min in work hours, next morning otherwise." |
-| `habit:message_length:<aud>` | owner message lengths | style: "Writes to family in 1–2 short lines." |
+**Input.** The processed episodes of the job in the analyzer's scope, as JSON (on stdin in
+the sandbox), with host-computed fields: `local_start`, `weekday`, `hour`, `month`,
+`duration_s`, `labels` (§7.3), plus `category`, `audience`, `where` and the text fields. A
+shipped helper module `wwyd_helpers` (tokenize, sentences, emoji, punctuation, word and
+bigram counting) keeps LLM code short; builtins use the same module.
 
+**Output contract** (both origins): `{metric: {"YYYY-MM": {key: number}}}` with finite
+numbers, keys ≤ 64 chars, ≤ 20 metrics, ≤ 200 keys per metric per month, ≤ 1 MB. The host
+validates it, filters the keys, and merges the result into `analyzer_state` by addition.
+Anything invalid fails the run (counted in `sandbox_errors` for LLM analyzers).
+
+**Host key filter** (analyzer code is never trusted with privacy). Each metric declares a
+key class; compound keys join segments with `.`, each checked by its class:
+- `numeric` — buckets such as hours or histogram bins: only digits and `:_-.`;
+- `vocab` — a value from host-known vocabulary: audience names, weekday names, the
+  category's labels (§7.3), the reserved key `_`;
+- `text` (the default, and the only class besides `_` an LLM analyzer may use for words) —
+  kept only if it passes the guard's regex part (no emails, phones, URLs, handles), is not
+  name-like (capitalised in a non-initial position in ≥ 50% of its non-initial occurrences
+  in the batch; mixed case; contains a digit), and occurs in ≥ 5 distinct episodes on ≥ 3
+  distinct days in the batch.
+Dropped keys are counted, never logged. The filter's residual risk is stated in §2.
+
+**Claims.** Each builtin produces keyed claims (`builtin:<name>:<scope_id>`, IDs so that
+renames keep the key) whose text is rendered by code from the state (templated numbers).
 Thresholds (initial, tunable in code): ≥ 30 samples, share ≥ 0.75 for a rule-like
-statement, period ≥ 3 weeks. Times are evaluated in the persona's timezone; event offsets
-are honoured.
+statement, period ≥ 3 weeks. Re-runs update the numbers and text without the LLM; a keyed
+claim whose numbers no longer pass weakens like a contradiction (approved → proposal,
+§10.2). Each builtin is documented in `docs/habits.md` with its formula, thresholds and a
+synthetic test.
 
-### 7.3 LLM derivation (style and wording only)
-- **Style per audience:** owner messages (with the preceding non-owner message as context)
-  and owner turns of call transcripts, grouped by audience, chunked to ~2500 chars per call.
-  The model returns style/boundary/preference claims as JSON, choosing categories from the
-  existing list or setting `proposed_category`.
-- **Notes:** extracted into claims of any kind.
-- **Decisions:** extracted into `decision_rule` claims when the same pattern shows up at
-  least twice in the batch; single decisions become low-confidence `preference` claims.
+| Builtin | Scope | State | Claim (example) |
+|---|---|---|---|
+| `time_activity` | category | weekday × hour histogram per audience | habit: "No `work/*` episodes on weekends", "Active 08:30–19:00 on weekdays." |
+| `time_duration` | category | histogram of interval durations per audience | habit: "Meetings are typically 25 or 50 min." / style: "Replies within ~4 min." |
+| `time_gaps` | category | same-day gaps between consecutive intervals | habit: "Keeps ≥10 min between calls (87% of 212 gaps)." |
+| `stylometry` | audience | over `said`: length histograms (chars, sentences), share starting lowercase, sentence-ending punctuation (incl. `)))` and none), emoji frequency, word and bigram frequency (`text` keys) | style: "Writes to family in 1–2 short lines, lowercase, no final period." Keyness of the audience vs the owner's overall usage names favourite words. |
+
+**Word usage notes.** When the favourite-words set of an audience changes, the host
+extracts ≤ 5 short snippets (±5 words, from `said` only, in memory) per word and one LLM
+call writes a usage-note style claim (`builtin:word_usage:<audience_id>`), guarded (§7.7).
+
+### 7.3 Annotation (LLM labels, code counts)
+Per category per job, run before the LLM passes (D20):
+- **Few distinct values.** If `decision` has ≤ 50 distinct normalised values (or
+  `situation` ≤ 200), one LLM call maps the distinct values to labels (decision →
+  `accepted` / `declined` / `other`; situation → a type such as `1-1`, `standup`,
+  `interview`).
+- **Free text** with many distinct values (film synopses): batched tagging, ≤ 20 episodes
+  per call, ≤ 5 tags each, reusing the category's tag vocabulary.
+- Label and tag *names* are kept per category in `category_labels` (guarded; one path
+  segment each) for consistency across jobs. The value → label mappings are not stored
+  (they could contain names): annotation is redone per batch, cheap after dedupe. Labels
+  are in-memory fields for the analyzers and the LLM passes.
+
+### 7.4 LLM analyzers (hypothesis loop)
+1. **Trigger:** a category with ≥ `analyzer_min_episodes` (100) processed episodes in the
+   job; at most one authoring round per category per job; ≤ `max_analyzers` (50) LLM
+   analyzers per persona, `retired` ones excluded. Since no episodes are kept, discovery
+   needs a batch that is large on its own (a first import, or an occasional larger
+   export); small increments only update the analyzers that already exist.
+2. **Authoring:** one LLM call sees a host-computed profile of the category's episodes
+   (counts, field fill rates, distinct counts, label/tag distributions, time histograms,
+   length stats; aggregates only), ≤ 20 truncated sample episodes, the helper API, the
+   names of existing analyzers (statements of retired ones included) and the category's
+   claims. It returns ≤ 5 hypotheses, each `{statement_template` (placeholders such as
+   `{share}`, `{n}`)`, kind, source}`. An LLM analyzer tests one hypothesis and outputs
+   metrics `n` and `hits` per month (optionally `base_n` / `base_hits`), key `_`. Source
+   ≤ 20 KB; source and statement pass the verbatim guard against the batch before
+   storage, since the model saw samples (§7.7).
+3. **Test:** each runs in the sandbox on the older 70% (by time) of the category's
+   processed episodes and on the recent 30% holdout; test runs write no state. Accept if
+   n ≥ 30, hits/n ≥ 0.75, a one-sided binomial test vs the base rate (base_hits/base_n,
+   else 0.5) passes after Benjamini–Hochberg at q = 0.1 across the round's hypotheses, and
+   the holdout share is ≥ 0.75 too.
+4. **Accepted** → status `active` and a keyed claim `anl:<id>` (`pending`, as every derived
+   claim) whose `evidence.stats` are n/hits per month and whose text is the template filled
+   by code; it joins step 4 of this job (§7.1), which counts every processed episode once.
+   **Rejected** → stored `retired` with its statement only (no source) as negative memory,
+   so it is not proposed again.
+5. **Later jobs** run every active analyzer over the new processed episodes, merge state,
+   recompute the share over the last 12 months and re-render the claim. If the last 3
+   months fall below the threshold, the claim weakens like a contradiction (approved →
+   proposal, §10.2). 3 consecutive sandbox errors → `disabled`.
+
+### 7.5 Sandbox
+LLM analyzers run in wasmtime (`wasmtime>=49,<50`, wheels for Windows, macOS and Linux)
+executing CPython 3.15 built for WASI (upstream `brettcannon/cpython-wasi-build` v3.15.0,
+sha256-pinned) (D18).
+- **Shipped in the py3-none-any wheel:** `python.wasm` with custom sections stripped
+  (~7.8 MB) and a stdlib subset as guest-compiled `.pyc` in `python315.zip` (ZIP_STORED;
+  the wasm has no zlib), plus `wwyd_helpers`: ~3.6 MB compressed. A build script fetches,
+  verifies, strips and packs them at release/CI build time, never at install; the
+  artifacts are gitignored. Tests needing the sandbox skip when they are absent locally;
+  CI builds them.
+- **Module cache:** the compiled module is cached in the data dir, keyed by (wasmtime
+  version, engine config, wasm sha256). The first start compiles once (~0.7 s); later
+  loads take ~2 ms.
+- **Per run:** epoch timeout 10 s (ticker thread), fuel 5e9, memory 256 MiB, output 1 MB.
+  One read-only preopen (the stdlib) and nothing else; no network; env only `PYTHONHOME`.
+  Input is in-memory stdin bytes, never disk. Stdout is captured with the cap; stderr is
+  discarded (tracebacks may contain input); only the exception type name (validated
+  `^[A-Za-z_]\w{0,63}$`) is surfaced. No zoneinfo inside: the host does timezones.
+- **Budgets:** global `sandbox_concurrency` (4); `sandbox_cpu_seconds_per_day` per persona
+  (600, measured as run wall time) (§11).
+- **Measured** (prototype, Apple M-series): trivial run 24 ms, stylometry over 5,000
+  messages ~150 ms, fuel overhead ~17%.
+
+### 7.6 LLM passes
+Which episodes go to which pass (the token-saving switch):
+- **(a) Statements** → claims of any kind (the former notes). Never skipped.
+- **(b) Replies** → `style` / `boundary` / `preference` claims per audience: `said` with
+  its `situation` as context, chunked to ~2500 chars per call, sampled with saturation
+  (§7.1).
+- **(c) Decisions** → `decision_rule` claims when the same pattern shows up at least twice
+  in the batch, single decisions become low-confidence `preference` claims; only for
+  categories with < `analyzer_min_episodes` episodes in the job. Larger volumes go through
+  annotation and analyzers instead (§7.3, §7.4).
+- The model chooses categories within the episode's subtree or sets `proposed_category`
+  (§4.4); labels (§7.3) are passed along.
 - Results are deduplicated among themselves within a flush window (§7.1), then absorbed
-  against existing claims (§10.1); only genuinely new ones become `pending`. Style calls of
-  an audience stop early once it is saturated (§7.1).
-- With `llm_for_ingest: false` only the code detectors run.
+  against existing claims (§10.1); only genuinely new ones become `pending`.
+- With `llm_for_ingest: false` there is no description call, annotation, authoring or LLM
+  pass; builtin and active LLM analyzers still run.
 
-### 7.4 Verbatim guard
-LLMs copy input. Every derived claim text is checked against the batch before it is
+### 7.7 Verbatim guard
+LLMs copy input. Every persisted derived text — claim texts, category descriptions, label
+and tag names, analyzer sources and statements — is checked against the batch before it is
 stored, and dropped (counted as `dropped_by_guard`) if it contains:
 1. an email address, phone number, URL or `@handle` (regex);
 2. any 5-word sequence that appears verbatim in a non-owner text in the batch;
 3. a token that appears in a non-owner text of the batch **and** looks like an identifier
    or a name: contains a digit or mixed case, or is capitalised in a non-initial position,
-   and is not in the persona's own vocabulary (audience names, category names, display
-   name) or a small built-in list (weekdays, months, languages).
+   and is not in the persona's own vocabulary (audience names, seeded and owner-created
+   category names (§4.4), display name) or a small built-in list (weekdays, months,
+   languages).
 
-The guard is deliberately crude and strict (D7). The privacy canary test
-(§13) runs both "token-like" and "name-like" canaries through it.
+Owner text is `said`; `situation`, `decision` and `where` are non-owner text (`decision`
+is the client's description, not the owner's words). The guard is deliberately crude and
+strict (D7). The privacy canary test (§13) runs both "token-like" and "name-like" canaries
+through it.
 
 ---
 
@@ -563,13 +753,21 @@ The guard is deliberately crude and strict (D7). The privacy canary test
    `style` and `boundary` claims for that audience. Capped at a token budget, highest
    confidence × evidence first.
 6. **Answer:** one LLM call with the owner's display name, the audience description, the
-   claims (with IDs), the facts and the situation. The model returns strict JSON:
+   claims (with IDs), the facts and the situation. For `kind: reply`, the approved
+   stylometry claims visible to the resolved audience also contribute explicit
+   parameters: typical length, lowercase-start share, ending punctuation, emoji habits,
+   favourite words and phrases (D22). The model returns strict JSON:
    `{"type":"answer","answer","confidence","used_claims","language"}` or
    `{"type":"needs","needs":[{"kind","what","why"}]}` or
    `{"type":"escalate","escalate":"out_of_persona"|"boundary","reason"}`.
 7. **Post-process:** drop `used_claims` IDs not in the context; `confidence <
    escalate_below` (default 0.6) → `escalate: "low_confidence"`; add the `disclosure`;
    write the audit row; count usage.
+8. **Style post-processing** (reply only, only where the audience's profile is strong,
+   share ≥ 0.8): lowercase the first letter if the owner starts lowercase; drop a trailing
+   period if the owner rarely ends with one; if the answer is longer than 3× the owner's
+   p90 length, ask once to shorten (counts against limits), else keep it. Typos are never
+   injected.
 
 `needs` lets a decision rule ask the harness for facts: "free slots on Tuesday ≥ 20 min with
 10 min buffers", why: "decision_rule clm_…". The harness looks them up and calls again with
@@ -717,7 +915,7 @@ persona's timezone (in-process scheduler, no cron), and on `compact`. Every writ
   and compaction judges the pair later. On any LLM error the pairs are skipped (counted).
   `compact(apply=false)` does not call the judge (it would record usage); it reports the
   pairs it would send as `judge_pending`.
-- Keyed detector claims merge by `key` without any of this.
+- Keyed analyzer claims (§7.2, §7.4) merge by `key` without any of this.
 - **pending + pending:** merge into one pending claim (newer text, summed evidence).
 - **new derivation + approved:** **absorb**: the approved claim keeps its text, evidence is
   summed, `last_evidence_at` and confidence go up (`c = max + (1 − max) × min × 0.5`,
@@ -750,6 +948,21 @@ Archived claims are restorable for 30 days, then hard-deleted (`secure_delete` o
 `undo_change` restores the before-snapshot of any applied change that no later change
 depends on.
 
+### 10.6 Categories (nightly)
+Both steps apply automatically, each with a `changes` row, and are undoable (D21).
+- **`category_merge`:** one LLM judge call over the paths and descriptions of the
+  categories created since the previous run against all others finds synonyms, including
+  across languages (`films` / `movies` / `кино`). The merged category's claims, analyzers
+  and analyzer state move into the target (same-name builtins add their state), and its
+  path becomes an alias.
+- **`category_split`:** a category with more than `split_threshold` (20) non-archived
+  claims, below depth 3: one LLM call groups its claims into 2–5 subcategories (guarded
+  names and descriptions) within depth 3, and the claims move there. Analyzers stay bound
+  to the parent (their subtree still covers the claims).
+- `merge_categories` and renames by the owner write aliases the same way. Undo restores
+  the snapshot (categories, aliases, claims, analyzers, state) and deletes categories the
+  change created if they are empty.
+
 ---
 
 ## 11. Limits and usage
@@ -766,11 +979,20 @@ lower the effective value, never raise it.
 | `predict` per day | per audience | 150 |
 | LLM tokens per day | per persona | 500 000 |
 | `ingest_raw` bytes per day | per persona | 20 MB |
-| batch size | per call | 1000 records / 2 MB |
+| batch size | per call | 1000 episodes / 2 MB |
 | concurrent jobs | per persona | 1 |
 | spend cap | per persona per calendar month | $5 on paid backends; none on local |
 | compaction size budget (§10.4) | per persona | 30 claims per category / 6000 approved tokens |
+| categories (`max_categories`) | per persona | 200 |
+| new categories per job (`new_categories_per_job`) | per persona | 20 |
+| LLM analyzers (`max_analyzers`) | per persona | 50 |
+| sandbox CPU seconds (`sandbox_cpu_seconds_per_day`) | per persona per day | 600 |
 | LLM concurrency | global | 2, queue timeout 60 s, call timeout 120 s |
+| sandbox concurrency (`sandbox_concurrency`) | global | 4 |
+
+The four new per-persona rows are per-user limits (admin ceilings, own lower values, like
+the compaction budget); the concurrency rows are global config. `analyzer_min_episodes`
+(100) and `split_threshold` (20) are instance config thresholds, not limits.
 
 - RPM uses in-memory token buckets; daily counters live in `usage_daily`.
 - Over a limit, `predict` returns `escalate: "rate_limited"` with no LLM call; other tools
@@ -782,10 +1004,10 @@ lower the effective value, never raise it.
 - **Ingest and the token budget.** The token budget is checked before every LLM call of an
   ingest job, and a job that runs out stops `partial` with `remaining_records` (§7.1)
   instead of failing. The default byte limit (20 MB/day) is far above what 500 000
-  tokens/day can derive (a 2 MB batch of messages is roughly 1M tokens), so harnesses
+  tokens/day can derive (a 2 MB batch of replies is roughly 1M tokens), so harnesses
   should size batches from `ingest_raw`'s `estimated_tokens` and `remaining_tokens`.
 - **Usage counters** per user per day (calls per tool, LLM tokens in/out, cost, ingest
-  bytes and records) are kept for future billing and shown to the admin.
+  bytes and episodes, sandbox seconds) are kept for future billing and shown to the admin.
 
 ---
 
@@ -834,16 +1056,32 @@ codes.
 - **Visibility:** a `respond` token never receives an `owner_only` claim or a claim for
   another audience, asserted on the context sent to a fake LLM, not on its output.
 - **Limits:** each limit, the per-audience isolation, spend cap, concurrency queue timeout.
-- **Habit detectors:** synthetic calendars and message streams with known ground truth,
-  including timezone and DST edges, below-threshold samples, and evidence merging across
-  runs.
+- **Builtin analyzers:** synthetic episodes with known ground truth (meetings, replies,
+  statements), including timezone and DST edges, below-threshold samples, and state
+  merging across runs and across a partial job and its resend.
+- **Sandbox isolation** (on Linux, macOS and Windows in CI): file read, write and preopen
+  escape, sockets, processes, env, infinite loop stopped by fuel and by epoch, memory
+  bomb, oversized and invalid output, forged exception names.
+- **Output contract and key filter:** limits, non-finite numbers, key classes, canary names
+  both capitalised and lowercase-but-concentrated.
+- **Hypothesis loop** with a fake LLM: trigger, holdout split, binomial test and
+  Benjamini–Hochberg as unit tests, acceptance, retired negative memory, weakening,
+  disabling after 3 errors.
+- **Annotation:** few-distinct mapping, batched tagging, vocabulary reuse, no mapping
+  persisted.
+- **Organic categories:** normalisation, create (with limits and `unmapped_categories`),
+  alias routing, merge, split, undo.
+- **Style in predict:** parameters in the answer prompt, each post-processing rule and its
+  threshold, the shorten re-ask.
 - **Compaction:** dedupe, absorb, rejected-as-negative-memory, contradictions, decay,
   budget, proposals for approved claims, undo, purge.
-- **Privacy canary:** ingest records containing unique strings (token-like
-  `zq7x-canary-41b9`, and name-like `Velmorine`) in every field type, with a fake LLM that
-  deliberately echoes its input and with the real local model; then assert none of them
-  appears in the DB file (including `-wal`), the logs at DEBUG level, `export_persona`,
-  `get_persona`, or any `predict` output.
+- **Privacy canary:** ingest episodes containing unique strings (token-like
+  `zq7x-canary-41b9`, name-like `Velmorine`, and a lowercase name used often) in every
+  field, with a fake LLM that deliberately echoes its input (also into analyzer source,
+  statements, category descriptions and labels) and with the real local model; then assert
+  none of them appears in the DB file (including `-wal`; claims, analyzer source, state and
+  statements, category descriptions, label vocabularies), the logs at DEBUG level,
+  `export_persona`, `get_persona`, `get_analyzer`, or any `predict` output.
 - **Fake LLM** fixture for deterministic tests; a small `@pytest.mark.llm` suite runs
   against LocalAI when available.
 - **Eval script** (`wwyd eval pairs.jsonl`): the owner prepares lines
@@ -864,8 +1102,11 @@ codes.
   and `deploy/cloud-init.yaml` for a fresh Ubuntu VM.
 - **Docs:** `docs/install.md` for a non-technical person (numbered steps, what you should
   see, what to do if you don't), verified by following it literally on a clean VM;
-  `docs/habits.md`; `docs/ecosystem.md` (guidance for harness authors: messengers verified
-  against primary sources, contact → audience mapping, transcription); `docs/eval.md`.
+  `docs/habits.md` (builtin analyzers); `docs/ecosystem.md` (guidance for harness authors: messengers verified
+  against primary sources, contact → audience mapping, transcription, how to shape
+  episodes without names); `docs/eval.md`.
+- **Sandbox artifacts:** built by `scripts/build_sandbox.py` at release/CI time into
+  `src/wwyd/sandbox/assets/` (gitignored), packed into the wheel (§7.5).
 - **CLI:** `wwyd` (= `wwyd serve`), `wwyd stdio --user <login>`, `wwyd invite`,
   `wwyd reset-password <login>`, `wwyd eval`. Migrations run automatically on start.
 
@@ -880,11 +1121,13 @@ src/wwyd/
   mcp/         server.py tools/*.py
   llm/         client.py presets.py prompts/
   predict/     route.py answer.py disclosure.py
-  ingest/      jobs.py records.py guard.py style.py detectors/*.py
-  compact/     dedupe.py contradictions.py decay.py budget.py scheduler.py
+  ingest/      jobs.py episodes.py guard.py passes.py annotate.py
+  analyzers/   contract.py keyfilter.py state.py authoring.py hypothesis.py builtin/*.py
+  sandbox/     runner.py cache.py helpers/wwyd_helpers.py assets/ (built, gitignored)
+  compact/     dedupe.py contradictions.py decay.py budget.py categories.py scheduler.py
   limits/      limiter.py spend.py
 schema/persona.v1.json
-docs/  deploy/  tests/
+docs/  deploy/  scripts/  tests/
 CLAUDE.md  .claude/agents/worker.md      # orchestration conventions, added at M1
 ```
 
@@ -920,6 +1163,15 @@ Each ends with tests passing and a short demo.
 6. **Install:** packaging, Dockerfile, compose + Caddy, cloud-init, `docs/install.md`
    verified on a clean VM, `docs/ecosystem.md`, eval results.
 
+7. **Episodes and analyzers** (design revision D17–D22):
+   - **7a:** episode schema, organic categories (create, aliases, merge, split, undo),
+     builtin time analyzers natively, `analyzer_state`, analyzer tools. Demo: a synthetic
+     calendar and chat export as episodes produce keyed habit claims and new categories.
+   - **7b:** sandbox with the build script and CI matrix, stylometry, style in `predict`.
+     Demo: a chat export yields a style profile and a reply draft that follows it.
+   - **7c:** annotation, LLM analyzers and the hypothesis loop. Demo: a film-watching log
+     yields an accepted analyzer with a pending claim, plus a retired hypothesis.
+
 Outward-facing steps (GitHub repo, PyPI, container registry, domains, OAuth app
 registrations) wait for the maintainer's go-ahead each time.
 
@@ -928,6 +1180,7 @@ registrations) wait for the maintainer's go-ahead each time.
 ## 17. Decision log
 
 Design decisions taken when this spec was approved (2026-10-18), with the reasoning.
+D16 is a later revision; D17–D22 are the 2026-10-19 revision (approved the same day).
 
 **D1. Visibility is `owner_only | shared`.** `audiences` already says where a claim
 applies, and a claim is never fed to an audience it does not apply to, so a separate
@@ -994,14 +1247,56 @@ the habit stats exactly once (running them first would count the resent ones twi
 token estimate uses 3 chars per token and is called conservative, not an upper bound:
 tokenisation varies by model and language, and the one-call overrun it allows is small.
 The per-source watermark lets a harness re-export
-incrementally without re-deriving what was already seen.
+incrementally without re-deriving what was already seen. (§7.1 restates this in episode
+terms; the detectors became builtin analyzers, D19.)
+
+**D17. Episodes replace typed records (2026-10-19).** Typed records (`message`,
+`call_transcript`, `calendar_event`, `decision`, `note`) covered a fixed set of sources; a
+film log or a purchase history fitted none. One `Episode` shape takes any data type and
+moves the domain into `category`. `said` separates the owner's verbatim words from the
+client's descriptions (`decision`) and others' words (`situation`), so stylometry and the
+guard know exactly which text is the owner's. Intervals in `when` replace the batch-local
+`thread` pairing for reply latency.
+
+**D18. Sandbox: wasmtime + CPython for WASI.** LLM-written code must run with no file,
+network, process or env access, on every platform the server installs on, without extra
+infrastructure. wasmtime is a pip dependency with wheels for Windows, macOS and Linux and
+runs in-process with fuel, epoch and memory limits. Rejected: RestrictedPython (not a
+security boundary); hosted sandboxes (the data would leave the machine); Docker, nsjail,
+gVisor (platform-specific or extra infrastructure); NVIDIA OpenShell (gateway plus a
+container runtime, aimed at long-running agents, Windows only via WSL).
+
+**D19. Counters only, keys filtered by the host.** Analyzer output is numbers keyed by
+short strings, merged by addition, so state stays small, mergeable across partial jobs and
+resends, and holds no text. Privacy never depends on analyzer code: the host validates the
+contract and filters every key (regex, name-likeness, spread across episodes and days).
+The residual risk of lowercase names is stated in §2.
+
+**D20. The LLM annotates, code counts; hypotheses are tested.** Small models count badly
+but label well, so the LLM maps distinct values to labels and code does the statistics.
+LLM-proposed regularities are treated as hypotheses: tested on older data and confirmed on
+a recent holdout, with a binomial test against the base rate and Benjamini–Hochberg
+false-discovery control across each round, following standard practice for multiple
+hypothesis testing. Rejected hypotheses are remembered so they are not re-proposed.
+Discovery runs only on batches large enough by themselves, because P1 rules out keeping
+episodes to test against later; established analyzers then need only increments.
+
+**D21. Organic categories, applied automatically with undo.** Clients know their domain
+better than a fixed tree, so unknown paths are created; limits keep the tree bounded.
+Merges and splits apply without review because they move claims without changing them,
+every step is a `changes` row and undoable, and aliases keep old paths routing.
+
+**D22. Style in `predict` as numbers plus deterministic post-processing.** Small models
+ignore "write briefly"; explicit parameters and a few code rules (lowercase start, no final
+period, one shorten re-ask) are reliable and testable. Typos are never injected: they would
+imitate the owner's mistakes, not their style.
 
 ### Implementation notes
 
 Deviations and details recorded while implementing M2–M6:
 
-- **Guard on owner texts.** Guard part 3 also scans the owner's own texts, not only third
-  parties' (P2).
+- **Guard on owner texts.** Guard part 3 also scans the owner's own texts (`said`), not
+  only third parties' (P2).
 - **Job columns.** `jobs` has two extra numeric columns, `progress` and `started_at`.
 - **Audience before limits.** `predict` resolves the audience before the limit check.
 - **Empty visible set.** When no claim is visible to the audience, `predict` escalates
