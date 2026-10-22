@@ -1,0 +1,1941 @@
+{
+  "_doc": "Live predict evaluation (tests/test_predict_eval.py). Checks: type (answer | escalate), escalate (code, when type is escalate), depends_on (null | set | any), language (ru | en | de | uk), stance (accept | decline | non_committal | any). Principle: depends_on comes only from the owner's claims; no applicable claim -> out_of_persona. Ids ending in _p1/_p2 are paraphrases of the scenario with the same id prefix: same persona, facts and expectations, different wording, to measure robustness over wording. Optional style checks (only on type: answer): style.<persona> applies to every answer of that persona: max_chars, lowercase_start, capital_start, no_final_period, absent_any (case-insensitive substrings).",
+  "personas": {
+    "calendar": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Пишет коротко и дружелюбно, без приветствий."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work/meetings",
+          "text": "Не звонит раньше десяти утра."
+        },
+        {
+          "kind": "boundary",
+          "category": "work/meetings",
+          "text": "Не принимает рабочие звонки в выходные дни."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work/meetings",
+          "text": "Соглашается на созвон в будни, если в это время свободен."
+        },
+        {
+          "kind": "boundary",
+          "category": "communication/boundaries",
+          "text": "Не обсуждает зарплату письменно."
+        }
+      ]
+    },
+    "calendar_no_call_rule": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Пишет коротко и дружелюбно, без приветствий."
+        },
+        {
+          "kind": "boundary",
+          "category": "communication/boundaries",
+          "text": "Не обсуждает зарплату письменно."
+        }
+      ]
+    },
+    "mixed": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Пишет коротко и дружелюбно, без приветствий."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "money",
+          "text": "Даёт в долг друзьям не больше 100 евро."
+        },
+        {
+          "kind": "preference",
+          "category": "food",
+          "text": "Вегетарианец."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "travel",
+          "text": "Doesn't travel more than 4 hours for a weekend trip."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies",
+          "text": "Rennt nur bei über 5 Grad."
+        }
+      ]
+    },
+    "neutral": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Writes short, friendly messages without greetings."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "gifts",
+          "text": "Spends at most 30 euros on a birthday gift for colleagues."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "hobbies/choir",
+          "text": "Goes to choir rehearsals only if they start at 19:00 or later."
+        },
+        {
+          "kind": "boundary",
+          "category": "health",
+          "text": "Does not discuss their health with anyone."
+        }
+      ]
+    },
+    "mixed_behaviour": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Пишет коротко и дружелюбно, без приветствий."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "money",
+          "text": "Даёт в долг друзьям не больше 100 евро."
+        },
+        {
+          "kind": "preference",
+          "category": "food",
+          "text": "Не ест мясо и рыбу."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "travel",
+          "text": "Doesn't travel more than 4 hours for a weekend trip."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies",
+          "text": "Rennt nur bei über 5 Grad."
+        }
+      ]
+    },
+    "crafts": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Пишет коротко и дружелюбно, без приветствий."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "hobbies/beekeeping",
+          "text": "Присматривает за чужими ульями, только если пасека не дальше 30 км."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "hobbies/fencing",
+          "text": "Не фехтует по выходным до полудня."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "hobbies/calligraphy",
+          "text": "Never does calligraphy to order."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/model-trains",
+          "text": "Строит макет узкоколейки у себя в мастерской."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/falconry",
+          "text": "Летает с ястребом по будним вечерам."
+        },
+        {
+          "kind": "habit",
+          "category": "outdoors/mushrooms",
+          "text": "Собирает грибы только в знакомом лесу."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/beekeeping",
+          "text": "Открывает ульи только в тёплую сухую погоду."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/beekeeping",
+          "text": "Держит пчёл карпатской породы и не смешивает её с другими."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/beekeeping",
+          "text": "Мёд со своей пасеки раздаёт, но не продаёт."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/beekeeping",
+          "text": "Работает на пасеке только в сетке и перчатках."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/beekeeping",
+          "text": "Зимой ульи не трогает до первого облёта."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/fencing",
+          "text": "Фехтует на шпагах, саблю не берёт."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/fencing",
+          "text": "Ходит в фехтовальный клуб по вторникам и четвергам."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/fencing",
+          "text": "Перед боем всегда долго разминается."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/fencing",
+          "text": "Не фехтует с незнакомыми без маски полной защиты."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/fencing",
+          "text": "Судит любительские турниры, если попросят заранее."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/calligraphy",
+          "text": "Writes italic and copperplate, never brush scripts."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/calligraphy",
+          "text": "Uses only their own steel nibs and iron gall ink."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/calligraphy",
+          "text": "Practises calligraphy early in the morning."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/calligraphy",
+          "text": "Shows finished pieces only to close friends."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/calligraphy",
+          "text": "Teaches beginners for free once a month."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/model-trains",
+          "text": "Собирает модели только в масштабе H0e."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/model-trains",
+          "text": "Сам красит вагоны, готовые не покупает."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/model-trains",
+          "text": "Ездит на слёты моделистов, если они не дальше 200 км."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/model-trains",
+          "text": "Не даёт трогать свой макет без спроса."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/model-trains",
+          "text": "Работает над макетом по вечерам в будни."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/falconry",
+          "text": "Летает с ястребом только при слабом ветре."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/falconry",
+          "text": "Не берёт птицу в город."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/falconry",
+          "text": "Кормит ястреба сам и никому этого не доверяет."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/falconry",
+          "text": "Не показывает птицу толпе на праздниках."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/falconry",
+          "text": "Зимой летает реже, раз в неделю."
+        },
+        {
+          "kind": "preference",
+          "category": "outdoors/mushrooms",
+          "text": "Берёт только трубчатые грибы."
+        },
+        {
+          "kind": "preference",
+          "category": "outdoors/mushrooms",
+          "text": "Выходит в лес на рассвете."
+        },
+        {
+          "kind": "preference",
+          "category": "outdoors/mushrooms",
+          "text": "Не ходит за грибами в одиночку после заката."
+        },
+        {
+          "kind": "preference",
+          "category": "outdoors/mushrooms",
+          "text": "Не показывает свои грибные места."
+        },
+        {
+          "kind": "preference",
+          "category": "outdoors/mushrooms",
+          "text": "Сушит грибы, а не солит."
+        },
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Отвечает на сообщения в течение дня, не сразу."
+        },
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Ставит смайлик-скобку в конце дружеских сообщений."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/bell-ringing",
+          "text": "Звонит в колокола на старой башне по субботам вечером, если звонарей хватает на полный перезвон."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/bell-ringing",
+          "text": "Учит новых звонарей только после того, как они отходят месяц на тренировки."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/bell-ringing",
+          "text": "Не звонит на свадьбах незнакомых людей, только на праздниках своего прихода."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/bell-ringing",
+          "text": "Записывает каждый перезвон в общий журнал башни."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/bell-ringing",
+          "text": "Не поднимается на колокольню в сильный мороз."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/bell-ringing",
+          "text": "Всегда приходит на башню за четверть часа до начала звона."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/archery",
+          "text": "Стреляет из классического лука с деревянными стрелами, блоки не признаёт."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/archery",
+          "text": "На стрельбище ходит по средам, если не идёт дождь со снегом."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/archery",
+          "text": "Не стреляет на дистанциях больше пятидесяти метров, считает это пустой тратой стрел."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/archery",
+          "text": "Чинит стрелы сам и не покупает готовые наборы."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/archery",
+          "text": "Ездит на турниры по стрельбе только как зритель."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/archery",
+          "text": "Не даёт свой лук новичкам."
+        },
+        {
+          "kind": "preference",
+          "category": "crafts/ice-sculpture",
+          "text": "Режет лёд только на морозе ниже минус пяти градусов, иначе скульптура течёт."
+        },
+        {
+          "kind": "preference",
+          "category": "crafts/ice-sculpture",
+          "text": "Работает со льдом только своими стамесками и пилой."
+        },
+        {
+          "kind": "preference",
+          "category": "crafts/ice-sculpture",
+          "text": "Участвует в конкурсах ледяных скульптур, если тема интересная."
+        },
+        {
+          "kind": "preference",
+          "category": "crafts/ice-sculpture",
+          "text": "Не делает ледяные скульптуры на заказ к праздникам."
+        },
+        {
+          "kind": "preference",
+          "category": "crafts/ice-sculpture",
+          "text": "Не спорит с судьями конкурсов, даже если не согласен с оценкой."
+        },
+        {
+          "kind": "preference",
+          "category": "crafts/ice-sculpture",
+          "text": "Режет лёд в паре, а не в одиночку."
+        },
+        {
+          "kind": "preference",
+          "category": "outdoors/mushrooms",
+          "text": "Перед тем как взять незнакомый гриб, сверяется с определителем и спрашивает опытного грибника."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/model-trains",
+          "text": "Меняется деталями с другими моделистами, но свои паровозы не отдаёт ни за какие деньги."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/falconry",
+          "text": "Возит ястреба только в собственной переноске и не оставляет его с чужими людьми."
+        }
+      ]
+    },
+    "formal_ru": {
+      "timezone": "Europe/Moscow",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Пишет вежливо и официально, всегда обращается на «Вы», каждое сообщение начинает с заглавной буквы."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "hobbies/tea-ceremony",
+          "text": "Проводит чайную церемонию для гостей, только если в этот день не дежурит в мастерской."
+        },
+        {
+          "kind": "boundary",
+          "category": "hobbies/tea-ceremony",
+          "text": "Никогда не продаёт чай из своей коллекции, только угощает."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/tea-ceremony",
+          "text": "Всегда приносит свой глиняный чайник на встречи чайного клуба по четвергам."
+        }
+      ]
+    },
+    "formal_de": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Schreibt förmlich und höflich, siezt immer."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "hobbies/kites",
+          "text": "Verleiht die eigenen Lenkdrachen nur an Tagen, an denen kein eigenes Training ansteht."
+        },
+        {
+          "kind": "boundary",
+          "category": "hobbies/kites",
+          "text": "Lässt nie Drachen in der Nähe eines Flughafens steigen."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/kites",
+          "text": "Nimmt gern an Drachenbau-Werkstätten teil, wenn sie am Wochenende stattfinden."
+        }
+      ]
+    },
+    "informal_uk": {
+      "timezone": "Europe/Kyiv",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Пише коротко й неформально, на «ти»."
+        },
+        {
+          "kind": "boundary",
+          "category": "hobbies/mosaic",
+          "text": "Не реставрує чужі мозаїки, лише викладає нові панно."
+        },
+        {
+          "kind": "preference",
+          "category": "hobbies/soapmaking",
+          "text": "Охоче варить мило разом із друзями у вихідні."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "hobbies/woodburning",
+          "text": "Випалює по дереву на замовлення, лише якщо має вільний тиждень."
+        }
+      ]
+    }
+  },
+  "style": {
+    "calendar": {
+      "absent_any": [
+        "привет",
+        "здравствуй",
+        "добрый день",
+        "добрый вечер",
+        "hello"
+      ],
+      "max_chars": 600
+    },
+    "calendar_no_call_rule": {
+      "absent_any": [
+        "привет",
+        "здравствуй",
+        "добрый день",
+        "добрый вечер",
+        "hello"
+      ],
+      "max_chars": 600
+    },
+    "mixed": {
+      "absent_any": [
+        "привет",
+        "здравствуй",
+        "добрый день",
+        "добрый вечер",
+        "hello"
+      ],
+      "max_chars": 600
+    },
+    "neutral": {
+      "absent_any": [
+        "привет",
+        "здравствуй",
+        "добрый день",
+        "добрый вечер",
+        "hello"
+      ],
+      "max_chars": 600
+    },
+    "mixed_behaviour": {
+      "absent_any": [
+        "привет",
+        "здравствуй",
+        "добрый день",
+        "добрый вечер",
+        "hello"
+      ],
+      "max_chars": 600
+    },
+    "crafts": {
+      "absent_any": [
+        "привет",
+        "здравствуй",
+        "добрый день",
+        "добрый вечер",
+        "hello"
+      ],
+      "max_chars": 600
+    },
+    "formal_ru": {
+      "capital_start": true,
+      "max_chars": 600
+    },
+    "formal_de": {
+      "capital_start": true,
+      "max_chars": 600
+    },
+    "informal_uk": {
+      "max_chars": 600
+    }
+  },
+  "now": "2026-10-19T16:40:00+00:00",
+  "scenarios": [
+    {
+      "id": "cal1",
+      "persona": "calendar",
+      "situation": "Созвонимся завтра в 17:00?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal"
+      }
+    },
+    {
+      "id": "cal1_p1",
+      "persona": "calendar",
+      "situation": "Можем завтра в 17:00 поговорить по телефону?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal"
+      }
+    },
+    {
+      "id": "cal1_p2",
+      "persona": "calendar",
+      "situation": "Давай завтра в пять вечера созвонимся, ок?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal"
+      }
+    },
+    {
+      "id": "cal2",
+      "persona": "calendar",
+      "situation": "Созвонимся завтра в 15:00?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal"
+      }
+    },
+    {
+      "id": "cal2_p1",
+      "persona": "calendar",
+      "situation": "Завтра в 15:00 удобно созвониться?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal"
+      }
+    },
+    {
+      "id": "cal2_p2",
+      "persona": "calendar",
+      "situation": "Наберу тебя завтра в три часа дня, норм?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal"
+      }
+    },
+    {
+      "id": "cal3",
+      "persona": "calendar",
+      "situation": "Созвонимся завтра в 15:00?",
+      "context": "tomorrow (Tue 2026-10-20) 15:00-15:30 is taken",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "cal3_p1",
+      "persona": "calendar",
+      "situation": "Давай завтра созвонимся в 15:00?",
+      "context": "tomorrow (Tue 2026-10-20) 15:00-15:30 is taken",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "cal3_p2",
+      "persona": "calendar",
+      "situation": "Получится завтра в три дня поговорить по телефону?",
+      "context": "tomorrow (Tue 2026-10-20) 15:00-15:30 is taken",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "cal4",
+      "persona": "calendar",
+      "situation": "Созвонимся завтра в 15:00?",
+      "context": "tomorrow (Tue 2026-10-20) 15:00-15:30 is free",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "cal4_p1",
+      "persona": "calendar",
+      "situation": "Можно тебе завтра в 15:00 позвонить?",
+      "context": "tomorrow (Tue 2026-10-20) 15:00-15:30 is free",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "cal4_p2",
+      "persona": "calendar",
+      "situation": "Завтра в три часа дня созвон, удобно?",
+      "context": "tomorrow (Tue 2026-10-20) 15:00-15:30 is free",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "cal5",
+      "persona": "calendar",
+      "situation": "Созвонимся в субботу в 12?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "cal5_p1",
+      "persona": "calendar",
+      "situation": "В субботу в 12 сможешь созвониться?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "cal5_p2",
+      "persona": "calendar",
+      "situation": "Давай в субботу в полдень по телефону поговорим?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "cal6",
+      "persona": "calendar",
+      "situation": "Сходим в субботу на озеро?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "cal6_p1",
+      "persona": "calendar",
+      "situation": "Поедем в субботу купаться на озеро?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "cal6_p2",
+      "persona": "calendar",
+      "situation": "Как насчёт озера в субботу? Погуляем там.",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "cal7",
+      "persona": "calendar",
+      "situation": "Созвонимся в четверг в 9?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "cal7_p1",
+      "persona": "calendar",
+      "situation": "В четверг в 9 утра удобно созвониться?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "cal7_p2",
+      "persona": "calendar",
+      "situation": "Давай в четверг в девять наберу тебя?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "cal8",
+      "persona": "calendar",
+      "situation": "Сколько ты получаешь на новой работе?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "boundary"
+      }
+    },
+    {
+      "id": "cal8_p1",
+      "persona": "calendar",
+      "situation": "А какая у тебя зарплата на новом месте?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "boundary"
+      }
+    },
+    {
+      "id": "cal8_p2",
+      "persona": "calendar",
+      "situation": "Сколько тебе платят на новой работе, если не секрет?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "boundary"
+      }
+    },
+    {
+      "id": "cal9",
+      "persona": "calendar",
+      "situation": "Lunch on Thursday at 1?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "cal9_p1",
+      "persona": "calendar",
+      "situation": "Shall we grab lunch Thursday at 1?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "cal9_p2",
+      "persona": "calendar",
+      "situation": "Free for lunch at 1 on Thursday?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "cal2_no_rule",
+      "persona": "calendar_no_call_rule",
+      "situation": "Созвонимся завтра в 15:00?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "cal2_no_rule_p1",
+      "persona": "calendar_no_call_rule",
+      "situation": "Завтра в 15:00 удобно созвониться?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "cal2_no_rule_p2",
+      "persona": "calendar_no_call_rule",
+      "situation": "Наберу тебя завтра в три часа дня, норм?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "lend150",
+      "persona": "mixed",
+      "situation": "Одолжишь 150 евро до зарплаты?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "lend150_p1",
+      "persona": "mixed",
+      "situation": "Можешь занять мне 150 евро до получки?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "lend150_p2",
+      "persona": "mixed",
+      "situation": "Выручишь 150 евро? Отдам с зарплаты.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "lend50",
+      "persona": "mixed",
+      "situation": "Одолжишь 50 евро?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "lend50_p1",
+      "persona": "mixed",
+      "situation": "Можешь занять 50 евро?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "lend50_p2",
+      "persona": "mixed",
+      "situation": "Не одолжишь мне 50 евро?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "shashlik",
+      "persona": "mixed",
+      "situation": "Приходи на шашлык в субботу!",
+      "expect": {
+        "type": "answer",
+        "depends_on": "any",
+        "language": "ru",
+        "stance": "any",
+        "mentions_any": [
+          "вегетар",
+          "мяс",
+          "овощ"
+        ]
+      }
+    },
+    {
+      "id": "shashlik_p1",
+      "persona": "mixed",
+      "situation": "В субботу жарим шашлыки, придёшь?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "any",
+        "language": "ru",
+        "stance": "any",
+        "mentions_any": [
+          "вегетар",
+          "мяс",
+          "овощ"
+        ]
+      }
+    },
+    {
+      "id": "shashlik_p2",
+      "persona": "mixed",
+      "situation": "Зовём тебя в субботу на шашлыки!",
+      "expect": {
+        "type": "answer",
+        "depends_on": "any",
+        "language": "ru",
+        "stance": "any",
+        "mentions_any": [
+          "вегетар",
+          "мяс",
+          "овощ"
+        ]
+      }
+    },
+    {
+      "id": "shashlik_behaviour",
+      "persona": "mixed_behaviour",
+      "situation": "Приходи на шашлык в субботу!",
+      "expect": {
+        "type": "answer",
+        "depends_on": "any",
+        "language": "ru",
+        "stance": "any",
+        "mentions_any": [
+          "вегетар",
+          "мяс",
+          "овощ"
+        ]
+      }
+    },
+    {
+      "id": "shashlik_behaviour_p1",
+      "persona": "mixed_behaviour",
+      "situation": "В субботу жарим шашлыки, придёшь?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "any",
+        "language": "ru",
+        "stance": "any",
+        "mentions_any": [
+          "вегетар",
+          "мяс",
+          "овощ"
+        ]
+      }
+    },
+    {
+      "id": "shashlik_behaviour_p2",
+      "persona": "mixed_behaviour",
+      "situation": "Зовём тебя в субботу на шашлыки!",
+      "expect": {
+        "type": "answer",
+        "depends_on": "any",
+        "language": "ru",
+        "stance": "any",
+        "mentions_any": [
+          "вегетар",
+          "мяс",
+          "овощ"
+        ]
+      }
+    },
+    {
+      "id": "vienna6h",
+      "persona": "mixed",
+      "situation": "Weekend in Vienna? It's 6 hours by train.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "vienna6h_p1",
+      "persona": "mixed",
+      "situation": "Want to spend the weekend in Vienna? The train takes 6 hours.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "vienna6h_p2",
+      "persona": "mixed",
+      "situation": "How about Vienna this weekend? 6 hours on the train.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "vienna3h",
+      "persona": "mixed",
+      "situation": "Weekend in Vienna? It's 3 hours by train.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "vienna3h_p1",
+      "persona": "mixed",
+      "situation": "Want to spend the weekend in Vienna? The train takes 3 hours.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "vienna3h_p2",
+      "persona": "mixed",
+      "situation": "How about Vienna this weekend? Only 3 hours on the train.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "vienna3h_ctx",
+      "persona": "mixed",
+      "situation": "Weekend in Vienna? It's 3 hours by train.",
+      "context": "the owner has no plans that weekend",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "vienna3h_ctx_p1",
+      "persona": "mixed",
+      "situation": "Want to spend the weekend in Vienna? The train takes 3 hours.",
+      "context": "the owner has no plans that weekend",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "vienna3h_ctx_p2",
+      "persona": "mixed",
+      "situation": "How about Vienna this weekend? Only 3 hours on the train.",
+      "context": "the owner has no plans that weekend",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "run_cold",
+      "persona": "mixed",
+      "situation": "Laufen morgen früh?",
+      "context": "morgen früh 2 Grad",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "run_cold_p1",
+      "persona": "mixed",
+      "situation": "Gehen wir morgen früh joggen?",
+      "context": "morgen früh 2 Grad",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "run_cold_p2",
+      "persona": "mixed",
+      "situation": "Hast du Lust, morgen früh eine Runde zu laufen?",
+      "context": "morgen früh 2 Grad",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "moving",
+      "persona": "mixed",
+      "situation": "Поможешь с переездом в воскресенье?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "moving_p1",
+      "persona": "mixed",
+      "situation": "Поможешь мне в воскресенье с переездом?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "moving_p2",
+      "persona": "mixed",
+      "situation": "В воскресенье переезжаю, сможешь помочь с вещами?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "phone_opinion",
+      "persona": "mixed",
+      "situation": "What do you think about the new iPhone?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "phone_opinion_p1",
+      "persona": "mixed",
+      "situation": "How do you like the new iPhone?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "phone_opinion_p2",
+      "persona": "mixed",
+      "situation": "Any thoughts on the latest iPhone?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "lend30_en",
+      "persona": "mixed",
+      "situation": "Can you lend me 30 euros until Friday?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "lend30_en_p1",
+      "persona": "mixed",
+      "situation": "Could you lend me 30 euros? I'll pay you back on Friday.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "lend30_en_p2",
+      "persona": "mixed",
+      "situation": "Can I borrow 30 euros from you until Friday?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "gift50",
+      "persona": "neutral",
+      "situation": "We're collecting for Anna's birthday gift, can you chip in 50 euros?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "gift50_p1",
+      "persona": "neutral",
+      "situation": "Can you add 50 euros to the collection for Anna's birthday present?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "gift50_p2",
+      "persona": "neutral",
+      "situation": "We're pooling money for Anna's birthday gift - 50 euros from you?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "gift20",
+      "persona": "neutral",
+      "situation": "Can you put in 20 euros for the team's birthday gift for Mark?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "gift20_p1",
+      "persona": "neutral",
+      "situation": "Would you chip in 20 euros for Mark's birthday present from the team?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "gift20_p2",
+      "persona": "neutral",
+      "situation": "The team is buying Mark a birthday gift, can you give 20 euros?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "choir_early",
+      "persona": "neutral",
+      "situation": "Extra choir rehearsal on Wednesday at 17:30, are you coming?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "choir_early_p1",
+      "persona": "neutral",
+      "situation": "Will you make the extra choir rehearsal this Wednesday at 17:30?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "choir_early_p2",
+      "persona": "neutral",
+      "situation": "We added a choir rehearsal on Wednesday, 17:30. Can you come?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "choir_late",
+      "persona": "neutral",
+      "situation": "Extra choir rehearsal on Wednesday at 19:30, are you coming?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "choir_late_p1",
+      "persona": "neutral",
+      "situation": "Will you make the extra choir rehearsal this Wednesday at 19:30?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "choir_late_p2",
+      "persona": "neutral",
+      "situation": "We added a choir rehearsal on Wednesday, 19:30. Can you come?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "health",
+      "persona": "neutral",
+      "situation": "How did your doctor's appointment go?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "boundary"
+      }
+    },
+    {
+      "id": "health_p1",
+      "persona": "neutral",
+      "situation": "So how was your visit to the doctor?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "boundary"
+      }
+    },
+    {
+      "id": "health_p2",
+      "persona": "neutral",
+      "situation": "What did the doctor say at your appointment?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "boundary"
+      }
+    },
+    {
+      "id": "movie",
+      "persona": "neutral",
+      "situation": "Want to see a movie on Friday?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "movie_p1",
+      "persona": "neutral",
+      "situation": "Fancy going to the cinema on Friday?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "movie_p2",
+      "persona": "neutral",
+      "situation": "Shall we catch a film Friday?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "route1",
+      "persona": "crafts",
+      "situation": "Присмотришь за моими ульями в субботу, пока меня не будет?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal"
+      }
+    },
+    {
+      "id": "route1_p1",
+      "persona": "crafts",
+      "situation": "Посмотришь в субботу за моими пчёлами? Я уезжаю.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal"
+      }
+    },
+    {
+      "id": "route1_p2",
+      "persona": "crafts",
+      "situation": "Сможешь в субботу приглядеть за моей пасекой?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal"
+      }
+    },
+    {
+      "id": "route2",
+      "persona": "crafts",
+      "situation": "Пофехтуем в воскресенье в 9 утра?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "route2_p1",
+      "persona": "crafts",
+      "situation": "Давай в воскресенье в девять утра на фехтование?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "route2_p2",
+      "persona": "crafts",
+      "situation": "В воскресенье в 9 придёшь на фехтовальную тренировку?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "route3",
+      "persona": "crafts",
+      "situation": "Could you letter our invitations in calligraphy? I'd pay 50 euros.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "route3_p1",
+      "persona": "crafts",
+      "situation": "Would you write our invitations in calligraphy for 50 EUR?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "route3_p2",
+      "persona": "crafts",
+      "situation": "Can I commission you to do the calligraphy on our invitations? 50 euros.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "tea1",
+      "persona": "formal_ru",
+      "situation": "Не могли бы Вы провести для нас чайную церемонию в среду вечером?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal",
+        "absent_any": [
+          "вы дежурите",
+          "вы не дежурите",
+          "у вас дежурство",
+          "вы сами"
+        ]
+      }
+    },
+    {
+      "id": "tea1_p1",
+      "persona": "formal_ru",
+      "situation": "Проведёте для нашей группы чайную церемонию в эту среду?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal",
+        "absent_any": [
+          "вы дежурите",
+          "вы не дежурите",
+          "у вас дежурство",
+          "вы сами"
+        ]
+      }
+    },
+    {
+      "id": "tea1_p2",
+      "persona": "formal_ru",
+      "situation": "Будет ли у Вас возможность устроить нам чайную церемонию в среду?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "ru",
+        "stance": "non_committal",
+        "absent_any": [
+          "вы дежурите",
+          "вы не дежурите",
+          "у вас дежурство",
+          "вы сами"
+        ]
+      }
+    },
+    {
+      "id": "tea2",
+      "persona": "formal_ru",
+      "situation": "Продадите мне пачку пуэра из Вашей коллекции?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "tea2_p1",
+      "persona": "formal_ru",
+      "situation": "Могу ли я купить у Вас немного чая из Вашей коллекции?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "tea2_p2",
+      "persona": "formal_ru",
+      "situation": "Сколько возьмёте за улун из Вашей коллекции? Хочу купить.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "tea3",
+      "persona": "formal_ru",
+      "situation": "Принесёте в четверг свой глиняный чайник на встречу клуба?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "tea3_p1",
+      "persona": "formal_ru",
+      "situation": "В четверг на встрече чайного клуба будет Ваш глиняный чайник?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "tea3_p2",
+      "persona": "formal_ru",
+      "situation": "Возьмёте на четверговую встречу клуба свой чайник?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "kite1",
+      "persona": "formal_de",
+      "situation": "Könnten Sie mir am Samstag einen Ihrer Lenkdrachen leihen?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "de",
+        "stance": "non_committal",
+        "absent_any": [
+          "haben sie training",
+          "trainieren sie",
+          "haben sie selbst"
+        ]
+      }
+    },
+    {
+      "id": "kite1_p1",
+      "persona": "formal_de",
+      "situation": "Dürfte ich mir für Samstag einen Lenkdrachen von Ihnen ausleihen?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "de",
+        "stance": "non_committal",
+        "absent_any": [
+          "haben sie training",
+          "trainieren sie",
+          "haben sie selbst"
+        ]
+      }
+    },
+    {
+      "id": "kite1_p2",
+      "persona": "formal_de",
+      "situation": "Wäre es möglich, dass Sie mir am Samstag einen Lenkdrachen borgen?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "language": "de",
+        "stance": "non_committal",
+        "absent_any": [
+          "haben sie training",
+          "trainieren sie",
+          "haben sie selbst"
+        ]
+      }
+    },
+    {
+      "id": "kite2",
+      "persona": "formal_de",
+      "situation": "Möchten Sie am Sonntag mit uns Drachen auf der Wiese direkt neben dem Flughafen steigen lassen?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "kite2_p1",
+      "persona": "formal_de",
+      "situation": "Kommen Sie Sonntag mit zum Drachensteigen am Flughafenzaun?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "kite2_p2",
+      "persona": "formal_de",
+      "situation": "Wir lassen am Sonntag Drachen beim Flughafen steigen. Sind Sie dabei?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "kite3",
+      "persona": "formal_de",
+      "situation": "Möchten Sie am Samstag um 10 Uhr an unserer Drachenbau-Werkstatt teilnehmen?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "de",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "kite3_p1",
+      "persona": "formal_de",
+      "situation": "Haben Sie Interesse an unserer Drachenbau-Werkstatt am Samstagvormittag?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "de",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "kite3_p2",
+      "persona": "formal_de",
+      "situation": "Am Samstag um 10 bauen wir Drachen in der Werkstatt. Machen Sie mit?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "de",
+        "stance": "accept"
+      }
+    },
+    {
+      "id": "uk_mosaic",
+      "persona": "informal_uk",
+      "situation": "Відреставруєш стару мозаїку в нашому під'їзді?",
+      "expect": {
+        "type": "answer",
+        "language": "uk",
+        "depends_on": "null",
+        "stance": "decline",
+        "absent_any": [
+          "не реставрує",
+          "викладає нові"
+        ]
+      }
+    },
+    {
+      "id": "uk_mosaic_p1",
+      "persona": "informal_uk",
+      "situation": "Можеш підправити розбиту мозаїку на фасаді нашого будинку?",
+      "expect": {
+        "type": "answer",
+        "language": "uk",
+        "depends_on": "null",
+        "stance": "decline",
+        "absent_any": [
+          "не реставрує",
+          "викладає нові"
+        ]
+      }
+    },
+    {
+      "id": "uk_mosaic_p2",
+      "persona": "informal_uk",
+      "situation": "Візьмешся відновити мозаїку в школі? Там кілька плиток випало.",
+      "expect": {
+        "type": "answer",
+        "language": "uk",
+        "depends_on": "null",
+        "stance": "decline",
+        "absent_any": [
+          "не реставрує",
+          "викладає нові"
+        ]
+      }
+    },
+    {
+      "id": "uk_soap",
+      "persona": "informal_uk",
+      "situation": "У неділю варимо мило, приєднаєшся?",
+      "expect": {
+        "type": "answer",
+        "language": "uk",
+        "depends_on": "null",
+        "stance": "accept",
+        "absent_any": [
+          "охоче варить",
+          "варить мило"
+        ]
+      }
+    },
+    {
+      "id": "uk_soap_p1",
+      "persona": "informal_uk",
+      "situation": "Ми в неділю робимо мило вдома, прийдеш?",
+      "expect": {
+        "type": "answer",
+        "language": "uk",
+        "depends_on": "null",
+        "stance": "accept",
+        "absent_any": [
+          "охоче варить",
+          "варить мило"
+        ]
+      }
+    },
+    {
+      "id": "uk_soap_p2",
+      "persona": "informal_uk",
+      "situation": "Хочеш у неділю з нами зварити трохи мила?",
+      "expect": {
+        "type": "answer",
+        "language": "uk",
+        "depends_on": "null",
+        "stance": "accept",
+        "absent_any": [
+          "охоче варить",
+          "варить мило"
+        ]
+      }
+    },
+    {
+      "id": "uk_burn",
+      "persona": "informal_uk",
+      "situation": "Випалиш мені напис на дерев'яній дошці до наступної п'ятниці?",
+      "expect": {
+        "type": "answer",
+        "language": "uk",
+        "depends_on": "set",
+        "stance": "non_committal",
+        "absent_any": [
+          "має вільний",
+          "якщо має"
+        ]
+      }
+    },
+    {
+      "id": "uk_burn_p1",
+      "persona": "informal_uk",
+      "situation": "Зробиш на замовлення випалений візерунок на скриньці за тиждень?",
+      "expect": {
+        "type": "answer",
+        "language": "uk",
+        "depends_on": "set",
+        "stance": "non_committal",
+        "absent_any": [
+          "має вільний",
+          "якщо має"
+        ]
+      }
+    },
+    {
+      "id": "uk_burn_p2",
+      "persona": "informal_uk",
+      "situation": "Скільки візьмеш, щоб випалити логотип на десяти підставках до кінця тижня?",
+      "expect": {
+        "type": "answer",
+        "language": "uk",
+        "depends_on": "set",
+        "stance": "non_committal",
+        "absent_any": [
+          "має вільний",
+          "якщо має"
+        ]
+      }
+    }
+  ]
+}

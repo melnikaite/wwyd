@@ -5,7 +5,7 @@ Per category per job, before the LLM passes:
 
 * **Few distinct values.** When ``decision`` has at most 50 distinct normalised values (or
   ``situation`` at most 200), one call maps the distinct values to labels: decision ->
-  ``accepted`` / ``declined`` / ``other``; situation -> a short type (``1-1``, ``standup``).
+  ``accepted`` / ``declined`` / ``other``; situation -> a short type (``invitation``, ``request``).
 * **Free text** (more distinct values): batched tagging, at most 20 episodes per call and
   5 tags per episode, reusing the category's tag vocabulary.
 
@@ -95,7 +95,7 @@ _RULES = """Rules:
 
 DECISION_SYSTEM = (
     """You label the owner's decisions. Each numbered line is one distinct way a choice was
-described. Map every line to exactly one label: "accepted" (agreed, went, bought, watched,
+described. Map every line to exactly one label: "accepted" (agreed, went, took part,
 attended), "declined" (refused, cancelled, skipped, did not go) or "other".
 Return JSON {"labels": [{"i": 1, "label": "accepted"}, ...]}, one item per line.
 """
@@ -105,18 +105,18 @@ Return JSON {"labels": [{"i": 1, "label": "accepted"}, ...]}, one item per line.
 SITUATION_SYSTEM = (
     """You classify situations the owner was in. Each numbered line is one distinct
 situation of the category "{category}". Map every line to a short type label such as
-"1-1", "standup", "interview", "invitation". Use few labels (at most 20 in total), and
+"invitation", "request", "reminder". Use few labels (at most 20 in total), and
 reuse these existing labels where they fit: {vocabulary}.
-Return JSON {"labels": [{"i": 1, "label": "standup"}, ...]}, one item per line.
+Return JSON {"labels": [{"i": 1, "label": "invitation"}, ...]}, one item per line.
 """
     + _RULES
 )
 
 TAG_SYSTEM = (
     """You tag episodes of the category "{category}" with topics. For each numbered episode
-give up to 5 short topic tags (for films: genres, mood; for purchases: kind of item).
+give up to 5 short topic tags (for example kind of activity, mood, setting).
 Reuse these existing tags where they fit: {vocabulary}.
-Return JSON {"tags": [{"i": 1, "tags": ["drama", "slow"]}, ...]}, one item per episode.
+Return JSON {"tags": [{"i": 1, "tags": ["outdoor", "slow"]}, ...]}, one item per episode.
 """
     + _RULES
 )

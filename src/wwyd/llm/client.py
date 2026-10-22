@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import anyio
@@ -31,6 +31,28 @@ PREFLIGHT_TIMEOUT_S = 10.0
 # host answered at all (a per-persona base_url must not become a port scanner).
 BACKEND_FAILED = "LLM backend unreachable or rejected the request"
 
+# One automatic retry of a transient failure (SPEC §12): a busy single-slot local backend
+# often answers the next request. Read timeouts are retried only off the predict path,
+# where a second 120 s wait would be worse than failing.
+TRANSIENT_STATUSES = frozenset({502, 503, 504})
+PREDICT_PURPOSES: frozenset[str] = frozenset({"route", "analyze", "answer", "shorten", "judge"})
+RETRY_PAUSE_S = 2.0
+
+# Sampling temperature per purpose (SPEC §12). Decision calls (routing, the analysis of
+# which rules apply, the eval judge) run greedy so the same input gets the same decision;
+# calls that write text keep a little variety.
+DECISION_PURPOSES: frozenset[str] = frozenset({"route", "analyze", "judge"})
+DECISION_TEMPERATURE = 0.0
+DEFAULT_TEMPERATURE = 0.2
+
+
+def temperature_for(purpose: str) -> float:
+    """Sampling temperature for an LLM call of ``purpose``."""
+    return DECISION_TEMPERATURE if purpose in DECISION_PURPOSES else DEFAULT_TEMPERATURE
+
+
+_sleep: Callable[[float], Awaitable[None]] = anyio.sleep
+
 _transport: httpx.AsyncBaseTransport | None = None
 _resolver: SyncResolver = resolve_sync
 _sync_transport: httpx.BaseTransport | None = None
@@ -43,6 +65,12 @@ def set_transport(
     ``sync`` is used by the preflight."""
     global _transport, _sync_transport
     _transport, _sync_transport = transport, sync
+
+
+def set_sleep(fn: Callable[[float], Awaitable[None]] | None) -> None:
+    """Replace the pause before a transient retry (tests); ``None`` restores ``anyio.sleep``."""
+    global _sleep
+    _sleep = fn or anyio.sleep
 
 
 def set_resolver(resolver: SyncResolver | None) -> None:
@@ -201,18 +229,38 @@ class OpenAICompatClient:
                 extensions=target.extensions,
             )
 
-    async def _call(self, body: dict[str, Any]) -> dict[str, Any]:
-        """One HTTP round trip through the gate; returns the decoded payload, records usage."""
-        get_limiter(self.conn).check_llm_budget(self.user_id, self.persona_id)
-        try:
+    async def _send(self, body: dict[str, Any]) -> httpx.Response:
+        response = await get_gate().run(self._post(body))
+        if response.status_code == 400 and "response_format" in body:
+            # Some servers reject json_schema; the schema is also in the prompt.
+            body = {k: v for k, v in body.items() if k != "response_format"}
             response = await get_gate().run(self._post(body))
-            if response.status_code == 400 and "response_format" in body:
-                # Some servers reject json_schema; the schema is also in the prompt.
-                body = {k: v for k, v in body.items() if k != "response_format"}
-                response = await get_gate().run(self._post(body))
-        except httpx.HTTPError as exc:
-            log.warning("LLM backend unreachable (%s)", type(exc).__name__)
-            raise LLMUnavailable(BACKEND_FAILED) from None
+        return response
+
+    async def _call(self, body: dict[str, Any], purpose: str = "") -> dict[str, Any]:
+        """One HTTP round trip through the gate (plus one retry of a transient failure);
+        returns the decoded payload, records usage."""
+        get_limiter(self.conn).check_llm_budget(self.user_id, self.persona_id)
+        retry_timeouts = purpose not in PREDICT_PURPOSES
+        for attempt in range(2):
+            last = attempt == 1
+            try:
+                response = await self._send(body)
+            except httpx.HTTPError as exc:
+                transient = isinstance(exc, httpx.TransportError) and (
+                    not isinstance(exc, httpx.TimeoutException)
+                    or isinstance(exc, httpx.ConnectTimeout)
+                    or retry_timeouts
+                )
+                if last or not transient:
+                    log.warning("LLM backend unreachable (%s)", type(exc).__name__)
+                    raise LLMUnavailable(BACKEND_FAILED) from None
+                log.warning("LLM backend unreachable (%s), retrying", type(exc).__name__)
+            else:
+                if last or response.status_code not in TRANSIENT_STATUSES:
+                    break
+                log.warning("LLM backend returned HTTP %d, retrying", response.status_code)
+            await _sleep(RETRY_PAUSE_S)  # outside the gate
         status = response.status_code
         if status == 429:
             raise RateLimited("LLM backend rate limit", retry_after=_retry_after(response))
@@ -257,7 +305,7 @@ class OpenAICompatClient:
         body: dict[str, Any] = {
             "model": self.backend.model,
             "messages": messages,
-            "temperature": 0.2,
+            "temperature": temperature_for(purpose),
             "max_tokens": max(max_tokens, MIN_MAX_TOKENS),
             "reasoning_effort": "none",
             "response_format": {
@@ -267,7 +315,7 @@ class OpenAICompatClient:
         }
         totals = [0, 0, None]
         for attempt in range(2):  # one repair retry
-            payload = await self._call(body)
+            payload = await self._call(body, purpose)
             t_in, t_out, cost = payload.pop("_wwyd_usage")
             totals[0] += t_in
             totals[1] += t_out

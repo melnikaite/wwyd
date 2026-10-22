@@ -128,6 +128,36 @@ def parameters(p: StyleProfile) -> str:
     return "Owner's style with this audience (match it in the answer):\n" + "\n".join(lines)
 
 
+CASE_NORMAL = "Case: capital at the start of each sentence"
+CASE_LOWER = "Case: lowercase start"
+
+
+def case_line(p: StyleProfile | None) -> str | None:
+    """The answer call's ``Case:`` line, only when a strong stylometry profile decides it.
+    Style claim text is never parsed (it may be in any language); without a decisive
+    profile there is no line and the answer follows the style claims."""
+    if p is None:
+        return None
+    if p.lowercase_share >= STRONG:
+        return CASE_LOWER
+    if p.lowercase_share <= 1 - STRONG:
+        return CASE_NORMAL
+    return None
+
+
+def _upper_first(text: str) -> str:
+    for i, ch in enumerate(text):
+        if ch.isalpha():
+            # Leave mixed-case words ("iPhone") alone.
+            nxt = text[i + 1 : i + 2]
+            if ch.islower() and not nxt.isupper():
+                return text[:i] + ch.upper() + text[i + 1 :]
+            return text
+        if not ch.isspace() and ch not in "\"'«“(":
+            return text
+    return text
+
+
 def _lower_first(text: str) -> str:
     for i, ch in enumerate(text):
         if ch.isalpha():
@@ -149,9 +179,12 @@ def _drop_period(text: str) -> str:
 
 
 def apply_rules(text: str, p: StyleProfile) -> str:
-    """Lowercase start and no final period, each only where the profile is strong."""
+    """Lowercase or capital start and no final period, each only where the profile is
+    strong."""
     if p.lowercase_share >= STRONG:
         text = _lower_first(text)
+    elif p.lowercase_share <= 1 - STRONG:
+        text = _upper_first(text)
     if 1 - p.period_share >= STRONG:
         text = _drop_period(text)
     return text

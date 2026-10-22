@@ -110,6 +110,17 @@ later say what they would actually have done (see corrections under `ingest_raw`
   the owner's behalf.
 - `escalate` codes: `low_confidence`, `out_of_persona`, `boundary`, `rate_limited`,
   `spend_cap`, `llm_unavailable`, `audience_not_permitted`. Hand the situation to the owner.
+  `boundary` means a topic the owner does not let anyone answer for them (for example
+  salary); a rule such as "no calls on weekends" is answered with the decline instead.
+  `out_of_persona` also means the persona has nothing on the topic: when no claim other
+  than style covers the situation (a favour, a plan or an opinion the owner never
+  expressed), wwyd does not guess; ask the owner or answer it yourself.
+- Language: the answer is in the situation's language unless a claim says which language
+  the owner uses.
+- Dates and times: the server tells the model the current weekday, date and time in the
+  persona's timezone, so "tomorrow" or "on Saturday" in `situation` and `context` resolve
+  correctly. Set the timezone with `update_settings` (`timezone`, an IANA name; default
+  UTC).
 
 ### `depends_on` and `context`
 
@@ -119,7 +130,12 @@ owner's voice and never asserts what wwyd cannot know: when the owner's real ans
 depends on such things it stays non-committal ("let me check and get back to you").
 `depends_on` then says, in one or two plain sentences from the owner's claims and in the
 answer's language, what the answer depends on; it is `null` when nothing outside the
-persona matters. It has no structure and no fixed vocabulary, is not styled, and is at
+persona matters. `depends_on` is `null` when the owner's claims put no condition on the
+answer: wwyd models the person, not the world, and never adds conditions of its own such
+as free time. So a `null` `depends_on` does not mean your facts agree: if you can see the
+owner's calendar (or other facts), check them before sending `answer`, or call `predict`
+again with what you found in `context`. While `depends_on` is not `null`, `answer` neither accepts nor
+declines (the server re-asks once and otherwise escalates `low_confidence`). It has no structure and no fixed vocabulary, is not styled, and is at
 most 400 characters. A non-empty `depends_on` is not an escalation.
 
 What to do with it is up to you:
@@ -298,7 +314,16 @@ if s.status == "partial":
 ```
 
 Analyzers run last, over the processed episodes only, so resending `remaining_records`
-counts each episode once. `failed` means a real error (do not blindly resend);
+counts each episode once.
+
+The server retries a single LLM call once on a transient error (connection refused, HTTP
+502/503/504, a read timeout during ingest) before it stops the job; jobs themselves are
+never retried by the server. `llm_unavailable` has no `retry_after`: resend
+`remaining_records` with a growing pause (e.g. 30 s, 60 s, 120 s), then give up and tell
+the owner. The usual cause is a busy single-slot local backend (e.g. LocalAI answering
+another request); raising its parallelism or ingesting smaller batches helps.
+
+`failed` means a real error (do not blindly resend);
 `interrupted` (server restart) means resend the whole batch.
 
 **Incremental sync with `source`.** Pass an owner-chosen slug (`[a-z0-9][a-z0-9_-]{0,39}`,

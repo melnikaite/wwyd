@@ -5,13 +5,13 @@ import io
 import json
 import random
 
-from test_predict import STYLE, answer, seed
+from test_predict import MEETING, STYLE, answer, seed
 
 from wwyd.eval import main
 
 
 def test_eval_detection_rate(conn, user, pid, fake_llm, tmp_path):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     fake_llm.on("answer", answer("predicted reply"))
     pairs = tmp_path / "pairs.jsonl"
     lines = [{"situation": f"s{i}", "audience": "everyone", "real_reply": "real"} for i in range(4)]

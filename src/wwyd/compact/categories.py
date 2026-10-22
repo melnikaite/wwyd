@@ -48,7 +48,7 @@ MERGE_SYSTEM = """\
 You keep a person's category tree tidy. Each category has a path (segments separated by
 "/") and a one-line description. Find categories in "new" that mean the same thing as
 another category in "new" or in "others": synonyms, singular/plural, or the same idea in
-another language (e.g. "films", "movies" and "кино"). A category and its own parent or
+another language (e.g. "beekeeping", "apiculture" and "пчеловодство"). A category and its own parent or
 child are never synonyms. Different but related topics are not synonyms.
 Answer only with JSON: {"pairs": [{"a": "<path from new>", "b": "<other path>"}]};
 an empty list when nothing matches.

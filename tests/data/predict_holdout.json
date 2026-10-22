@@ -1,0 +1,649 @@
+{
+  "_doc": "Blind holdout for predict (tests/test_predict_eval.py, WWYD_EVAL_FILE=predict_holdout.json). Same checks as predict_scenarios.json plus language uk|es|fr and style checks (style.<persona> applies to every answer of that persona; per-scenario keys override): max_chars, lowercase_start, no_final_period, absent_any. Scenario 'kind' (reply|decision) is passed to predict. 'now' is a Thursday.",
+  "now": "2026-10-22T08:00:00+00:00",
+  "style": {
+    "helper": {
+      "absent_any": [
+        "здравствуйте",
+        "привет",
+        "добрый день",
+        "добрый вечер",
+        " ты "
+      ],
+      "max_chars": 400,
+      "capital_start": true
+    },
+    "lowkey": {
+      "lowercase_start": true,
+      "no_final_period": true,
+      "max_chars": 180,
+      "absent_any": [
+        "hello",
+        "dear"
+      ]
+    },
+    "formal": {
+      "absent_any": [
+        "hallo",
+        "liebe",
+        "lieber",
+        " du ",
+        "dich ",
+        "dir "
+      ],
+      "max_chars": 400,
+      "capital_start": true
+    },
+    "gamer": {
+      "absent_any": [
+        "hola",
+        "buenos días"
+      ],
+      "max_chars": 300
+    },
+    "fixer": {
+      "max_chars": 150,
+      "absent_any": [
+        "привіт",
+        "вітаю"
+      ]
+    }
+  },
+  "personas": {
+    "helper": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Всегда обращается на «Вы», пишет вежливо и коротко, без приветствий."
+        },
+        {
+          "kind": "boundary",
+          "category": "communication/boundaries",
+          "text": "Ни с кем не обсуждает свои политические взгляды."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "volunteering",
+          "text": "По субботам до обеда всегда помогает в приюте для животных и на это время ничего другого не назначает."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "pets",
+          "text": "Не берёт чужих животных на передержку."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "cars",
+          "text": "Одалживает свою машину, только если сам в этот день ею не пользуется."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "neighbours",
+          "text": "Помогает соседям с мелким ремонтом, если в это время свободен."
+        },
+        {
+          "kind": "preference",
+          "category": "theatre",
+          "text": "Заядлый театрал."
+        },
+        {
+          "kind": "preference",
+          "category": "language_classes",
+          "text": "Ходит на курсы испанского по вторникам вечером."
+        }
+      ]
+    },
+    "lowkey": {
+      "timezone": "Europe/London",
+      "stylometry": {
+        "text": "Writes in 1 short line, lowercase, no final period (120 messages).",
+        "stats": {
+          "n": 120,
+          "chars_p50": 25.0,
+          "chars_p90": 60.0,
+          "sentences_p50": 1.0,
+          "sentences_p90": 2.0,
+          "lowercase_share": 0.95,
+          "capital_share": 0.05,
+          "ending_dominant": 7,
+          "ending_share": 0.9,
+          "period_share": 0.05,
+          "emoji_share": 0.0
+        }
+      },
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Always writes in lowercase, very short, no final period, no greetings."
+        },
+        {
+          "kind": "preference",
+          "category": "board_games",
+          "text": "Board game geek."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "cycling",
+          "text": "Never cycles in the rain."
+        },
+        {
+          "kind": "boundary",
+          "category": "photography",
+          "text": "Never posts photos of other people online."
+        },
+        {
+          "kind": "boundary",
+          "category": "communication/boundaries",
+          "text": "Lets nobody speak for them about their relationship."
+        },
+        {
+          "kind": "preference",
+          "category": "football",
+          "text": "Goes to every home match of the local football club."
+        }
+      ]
+    },
+    "formal": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Schreibt förmlich, siezt immer, ohne Emojis und ohne Begrüßung."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "sewing",
+          "text": "Näht keine Kleidung für andere."
+        },
+        {
+          "kind": "preference",
+          "category": "fishing",
+          "text": "Leidenschaftlicher Angler."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "weekend",
+          "text": "Geht sonntags nie vor 12 Uhr aus dem Haus."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "museums",
+          "text": "Besucht Ausstellungen nur, wenn sie Fotografie zeigen."
+        },
+        {
+          "kind": "boundary",
+          "category": "communication/boundaries",
+          "text": "Spricht mit niemandem über die eigene Familie."
+        }
+      ]
+    },
+    "gamer": {
+      "timezone": "Europe/Madrid",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Escribe siempre informal, con algún emoji, sin saludos."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "gaming",
+          "text": "Nunca juega a videojuegos online con desconocidos."
+        },
+        {
+          "kind": "preference",
+          "category": "book_club",
+          "text": "Va al club de lectura los jueves por la tarde."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "books",
+          "text": "Presta libros solo a quien le devolvió el último a tiempo."
+        }
+      ]
+    },
+    "fixer": {
+      "timezone": "Europe/Kyiv",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Пише дуже коротко, одним реченням, без привітань."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "renovation",
+          "text": "Ніколи не фарбує стіни сам, тільки наймає майстрів."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "cars",
+          "text": "Охоче лагодить друзям машини у вихідні, у будні — ніколи."
+        },
+        {
+          "kind": "boundary",
+          "category": "communication/boundaries",
+          "text": "Ні з ким не обговорює релігію."
+        }
+      ]
+    }
+  },
+  "scenarios": [
+    {
+      "id": "hp_pet_decline",
+      "persona": "helper",
+      "situation": "Можете взять нашего кота на две недели, пока нас не будет?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "hp_car_open",
+      "persona": "helper",
+      "situation": "Можно взять Вашу машину в пятницу?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "stance": "non_committal",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "hp_car_ctx_no",
+      "persona": "helper",
+      "situation": "Можно взять Вашу машину в пятницу?",
+      "context": "В пятницу владелец сам едет на своей машине за город.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "hp_car_ctx_yes",
+      "persona": "helper",
+      "situation": "Можно взять Вашу машину в пятницу?",
+      "context": "В пятницу машина владельцу не нужна: весь день дома.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "accept",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "hp_politics",
+      "persona": "helper",
+      "situation": "А Вы за кого голосовали на последних выборах?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "boundary"
+      }
+    },
+    {
+      "id": "hp_same_time_other",
+      "persona": "helper",
+      "situation": "Посоветуете, какой сериал посмотреть во вторник вечером?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "hp_repair_sat",
+      "persona": "helper",
+      "situation": "Поможете в субботу в 10 утра повесить полки у меня в прихожей?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "hp_repair_open",
+      "persona": "helper",
+      "situation": "Поможете в пятницу вечером повесить полки у меня в прихожей?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "stance": "non_committal",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "hp_repair_ctx",
+      "persona": "helper",
+      "situation": "Поможете в пятницу вечером повесить полки у меня в прихожей?",
+      "context": "В пятницу вечером у владельца ничего не запланировано.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "accept",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "hp_theatre_label",
+      "persona": "helper",
+      "situation": "В пятницу премьера в городском театре, остался лишний билет. Пойдёте?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "accept",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "hp_decide_foster",
+      "persona": "helper",
+      "situation": "Соседи уезжают и просят взять их собаку на выходные. Брать или нет?",
+      "kind": "decision",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "hp_long_car",
+      "persona": "helper",
+      "situation": "Добрый вечер! Пишу Вам по поводу воскресенья. У нас переезд коробок на склад, и своей машины у меня, к сожалению, нет. Друзья все заняты, а такси с таким количеством вещей не возьмёт. Не могли бы Вы одолжить мне свою машину на пару часов в воскресенье днём? Верну с полным баком.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "stance": "non_committal",
+        "language": "ru"
+      }
+    },
+    {
+      "id": "lk_ride_open",
+      "persona": "lowkey",
+      "situation": "ride to the lake tomorrow morning?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "stance": "non_committal",
+        "language": "en"
+      }
+    },
+    {
+      "id": "lk_ride_rain",
+      "persona": "lowkey",
+      "situation": "ride to the lake tomorrow morning?",
+      "context": "Forecast for tomorrow: heavy rain all morning.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "en"
+      }
+    },
+    {
+      "id": "lk_ride_dry",
+      "persona": "lowkey",
+      "situation": "ride to the lake tomorrow morning?",
+      "context": "Tomorrow is forecast dry and sunny.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "accept",
+        "language": "en"
+      }
+    },
+    {
+      "id": "lk_post_photos",
+      "persona": "lowkey",
+      "situation": "can you put the pics from saturday with all of us on your instagram?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "en"
+      }
+    },
+    {
+      "id": "lk_relationship",
+      "persona": "lowkey",
+      "situation": "so are you two still together or what?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "boundary"
+      }
+    },
+    {
+      "id": "lk_laptop",
+      "persona": "lowkey",
+      "situation": "which laptop should i get for uni?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "lk_games_label",
+      "persona": "lowkey",
+      "situation": "strategy board game marathon at mine on saturday, like 6 hours, you in?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "accept",
+        "language": "en"
+      }
+    },
+    {
+      "id": "lk_match",
+      "persona": "lowkey",
+      "situation": "home match on sunday, want to come along?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "accept",
+        "language": "en"
+      }
+    },
+    {
+      "id": "lk_decide_ride",
+      "persona": "lowkey",
+      "situation": "Decide whether the owner joins the club's Sunday group ride; the forecast says steady rain on Sunday.",
+      "kind": "decision",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "en"
+      }
+    },
+    {
+      "id": "lk_long_ride",
+      "persona": "lowkey",
+      "situation": "hey so a few of us are doing the canal loop on friday after work. it's about 40 km, pretty flat, we'd stop for a drink halfway. bring your bike if you want to join, we leave at 6",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "stance": "non_committal",
+        "language": "en"
+      }
+    },
+    {
+      "id": "fm_sew",
+      "persona": "formal",
+      "situation": "Könnten Sie mir bis Samstag ein Kleid für die Hochzeit nähen?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "de"
+      }
+    },
+    {
+      "id": "fm_fish_sat",
+      "persona": "formal",
+      "situation": "Kommen Sie am Samstag früh mit an den See zum Angeln?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "accept",
+        "language": "de"
+      }
+    },
+    {
+      "id": "fm_museum_sun",
+      "persona": "formal",
+      "situation": "Gehen wir am Sonntag um 10 Uhr zusammen ins Museum, in die neue Ausstellung?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "de"
+      }
+    },
+    {
+      "id": "fm_museum_open",
+      "persona": "formal",
+      "situation": "Gehen wir am Samstag zusammen ins Museum, in die neue Ausstellung?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "stance": "non_committal",
+        "language": "de"
+      }
+    },
+    {
+      "id": "fm_museum_ctx",
+      "persona": "formal",
+      "situation": "Gehen wir am Samstag zusammen ins Museum, in die neue Ausstellung?",
+      "context": "Die neue Ausstellung zeigt Fotografien aus den 1920er Jahren.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "accept",
+        "language": "de"
+      }
+    },
+    {
+      "id": "fm_family",
+      "persona": "formal",
+      "situation": "Wie geht es eigentlich Ihren Eltern?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "boundary"
+      }
+    },
+    {
+      "id": "fm_tram",
+      "persona": "formal",
+      "situation": "Was halten Sie von der neuen Straßenbahnlinie?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "fm_decide_sew",
+      "persona": "formal",
+      "situation": "Soll der Besitzer zusagen, für eine Bekannte einen Mantel zu nähen?",
+      "kind": "decision",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "de"
+      }
+    },
+    {
+      "id": "gm_online",
+      "persona": "gamer",
+      "situation": "¿Te unes esta noche a una partida online con gente del foro que no conoces?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "es"
+      }
+    },
+    {
+      "id": "gm_book_open",
+      "persona": "gamer",
+      "situation": "¿Me prestas tu novela de ciencia ficción?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "set",
+        "stance": "non_committal",
+        "language": "es"
+      }
+    },
+    {
+      "id": "gm_book_ctx",
+      "persona": "gamer",
+      "situation": "¿Me prestas tu novela de ciencia ficción?",
+      "context": "Quien pregunta devolvió a tiempo el último libro que le prestaron.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "accept",
+        "language": "es"
+      }
+    },
+    {
+      "id": "gm_insurance",
+      "persona": "gamer",
+      "situation": "¿Qué seguro de coche me recomiendas?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "out_of_persona"
+      }
+    },
+    {
+      "id": "fx_paint",
+      "persona": "fixer",
+      "situation": "Допоможеш у суботу пофарбувати стіни на кухні?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "uk"
+      }
+    },
+    {
+      "id": "fx_car_fri",
+      "persona": "fixer",
+      "situation": "Подивишся завтра мою машину? Щось стукає в підвісці.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "decline",
+        "language": "uk"
+      }
+    },
+    {
+      "id": "fx_car_sun",
+      "persona": "fixer",
+      "situation": "Подивишся в неділю мою машину? Щось стукає в підвісці.",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "stance": "accept",
+        "language": "uk"
+      }
+    },
+    {
+      "id": "fx_religion",
+      "persona": "fixer",
+      "situation": "Ти взагалі віриш у Бога?",
+      "expect": {
+        "type": "escalate",
+        "escalate": "boundary"
+      }
+    }
+  ]
+}

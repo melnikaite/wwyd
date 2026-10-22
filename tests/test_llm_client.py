@@ -129,6 +129,23 @@ async def test_request_shape_and_usage(conn, user, pid, backend, openrouter):
     assert usage["llm_tokens_in"] == 100 and usage["llm_tokens_out"] == 20
 
 
+@pytest.mark.parametrize(
+    ("purpose", "temperature"),
+    [
+        ("route", 0.0),
+        ("analyze", 0.0),
+        ("judge", 0.0),
+        ("answer", 0.2),
+        ("shorten", 0.2),
+        ("style", 0.2),
+    ],
+)
+async def test_temperature_per_purpose(backend, openrouter, purpose, temperature):
+    backend.replies.append(content('{"categories": []}'))
+    await openrouter.complete_json(purpose=purpose, system="s", user="u", schema=SCHEMA)
+    assert backend.requests[0]["temperature"] == temperature
+
+
 async def test_reported_cost_wins(conn, user, pid, backend, openrouter):
     usage = {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.25}
     backend.replies.append(content('{"categories": []}', usage))
@@ -173,9 +190,69 @@ async def test_connection_error(backend, openrouter):
     def down(body):
         raise httpx.ConnectError("refused")
 
-    backend.replies.append(down)
+    backend.replies += [down, down]
     with pytest.raises(LLMUnavailable):
         await complete(openrouter)
+    assert backend.replies == []  # retried once
+
+
+@pytest.fixture(autouse=True)
+def pauses() -> Iterator[list[float]]:
+    slept: list[float] = []
+
+    async def sleep(s: float) -> None:
+        slept.append(s)
+
+    llm_client.set_sleep(sleep)
+    yield slept
+    llm_client.set_sleep(None)
+
+
+def raising(exc: Exception):
+    def reply(body):
+        raise exc
+
+    return reply
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        raising(httpx.ConnectError("refused")),
+        lambda body: httpx.Response(502),
+        lambda body: httpx.Response(503),
+        lambda body: httpx.Response(504),
+    ],
+)
+async def test_transient_retried_then_success(backend, openrouter, pauses, first):
+    backend.replies += [first, content('{"categories": []}')]
+    assert (await complete(openrouter)).data == {"categories": []}
+    assert pauses == [llm_client.RETRY_PAUSE_S]
+    assert len(backend.requests) == 2
+
+
+async def test_transient_retry_then_failure(backend, openrouter, pauses):
+    backend.replies += [lambda body: httpx.Response(503), lambda body: httpx.Response(503)]
+    with pytest.raises(LLMUnavailable):
+        await complete(openrouter)
+    assert len(backend.requests) == 2 and len(pauses) == 1
+
+
+@pytest.mark.parametrize(("purpose", "calls"), [("statements", 2), ("route", 1), ("answer", 1)])
+async def test_timeout_retried_only_off_predict(backend, openrouter, pauses, purpose, calls):
+    timeout = raising(httpx.ReadTimeout("slow"))
+    backend.replies += [timeout, timeout]
+    with pytest.raises(LLMUnavailable):
+        await openrouter.complete_json(purpose=purpose, system="s", user="u", schema=SCHEMA)
+    assert len(backend.requests) == calls and len(pauses) == calls - 1
+
+
+@pytest.mark.parametrize("status", [500, 429, 402])
+async def test_non_transient_status_not_retried(backend, openrouter, pauses, status):
+    backend.replies.append(lambda body: httpx.Response(status))
+    with pytest.raises((LLMUnavailable, RateLimited, SpendCap)):
+        await complete(openrouter)
+    assert len(backend.requests) == 1 and pauses == []
 
 
 async def test_spend_cap_blocks_before_call(conn, user, pid, backend, openrouter):
@@ -314,7 +391,7 @@ async def test_instance_backend_exempt_from_private_check(conn, pid, backend, no
 
 
 async def test_backend_errors_do_not_echo_status(conn, pid, backend, openrouter):
-    backend.replies.append(lambda body: httpx.Response(503))
+    backend.replies += [lambda body: httpx.Response(503)] * 2
     with pytest.raises(LLMUnavailable) as info:
         await complete(openrouter)
     assert info.value.message == llm_client.BACKEND_FAILED and "status" not in info.value.details

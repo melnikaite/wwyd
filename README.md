@@ -220,6 +220,16 @@ uv run ruff check . && uv run ruff format --check .
 ```
 
 `uv run pytest -m llm` runs the few tests that need a live LLM; they are skipped by default.
+
+`uv run pytest -m llm tests/test_predict_eval.py -s` is a repeatable live evaluation of
+`predict`: fixed personas and scenarios in `tests/data/predict_scenarios.json`, structural
+checks (type, escalate code, `depends_on`, answer language) in code and the answer's stance
+(accept / decline / non-committal) judged by the same LLM. It prints a per-scenario table
+and the overall pass rate; run it before and after every prompt change. Environment:
+`WWYD_EVAL_RUNS` (runs per scenario, default 3), `WWYD_EVAL_ONLY` (comma-separated
+scenario ids), `WWYD_EVAL_MIN_PASS` (fail below this rate, 0..1, default 0 = report only).
+Like the other live tests it uses the default backend (LocalAI on
+`http://127.0.0.1:1240/v1`); any OpenAI-compatible backend configured the same way works.
 [SPEC.md](SPEC.md) is the source of truth for the design.
 
 ## Contributing

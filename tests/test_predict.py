@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import pytest
@@ -13,6 +14,7 @@ from wwyd.limits import get_limiter
 from wwyd.mcp.caller import Caller
 from wwyd.predict import predict
 from wwyd.predict.disclosure import TEMPLATES
+from wwyd.predict.prompts import COMMIT_RETRY_NOTE, INSTRUCTIONS, LANGUAGE_RETRY_NOTE
 from wwyd.store import audit
 from wwyd.store.audiences import upsert_audience
 from wwyd.store.claims import add_claims
@@ -65,6 +67,7 @@ def audiences(conn, pid):
 
 
 STYLE = {"kind": "style", "category": "communication/style", "text": "Short, no greeting."}
+BOUNDARY = {"kind": "boundary", "category": "communication/boundaries", "text": "No salary."}
 MEETING = {
     "kind": "decision_rule",
     "category": "work/meetings",
@@ -145,36 +148,75 @@ async def test_fts_fallback(conn, user, pid, fake_llm, route_reply):
     assert ids["meeting"] in ctx and ids["style"] in ctx and ids["food"] not in ctx
 
 
-def _reply(depends: Any = "", text: str = "let me check", **kw: Any) -> dict[str, Any]:
+def _reply(text: str = "let me check", **kw: Any) -> dict[str, Any]:
+    """An answer-call reply (call 2)."""
     return {
-        "a_depends_on": depends,
-        "type": "answer",
         "answer": text,
         "confidence": 0.9,
-        "used_claims": [],
         "language": "en",
-        "escalate": "",
-        "reason": "",
+        "used_claims": [],
+        "z_commits": False,
         **kw,
     }
 
 
-async def test_depends_on_passes_through(conn, user, pid, fake_llm):
+def _analysis(verdict: str = "settled", applicable=("c2",), label="", depends="", **kw: Any):
+    """An analyze-call reply (call 1)."""
+    return {
+        "a_check": "scratch note",
+        "b_applicable": list(applicable),
+        "c_excluded_by": "",
+        "d_verdict": verdict,
+        "e_label": label,
+        "f_depends_on": depends,
+        **kw,
+    }
+
+
+def _scripted(*replies: dict[str, Any]):
+    queue = list(replies)
+
+    def handler(call: dict[str, Any]) -> dict[str, Any]:
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    return handler
+
+
+RULE = "Agrees if 14:55-15:25 is free. Otherwise offers the nearest slot."
+
+
+async def test_depends_on_comes_from_the_analysis(conn, user, pid, fake_llm):
     seed(conn, pid, [STYLE, MEETING])
-    rule = "Agrees if 14:55-15:25 is free. Otherwise offers the nearest slot."
-    fake_llm.on("answer", lambda call: _reply(rule))
+    fake_llm.on("analyze", _analysis("open", depends=RULE))
+    fake_llm.on("answer", _reply())
     out = await predict(conn, owner(user), situation="Call at 15?", audience="default")
-    assert out["type"] == "answer" and out["depends_on"] == rule
+    assert out["type"] == "answer" and out["depends_on"] == RULE
     assert out["answer"] == "let me check"
-    assert "needs" not in out and "a_depends_on" not in out
+    for internal in ("a_check", "b_applicable", "d_verdict", "e_label", "f_depends_on"):
+        assert internal not in out
+    assert "scratch note" not in str(out)
+    second = fake_llm.by_purpose("answer")[0]["user"]
+    assert f"Depends on: {RULE}\n" in second and INSTRUCTIONS["open"] in second
 
 
-@pytest.mark.parametrize("raw", ["", "   ", None, 5])
-async def test_depends_on_null_when_absent(conn, user, pid, fake_llm, raw):
-    seed(conn, pid, [STYLE])
-    fake_llm.on("answer", lambda call: _reply(raw, text="sure"))
+@pytest.mark.parametrize("verdict", ["settled", "ruled_out"])
+@pytest.mark.parametrize("raw", ["", "   ", None, 5, RULE])
+async def test_depends_on_null_unless_open(conn, user, pid, fake_llm, raw, verdict):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis(verdict, depends=raw))
+    fake_llm.on("answer", _reply("sure"))
     out = await predict(conn, owner(user), situation="Hi", audience="default")
     assert out["type"] == "answer" and out["depends_on"] is None
+
+
+@pytest.mark.parametrize("raw", ["", "   ", None])
+async def test_open_without_condition_is_settled(conn, user, pid, fake_llm, raw):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis("open", depends=raw))
+    fake_llm.on("answer", _reply("sure", z_commits=True))
+    out = await predict(conn, owner(user), situation="Hi", audience="default")
+    assert out["depends_on"] is None and len(fake_llm.by_purpose("answer")) == 1
+    assert INSTRUCTIONS["settled"] in fake_llm.by_purpose("answer")[0]["user"]
 
 
 def test_depends_on_cut_to_400():
@@ -189,28 +231,308 @@ def test_depends_on_cut_to_400():
     assert depends_on("  short  ") == "short"
 
 
-def test_answer_schema_key_sorts_before_answer():
-    from wwyd.predict.prompts import ANSWER_SCHEMA, CHECK_KEY, DEPENDS_KEY
+def test_schema_keys_sort_into_generation_order():
+    from wwyd.predict.prompts import ANALYZE_SCHEMA, ANSWER_SCHEMA, COMMITS_KEY
 
-    assert CHECK_KEY < DEPENDS_KEY < "answer"
-    assert CHECK_KEY in ANSWER_SCHEMA["required"]
-    assert DEPENDS_KEY in ANSWER_SCHEMA["properties"] and DEPENDS_KEY in ANSWER_SCHEMA["required"]
-    assert "absent_facts" not in ANSWER_SCHEMA["properties"]
-    assert ANSWER_SCHEMA["properties"]["type"]["enum"] == ["answer", "escalate"]
+    keys = list(ANALYZE_SCHEMA["properties"])
+    assert keys == sorted(keys) and keys[0] == "a_check" and keys[-1] == "f_depends_on"
+    assert "c_excluded_by" in keys
+    assert set(ANALYZE_SCHEMA["required"]) == set(keys)
+    assert ANALYZE_SCHEMA["properties"]["d_verdict"]["enum"] == [
+        "none",
+        "boundary",
+        "ruled_out",
+        "open",
+        "settled",
+    ]
+    keys = list(ANSWER_SCHEMA["properties"])
+    assert keys == sorted(keys) and keys[0] == "answer" and keys[-1] == COMMITS_KEY
+    assert set(ANSWER_SCHEMA["required"]) == set(keys)
+    assert ANSWER_SCHEMA["properties"][COMMITS_KEY] == {"type": "boolean"}
 
 
-def test_interpret_maps_internal_key():
-    from wwyd.predict.answer import interpret
+KINDS = {"c1": "style", "c2": "decision_rule", "c3": "boundary"}
 
-    out = interpret({**_reply("depends on the weather"), "a_check": "rain unknown"}, set())
-    assert out["depends_on"] == "depends on the weather" and "a_depends_on" not in out
-    assert "rain unknown" not in str(out)  # the scratch note is never returned
-    # A non-empty depends_on is never a reason to escalate.
+
+@pytest.mark.parametrize(
+    ("data", "verdict", "applicable", "label"),
+    [
+        (_analysis("settled", ["c1", "c2", "zz", "c2"]), "settled", ["c2"], None),
+        (_analysis("settled", ["c1"]), "none", [], None),  # style only
+        (_analysis("open", [], depends="x"), "none", [], None),
+        (_analysis("none", ["c2"]), "settled", ["c2"], None),  # claims win
+        (_analysis("boundary", ["c3"], "c3"), "boundary", ["c3"], "c3"),
+        (_analysis("boundary", ["c2", "c3"], "c2"), "boundary", ["c2", "c3"], "c3"),
+        (_analysis("boundary", ["c2"], "c2"), "settled", ["c2"], None),  # no boundary claim
+        (_analysis("ruled_out", [], "[c2]"), "ruled_out", ["c2"], "c2"),
+        (_analysis("ruled_out", ["c2"], "q7"), "ruled_out", ["c2"], "c2"),
+        (_analysis("banana", ["c2"]), "settled", ["c2"], None),
+        ({}, "none", [], None),
+        (_analysis("open", ["c2"], c_excluded_by="c2", depends="x"), "ruled_out", ["c2"], "c2"),
+        (_analysis("settled", [], c_excluded_by="c2"), "ruled_out", ["c2"], "c2"),
+        (_analysis("settled", ["c2"], c_excluded_by="c1"), "settled", ["c2"], None),  # style
+        (_analysis("boundary", ["c3"], "c3", c_excluded_by="c2"), "boundary", ["c3"], "c3"),
+    ],
+)
+def test_read_analysis(data, verdict, applicable, label):
+    from wwyd.predict.answer import read_analysis
+
+    found = read_analysis(data, KINDS)
+    assert (found.verdict, found.applicable, found.label) == (verdict, applicable, label)
+
+
+async def test_none_verdict_escalates_without_answer_call(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis("none", []))
+    out = await predict(conn, owner(user), situation="Help me move?", audience="default")
+    assert (out["type"], out["escalate"]) == ("escalate", "out_of_persona")
+    assert not fake_llm.by_purpose("answer")
+    assert "used_claims" not in out
+
+
+async def test_style_only_persona_is_out_of_persona(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE])
+    out = await predict(conn, owner(user), situation="Help me move?", audience="default")
+    assert out["escalate"] == "out_of_persona"
+    assert [c["purpose"] for c in fake_llm.calls] == ["analyze"]
+
+
+async def test_boundary_escalates_without_answer_call(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING, BOUNDARY])
+
+    def by_kind(kind: str):
+        def handler(call):
+            (label,) = re.findall(rf"^\[(c\d)\] \({kind},", call["user"], re.M)
+            return _analysis("boundary", [label], label)
+
+        return handler
+
+    fake_llm.on("analyze", by_kind("boundary"))
+    out = await predict(conn, owner(user), situation="Salary?", audience="everyone")
+    assert (out["escalate"], out["type"]) == ("boundary", "escalate")
+    assert not fake_llm.by_purpose("answer")
+    # Without a boundary claim on the topic the answer call runs as "settled".
+    fake_llm.on("analyze", by_kind("decision_rule"))
+    fake_llm.on("answer", _reply("no"))
+    out = await predict(conn, owner(user), situation="Salary?", audience="everyone")
     assert out["type"] == "answer"
-    # The old "needs" type (or any unknown type) is a failure to commit: low_confidence.
-    for unknown in ("needs", "maybe", None):
-        out = interpret({**_reply(), "type": unknown, "answer": ""}, set())
-        assert (out["type"], out["escalate"]) == ("escalate", "low_confidence")
+
+
+async def test_ruled_out_instruction_names_the_claim(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis("ruled_out", ["c2"], "c2"))
+    fake_llm.on("answer", _reply("can't, sorry", z_commits=True))
+    out = await predict(conn, owner(user), situation="Call at 7?", audience="default")
+    assert out["answer"] == "can't, sorry" and out["depends_on"] is None
+    second = fake_llm.by_purpose("answer")[0]["user"]
+    assert INSTRUCTIONS["ruled_out"].replace("{label}", "c2") in second
+    assert "Depends on:" not in second
+    assert len(fake_llm.by_purpose("answer")) == 1  # committing is fine when ruled out
+
+
+async def test_answer_call_sees_style_and_applicable_claims_only(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING, {**MEETING, "category": "food", "text": "Vegetarian."}])
+    fake_llm.on("analyze", _analysis("settled", ["c2"]))
+    fake_llm.on("answer", _reply("sure"))
+    await predict(conn, owner(user), situation="Call?", audience="default")
+    first = fake_llm.by_purpose("analyze")[0]["user"]
+    second = fake_llm.by_purpose("answer")[0]["user"]
+    assert "Vegetarian." in first and "Vegetarian." not in second
+    assert "[c1] (style" in second and "[c2] (decision_rule" in second
+
+
+async def test_used_claims_fall_back_to_applicable(conn, user, pid, fake_llm):
+    ids = seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("answer", _reply("sure", used_claims=["c9"]))
+    out = await predict(conn, owner(user), situation="Call?", audience="default")
+    assert out["used_claims"] == [ids[1]]
+
+
+async def test_empty_answer_is_low_confidence(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("answer", _reply(""))
+    out = await predict(conn, owner(user), situation="Call?", audience="default")
+    assert out["escalate"] == "low_confidence"
+
+
+async def test_commit_guard_retries_once(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis("open", depends="free at 15?"))
+    committed = _reply("sure, 15 works", z_commits=True)
+    fixed = _reply("let me check")
+    fake_llm.on("answer", _scripted(committed, fixed))
+    out = await predict(conn, owner(user), situation="Call at 15?", audience="default")
+    calls = fake_llm.by_purpose("answer")
+    assert len(calls) == 2
+    assert calls[0]["user"] in calls[1]["user"] and COMMIT_RETRY_NOTE in calls[1]["user"]
+    assert out["type"] == "answer" and out["answer"] == "let me check"
+    assert "z_commits" not in out
+    row = conn.execute("SELECT llm_tokens FROM audit ORDER BY rowid DESC LIMIT 1").fetchone()
+    expected = sum(len(c["system"] + c["user"]) // 4 + 10 for c in fake_llm.calls)
+    assert row[0] == expected  # analyze and both answer calls counted
+
+
+async def test_commit_guard_escalates_after_second_commit(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis("open", depends="free at 15?"))
+    fake_llm.on("answer", _reply("sure, 15 works", z_commits=True))
+    out = await predict(conn, owner(user), situation="Call at 15?", audience="default")
+    assert len(fake_llm.by_purpose("answer")) == 2
+    assert (out["type"], out["escalate"]) == ("escalate", "low_confidence")
+    assert "committed" in out["reason"]
+
+
+@pytest.mark.parametrize(
+    ("verdict", "commits"),
+    [("settled", True), ("ruled_out", True), ("open", False), ("open", None)],
+)
+async def test_commit_guard_no_retry(conn, user, pid, fake_llm, verdict, commits):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis(verdict, label="c2", depends="free at 15?"))
+    fake_llm.on("answer", _reply("ok", z_commits=commits))
+    out = await predict(conn, owner(user), situation="Call at 15?", audience="default")
+    assert len(fake_llm.by_purpose("answer")) == 1
+    assert out["type"] == "answer" and "z_commits" not in out
+
+
+RU_SITUATION = "Одолжишь мне пятьдесят евро до пятницы?"
+
+
+async def test_language_line_in_answer_call_only(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("answer", _reply("конечно, без проблем", language="ru"))
+    await predict(conn, owner(user), situation=RU_SITUATION, audience="default")
+    await predict(conn, owner(user), situation="Ok?", audience="default")
+    ru, unsure = fake_llm.by_purpose("answer")
+    assert "\nAnswer language: ru (Russian)\nSituation: " in ru["user"]
+    assert "Answer language" not in unsure["user"]
+    assert ru["system"] == unsure["system"]
+    assert all("Answer language" not in c["user"] for c in fake_llm.by_purpose("analyze"))
+
+
+async def test_language_guard_reasks_once(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    wrong = _reply("sure, no problem at all")
+    right = _reply("конечно, без проблем", language="ru")
+    fake_llm.on("answer", _scripted(wrong, right))
+    out = await predict(conn, owner(user), situation=RU_SITUATION, audience="default")
+    calls = fake_llm.by_purpose("answer")
+    assert len(calls) == 2 and LANGUAGE_RETRY_NOTE in calls[1]["user"]
+    assert COMMIT_RETRY_NOTE not in calls[1]["user"]
+    assert len(fake_llm.by_purpose("analyze")) == 1  # the analysis is never re-asked
+    assert out["answer"] == "конечно, без проблем"
+
+
+async def test_language_guard_same_script(conn, user, pid, fake_llm):
+    """English situation, German answer: a script check could not see this one."""
+    seed(conn, pid, [STYLE, MEETING])
+    wrong = _reply("ja, gerne", language="de")
+    right = _reply("sure, happy to", language="en")
+    fake_llm.on("answer", _scripted(wrong, right))
+    out = await predict(
+        conn, owner(user), situation="Can you lend me 30 euros until Friday?", audience="default"
+    )
+    assert len(fake_llm.by_purpose("answer")) == 2
+    assert out["answer"] == "sure, happy to"
+
+
+async def test_language_mismatch_accepted_on_second_reply(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("answer", _reply("sure, no problem at all"))
+    out = await predict(conn, owner(user), situation=RU_SITUATION, audience="default")
+    assert len(fake_llm.by_purpose("answer")) == 2
+    assert out["type"] == "answer" and out["answer"] == "sure, no problem at all"
+
+
+async def test_combined_notes_single_reask(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis("open", depends="если деньги есть"))
+    fake_llm.on("answer", _reply("sure, here you go", z_commits=True))
+    out = await predict(conn, owner(user), situation=RU_SITUATION, audience="default")
+    calls = fake_llm.by_purpose("answer")
+    assert len(calls) == 2  # at most one re-ask
+    assert COMMIT_RETRY_NOTE in calls[1]["user"] and LANGUAGE_RETRY_NOTE in calls[1]["user"]
+    assert (out["type"], out["escalate"]) == ("escalate", "low_confidence")
+
+
+@pytest.mark.parametrize(
+    ("situation", "text", "lang"),
+    [
+        ("Ок?", "sure, no problem at all", "en"),  # situation too short to judge
+        ("Встреча с team lead and the whole crew?", "sure, no problem", "en"),  # mixed
+        ("Lunch on Thursday at one?", "sure, sounds good to me", "en"),  # same language
+        (RU_SITUATION, "ok", "ru"),  # answer too short, language field agrees
+        (RU_SITUATION, "ok", ""),  # nothing to compare with
+    ],
+)
+async def test_language_guard_ignores_unclear(conn, user, pid, fake_llm, situation, text, lang):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("answer", _reply(text, language=lang))
+    await predict(conn, owner(user), situation=situation, audience="default")
+    assert len(fake_llm.by_purpose("answer")) == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        ("Can you lend me 30 euros until Friday?", "en"),
+        ("What do you think about the new phone?", "en"),
+        ("Одолжишь 150 евро до зарплаты?", "ru"),
+        ("Созвонимся завтра в 17:00?", "ru"),
+        ("Позичиш мені 50 євро до п'ятниці?", "uk"),
+        ("Hast du morgen Lust auf einen Kaffee?", "de"),
+        ("vienna ist zu weit für einen weekendtrip, sorry!", "de"),
+        ("¿Vienes mañana a la cena con nosotros?", "es"),
+        ("Tu viens demain soir au cinéma avec nous ?", "fr"),
+        ("ok", None),
+        ("Call at 15?", None),
+        ("ja, gerne", None),
+        ("Привет hello мир world", None),
+        ("Müller, señor?", None),
+    ],
+)
+def test_language_detection(text, code):
+    from wwyd.predict.language import detect
+
+    assert detect(text) == code
+
+
+def test_language_normalise():
+    from wwyd.predict.language import normalise
+
+    assert normalise("de-DE") == "de" and normalise(" RU ") == "ru"
+    assert normalise("pt") is None and normalise(None) is None
+
+
+def test_prompts_static_and_no_favour_fallback():
+    from wwyd.predict.prompts import ANALYZE_SYSTEM, ANSWER_SYSTEM
+
+    assert "Never guess" in ANALYZE_SYSTEM
+    assert "style and claims suggest" not in ANALYZE_SYSTEM + ANSWER_SYSTEM
+    for common in ("salary", "lunch", "meeting", "Vienna", "vegetar"):
+        assert common not in ANALYZE_SYSTEM + ANSWER_SYSTEM
+
+
+async def test_now_line_in_persona_timezone(conn, user, pid, fake_llm, monkeypatch):
+    from datetime import UTC, datetime
+
+    import wwyd.predict as predict_pkg
+    from wwyd.store.personas import update_settings as _update
+
+    monkeypatch.setattr(predict_pkg, "_now", lambda: datetime(2026, 10, 19, 16, 40, tzinfo=UTC))
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("answer", lambda call: _reply())
+    await predict(conn, owner(user), situation="Call?", audience="default")
+    _update(conn, pid, timezone="Europe/Berlin")
+    await predict(conn, owner(user), situation="Call?", audience="default")
+    conn.execute("UPDATE personas SET timezone = 'Not/AZone' WHERE id = ?", (pid,))
+    await predict(conn, owner(user), situation="Call?", audience="default")
+    utc, berlin, bad = fake_llm.by_purpose("answer")[-3:]
+    assert "Now: Monday 2026-10-19 16:40 (UTC)\nSituation: Call?" in utc["user"]
+    assert all("Now: " in c["user"] for c in fake_llm.by_purpose("analyze"))
+    assert "Now: Monday 2026-10-19 18:40 (Europe/Berlin)\n" in berlin["user"]
+    assert "Now: Monday 2026-10-19 16:40 (UTC)\n" in bad["user"]
+    assert utc["system"] == berlin["system"] and "2026-10-19" not in utc["system"]
 
 
 async def test_context_in_user_message_not_system(conn, user, pid, fake_llm):
@@ -220,15 +542,18 @@ async def test_context_in_user_message_not_system(conn, user, pid, fake_llm):
     await predict(
         conn, owner(user), situation="Call?", audience="default", context="free from 19:30"
     )
-    first, second = fake_llm.calls[-2:]
+    first, second = fake_llm.by_purpose("answer")[-2:]
     assert "Context: none" in first["user"]
+    a1, a2 = fake_llm.by_purpose("analyze")[-2:]
+    assert "Context: none" in a1["user"] and "Context: free from 19:30" in a2["user"]
+    assert a1["system"] == a2["system"] and "19:30" not in a2["system"]
     assert "Context: free from 19:30" in second["user"]
     assert "19:30" not in second["system"]
     assert first["system"] == second["system"]
 
 
 async def test_predict_tool_schema_has_context_not_facts(client, conn, pid, fake_llm):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     fake_llm.on("answer", lambda call: _reply())
     (tool,) = [t for t in (await client.list_tools()).tools if t.name == "predict"]
     props = tool.input_schema["properties"]
@@ -249,7 +574,7 @@ async def test_predict_tool_schema_has_context_not_facts(client, conn, pid, fake
     ],
 )
 async def test_llm_errors_escalate(conn, user, pid, fake_llm, exc, code):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
 
     def handler(call):
         raise exc
@@ -260,34 +585,21 @@ async def test_llm_errors_escalate(conn, user, pid, fake_llm, exc, code):
     assert audit.list_audit(conn, pid)["entries"][0]["outcome"] == f"escalate:{code}"
 
 
-async def test_model_escalations_and_junk(conn, user, pid, fake_llm):
-    seed(conn, pid, [STYLE])
-    reply = {
-        "type": "escalate",
-        "answer": "",
-        "confidence": 0,
-        "used_claims": [],
-        "language": "en",
-        "a_depends_on": "",
-        "escalate": "boundary",
-        "reason": "never in writing",
-    }
-    fake_llm.on("answer", reply)
+async def test_model_junk(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", {"d_verdict": "banana"})  # no applicable claim
     out = await predict(conn, owner(user), situation="Salary?", audience="everyone")
-    assert out["escalate"] == "out_of_persona"  # no boundary claim in the context
-    seed(
-        conn,
-        pid,
-        [{"kind": "boundary", "category": "communication/boundaries", "text": "No salary."}],
-    )
+    assert out["escalate"] == "out_of_persona"
+    fake_llm.on("analyze", ["not", "an", "object"])
     out = await predict(conn, owner(user), situation="Salary?", audience="everyone")
-    assert (out["escalate"], out["reason"]) == ("boundary", "never in writing")
-    fake_llm.on("answer", {"type": "banana"})
-    out = await predict(conn, owner(user), situation="Salary?", audience="everyone")
-    assert out["escalate"] == "low_confidence"
+    assert out["escalate"] == "llm_unavailable"
+    fake_llm.on("analyze", _analysis())
     fake_llm.on("answer", ["not", "an", "object"])
     out = await predict(conn, owner(user), situation="Salary?", audience="everyone")
     assert out["escalate"] == "llm_unavailable"
+    fake_llm.on("answer", {"type": "banana"})
+    out = await predict(conn, owner(user), situation="Salary?", audience="everyone")
+    assert out["escalate"] == "low_confidence"
 
 
 async def test_no_visible_claims_escalates_without_llm(conn, user, pid, fake_llm):
@@ -297,7 +609,7 @@ async def test_no_visible_claims_escalates_without_llm(conn, user, pid, fake_llm
 
 
 async def test_low_confidence(conn, user, pid, fake_llm):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     fake_llm.on("answer", answer(confidence=0.4))
     out = await predict(conn, owner(user), situation="Hi", audience="everyone")
     assert out["type"] == "escalate" and out["escalate"] == "low_confidence"
@@ -310,7 +622,7 @@ async def test_low_confidence(conn, user, pid, fake_llm):
 
 @pytest.mark.parametrize("lang", ["en", "ru", "de", "uk", "es", "fr", "pt-BR", ""])
 async def test_disclosure_languages(conn, user, pid, fake_llm, lang):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     update_settings(conn, pid, display_name="Eugene")
     fake_llm.on("answer", answer(lang=lang))
     out = await predict(conn, owner(user), situation="Hi", audience="everyone")
@@ -320,7 +632,7 @@ async def test_disclosure_languages(conn, user, pid, fake_llm, lang):
 
 
 async def test_disclosure_override(conn, user, pid, fake_llm):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     update_settings(conn, pid, display_name="Eugene", disclosure_template="Bot of {owner}:")
     fake_llm.on("answer", answer(lang="ru"))
     out = await predict(conn, owner(user), situation="Hi", audience="everyone")
@@ -328,8 +640,8 @@ async def test_disclosure_override(conn, user, pid, fake_llm):
 
 
 async def test_used_claims_not_in_context_dropped(conn, user, pid, fake_llm, audiences):
-    (shown,) = seed(conn, pid, [STYLE])
-    (hidden,) = seed(conn, pid, [{**MEETING, "visibility": "owner_only"}])
+    _, shown = seed(conn, pid, [STYLE, MEETING])
+    (hidden,) = seed(conn, pid, [{**MEETING, "text": "Hidden.", "visibility": "owner_only"}])
     fake_llm.on("answer", answer(used=[shown, hidden, "clm_a1", shown]))
     out = await predict(conn, owner(user), situation="Hi", audience="work")
     assert out["used_claims"] == [shown]
@@ -405,7 +717,7 @@ async def test_respond_audience_not_permitted(conn, user, pid, fake_llm, audienc
 
 
 async def test_unknown_audience_falls_back_with_hint(conn, user, pid, fake_llm):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     fake_llm.on("answer", answer())
     out = await predict(conn, owner(user), situation="Hi", audience="strangers")
     assert out["type"] == "answer"
@@ -414,7 +726,7 @@ async def test_unknown_audience_falls_back_with_hint(conn, user, pid, fake_llm):
 
 
 async def test_default_alias_resolves_without_fallback(conn, user, pid, fake_llm):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     upsert_audience(conn, pid, "everyone", rename_to="anyone")
     fake_llm.on("answer", answer())
     out = await predict(conn, owner(user), situation="Hi", audience="default")
@@ -424,7 +736,7 @@ async def test_default_alias_resolves_without_fallback(conn, user, pid, fake_llm
 
 
 async def test_default_alias_respond_checks_real_name(conn, user, pid, fake_llm, audiences):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     fake_llm.on("answer", answer())
     # A scope naming "default" does not cover the default audience: scopes name real ones.
     out = await predict(conn, respond(user, ("default",)), situation="Hi", audience="default")
@@ -437,25 +749,25 @@ async def test_default_alias_respond_checks_real_name(conn, user, pid, fake_llm,
 
 
 async def test_predict_limits(conn, user, pid, fake_llm, audiences):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     fake_llm.on("answer", answer())
     limiter = get_limiter(conn)
     limiter.set_own_limits(user.user_id, {"predict_per_audience_per_day": 1})
     assert (await predict(conn, owner(user), situation="Hi", audience="work"))["type"] == "answer"
     out = await predict(conn, owner(user), situation="Hi", audience="work")
     assert out["escalate"] == "rate_limited"
-    assert len(fake_llm.calls) == 1
+    assert len(fake_llm.by_purpose("answer")) == 1
     # Another audience has its own counter.
     assert (await predict(conn, owner(user), situation="Hi", audience="family"))["type"] == "answer"
     limiter.set_own_limits(user.user_id, {"predict_per_day": 2})
     out = await predict(conn, owner(user), situation="Hi", audience="everyone")
     assert out["escalate"] == "rate_limited"
-    assert len(fake_llm.calls) == 2
+    assert len(fake_llm.by_purpose("answer")) == 2
     assert limiter.usage(user.user_id)["predict"] == 2
 
 
 async def test_audit_rows(conn, user, pid, fake_llm, audiences):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     fake_llm.on("answer", answer(confidence=0.77))
     caller = respond(user, client_name="Responder", subject_id="grt_abc")
     await predict(conn, caller, situation="Hi", audience="work")
@@ -497,7 +809,7 @@ async def test_list_audit_filters_and_purge(conn, user, pid, fake_llm):
 
 
 async def test_predict_tool_as_respond(conn, user, pid, fake_llm, audiences):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     fake_llm.on("answer", answer())
     server = make_server(conn, user, "respond", audiences=("work",))
     async with Client(server) as c:
@@ -510,13 +822,13 @@ async def test_predict_tool_as_respond(conn, user, pid, fake_llm, audiences):
 
 
 async def test_owner_tools_and_list_audit(client, conn, pid, fake_llm):
-    seed(conn, pid, [STYLE])
+    seed(conn, pid, [STYLE, MEETING])
     fake_llm.on("answer", answer())
     await call(client, "predict", {"situation": "Hi", "audience": "everyone"})
     out = await call(client, "list_audit", {})
     assert out["entries"][0]["outcome"] == "answer"
     persona = await call(client, "get_persona", {})
-    assert persona["claims_used"] == 1
+    assert persona["claims_used"] == 2
 
 
 # --- privacy canary ------------------------------------------------------------------------
@@ -567,11 +879,10 @@ async def test_predict_privacy_canary(conn, user, pid, fake_llm, audiences, capl
 
 
 def test_labels_map_back_to_claim_ids():
-    from wwyd.predict.answer import interpret
+    from wwyd.predict.answer import used_claims
 
     data = _reply(used_claims=["c2", "[c1]", "a2", "c9"])
-    out = interpret(data, {"c1": "clm_one", "c2": "clm_two"})
-    assert out["used_claims"] == ["clm_two", "clm_one"]
+    assert used_claims(data, {"c1": "clm_one", "c2": "clm_two"}) == ["clm_two", "clm_one"]
 
 
 async def test_prediction_id_and_used_claims_in_audit(conn, user, pid, fake_llm, audiences):
@@ -592,3 +903,52 @@ async def test_prediction_id_and_used_claims_in_audit(conn, user, pid, fake_llm,
 
     quiet = await predict(conn, owner(user), situation="Hi", audience="everyone", audit=False)
     assert "prediction_id" not in quiet
+
+
+@pytest.mark.parametrize(
+    ("verdict", "seen"), [("settled", True), ("open", False), ("ruled_out", False)]
+)
+async def test_analysis_line_only_for_settled(conn, user, pid, fake_llm, verdict, seen):
+    """The analyze call's conclusion (a_check) reaches the settled answer call only; it is
+    never part of the result."""
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis(verdict, ["c2"], "c2", depends=RULE))
+    fake_llm.on("answer", _reply("sure"))
+    out = await predict(conn, owner(user), situation="Call at 15?", audience="default")
+    second = fake_llm.by_purpose("answer")[0]["user"]
+    assert ("Analysis: scratch note\n" in second) is seen
+    assert "Case: " not in second  # no stylometry profile, no Case line
+    if seen:
+        assert second.index("Analysis: ") < second.index("Instruction:")
+    assert "scratch note" not in str(out)
+
+
+def test_answer_user_lines_in_order():
+    from wwyd.predict.prompts import answer_user
+
+    text = answer_user(
+        owner="Ann",
+        audience="work",
+        audience_description="",
+        claims=["[c1] (style, s) Short."],
+        context=None,
+        kind="reply",
+        situation="Hi?",
+        now="Monday",
+        instruction="Instruction: x",
+        analysis="It fits.",
+        case="Case: normal",
+    )
+    assert text.endswith("Context: none\nCase: normal\nAnalysis: It fits.\nInstruction: x")
+    plain = answer_user(
+        owner="Ann",
+        audience="work",
+        audience_description="",
+        claims=[],
+        context=None,
+        kind="reply",
+        situation="Hi?",
+        now="Monday",
+        instruction="Instruction: x",
+    )
+    assert "Analysis:" not in plain and "Case:" not in plain

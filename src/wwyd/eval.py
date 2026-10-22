@@ -92,3 +92,61 @@ def main(
     finally:
         if own_conn:
             conn.close()
+
+
+STANCES = ("accept", "decline", "non_committal")
+_STANCE_SYSTEM = """You classify a reply to a request or invitation. Answer with JSON
+{"stance": "accept" | "decline" | "non_committal"}.
+- accept: the reply agrees or says yes, also when it names a condition that the request
+  already satisfies.
+- decline: it refuses, says no or turns the request down, also when it adds an
+  alternative or a counter-offer ("not this time, but another day gladly"), even a
+  conditional one: refusing the requested thing is a decline.
+- non_committal: it neither agrees nor refuses: it asks a question, postpones, or says it
+  has to check first.
+For a question that is not a request, accept means the reply answers it, decline means it
+refuses to.
+
+Request: Хочешь со мной на мастер-класс по стеклу в субботу?
+Reply: в субботу не могу, давай в воскресенье?
+{"stance": "decline"}
+
+Request: Kayaking on the lake at 10, it's calm today.
+Reply: if it's calm, I'm in! see you at 10
+{"stance": "accept"}
+
+Request: Hilfst du mir am Freitag beim Aquarium putzen?
+Reply: muss erst schauen, ob ich da kann, sag ich dir morgen
+{"stance": "non_committal"}
+
+Request: Join our origami club tonight?
+Reply: not tonight, it's too late for me, but next week sounds fun
+{"stance": "decline"}
+
+Request: Can you help me repot the bonsai at nine tomorrow morning?
+Reply: not before noon, sorry, but any afternoon works if I'm around
+{"stance": "decline"}
+"""
+_STANCE_SCHEMA = {
+    "type": "object",
+    "properties": {"stance": {"type": "string", "enum": list(STANCES)}},
+    "required": ["stance"],
+}
+
+
+async def judge_stance(conn, persona_id: str, situation: str, answer: str) -> str:  # noqa: ANN001
+    """Classify ``answer`` to ``situation`` as accept / decline / non_committal (live eval).
+
+    Uses the persona's LLM with the ``judge`` purpose; neither text is logged or stored.
+    """
+    from wwyd.llm import get_llm
+
+    result = await get_llm(conn, persona_id).complete_json(
+        purpose="judge",
+        system=_STANCE_SYSTEM,
+        user=f"Request:\n{situation}\n\nReply:\n{answer}",
+        schema=_STANCE_SCHEMA,
+        max_tokens=64,
+    )
+    stance = result.data.get("stance") if isinstance(result.data, dict) else None
+    return stance if stance in STANCES else "unknown"

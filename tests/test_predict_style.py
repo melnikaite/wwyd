@@ -8,7 +8,8 @@ from datetime import date
 
 import pytest
 from analyzer_data import BERLIN, add_audience, cat_id, workdays
-from test_predict import answer, owner, respond
+from fake_llm import settled
+from test_predict import answer, owner, respond, seed
 from test_stylometry import FAMILY, WORK, said_episodes
 
 import wwyd.analyzers as analyzers_mod
@@ -39,7 +40,10 @@ STYLE_HEADER = "Owner's style with this audience"
 
 @pytest.fixture
 def auds(conn, pid):
-    return {name: add_audience(conn, pid, name) for name in ("family", "work")}
+    auds = {name: add_audience(conn, pid, name) for name in ("family", "work")}
+    # predict needs a claim about the topic, not only style ones (SPEC §8.1 step 6).
+    seed(conn, pid, [{"kind": "preference", "category": "food", "text": "Loves dinner."}])
+    return auds
 
 
 def style_claim(conn, pid, aud, *, status="approved", visibility="shared", **stats):
@@ -134,6 +138,10 @@ async def test_owner_only_profile_needs_private_owner(conn, user, pid, fake_llm,
         ({"period_share": 0.21}, "Sure, see you.", "sure, see you."),
         ({}, "OK, see you...", "OK, see you..."),
         ({"lowercase_share": 0.79, "period_share": 0.5}, "Sure.", "Sure."),
+        ({"lowercase_share": 0.1, "period_share": 0.5}, "sure.", "Sure."),
+        ({"lowercase_share": 0.1, "period_share": 0.5}, "«да, можно»", "«Да, можно»"),
+        ({"lowercase_share": 0.1, "period_share": 0.5}, "iPhone is fine.", "iPhone is fine."),
+        ({"lowercase_share": 0.21, "period_share": 0.5}, "sure.", "sure."),
     ],
 )
 async def test_post_processing_rules(conn, user, pid, fake_llm, auds, stats, given, expected):
@@ -161,10 +169,10 @@ async def test_shorten_reask_is_counted(conn, user, pid, fake_llm, auds):
     assert out["answer"] == "sure, coming tonight!"
     calls = fake_llm.by_purpose("shorten")
     assert len(calls) == 1 and "at most 15 characters" in calls[0]["user"]
-    answer_tokens = len(fake_llm.by_purpose("answer")[0]["system"] + _user(fake_llm)) // 4 + 10
-    shorten_tokens = len(calls[0]["system"] + calls[0]["user"]) // 4 + 10
+    assert [c["purpose"] for c in fake_llm.calls] == ["analyze", "answer", "shorten"]
+    expected = sum(len(c["system"] + c["user"]) // 4 + 10 for c in fake_llm.calls)
     row = conn.execute("SELECT llm_tokens FROM audit ORDER BY rowid DESC LIMIT 1").fetchone()
-    assert row["llm_tokens"] == answer_tokens + shorten_tokens
+    assert row["llm_tokens"] == expected
 
 
 @pytest.mark.parametrize("reply", ["fail", "long", "bad"])
@@ -200,6 +208,7 @@ async def test_words_from_state_behind_approved_claim(conn, user, pid, fake_llm,
     out = await predict(conn, owner(user), situation="hi", audience="family")
     assert out["type"] == "escalate" and not fake_llm.calls
     conn.execute("UPDATE claims SET status = 'approved' WHERE key = ?", (key,))
+    seed(conn, pid, [{"kind": "preference", "category": "food", "text": "Loves dinner."}])
     await predict(conn, owner(user), situation="hi", audience="family")
     user_msg = _user(fake_llm)
     assert "favourite words: darling, hugs" in user_msg
@@ -209,10 +218,39 @@ async def test_words_from_state_behind_approved_claim(conn, user, pid, fake_llm,
 async def test_depends_on_is_not_styled(conn, user, pid, fake_llm, auds):
     style_claim(conn, pid, auds["family"])
 
-    def handler(call):
-        return {**answer("Let me check.")(call), "a_depends_on": "Agrees if free after 18:00."}
-
-    fake_llm.on("answer", handler)
+    fake_llm.on(
+        "analyze",
+        lambda call: {
+            **settled(call),
+            "d_verdict": "open",
+            "f_depends_on": "Agrees if free after 18:00.",
+        },
+    )
+    fake_llm.on("answer", answer("Let me check."))
     out = await predict(conn, owner(user), situation="dinner?", audience="family")
     assert out["answer"] == "let me check"
     assert out["depends_on"] == "Agrees if free after 18:00."
+
+
+@pytest.mark.parametrize(
+    ("stats", "expected"),
+    [
+        ({}, "Case: lowercase start"),
+        ({"lowercase_share": 0.1}, "Case: capital at the start of each sentence\n"),
+        ({"lowercase_share": 0.5}, None),
+    ],
+)
+async def test_case_line_follows_the_profile(conn, user, pid, fake_llm, auds, stats, expected):
+    style_claim(conn, pid, auds["family"], **stats)
+    fake_llm.on("answer", answer("ok"))
+    await predict(conn, owner(user), situation="dinner?", audience="family")
+    if expected is None:
+        assert "Case:" not in _user(fake_llm)
+    else:
+        assert expected in _user(fake_llm)
+
+
+async def test_case_line_absent_without_profile(conn, user, pid, fake_llm, auds):
+    fake_llm.on("answer", answer("ok"))
+    await predict(conn, owner(user), situation="dinner?", audience="family")
+    assert "Case:" not in _user(fake_llm)

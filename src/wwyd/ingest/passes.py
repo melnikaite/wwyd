@@ -104,6 +104,8 @@ DESCRIBE_SCHEMA: dict[str, Any] = {
 _COMMON_RULES = """Rules:
 - One statement per claim, at most 200 characters, about the owner in the third person or
   neutral wording ("Short, no greeting").
+- State what the owner does or prefers, not a label or identity: "Не ест мясо и рыбу.",
+  not "Вегетарианец."; "Does not drink alcohol.", not "Teetotaler."
 - Describe patterns, never content. Never copy wording from the input.
 - Never mention people's names, companies, places, links, emails, phone numbers or
   account names. Write "a colleague", "family", "a client" instead.
@@ -122,18 +124,21 @@ REPLIES_SYSTEM = (
 lines starting with OTHER are the other side's words, given only as context. An OWNER
 line with no OTHER line before it is a message the owner started.
 Return JSON {"claims": [...]} with up to 5 claims about the owner's style (tone, length,
-greetings, language, emoji, pace), boundaries (what the owner refuses or deflects) or
-preferences. kind is one of: style, boundary, preference.
+greetings, language, emoji, pace), boundaries, rules for declining or accepting things,
+or preferences. kind is one of: style, boundary, decision_rule, preference. A boundary is
+a topic the owner does not want anyone to answer for them at all ("Never discusses the
+beekeeping club's disputes in writing"); a rule that makes the owner decline something
+under a condition ("Does not fence on weekends") is a decision_rule.
 """
     + _COMMON_RULES
     + """{categories}
 
 Example (Russian):
 Input:
-Audience: family
-OTHER: Ты приедешь в субботу?
-OWNER: да) к обеду
-OTHER: Купишь хлеб по дороге?
+Audience: friends
+OTHER: Поможешь в субботу с ульями?
+OWNER: да) с утра
+OTHER: Захватишь дымарь?
 OWNER: ок
 Answer:
 {"claims": [{"kind": "style", "category": "communication/style", "proposed_category": null,
@@ -146,19 +151,22 @@ STATEMENTS_SYSTEM = (
     """The owner wrote notes about themselves. Extract claims about the owner's character,
 preferences, habits, rules for decisions, communication style and boundaries.
 Return JSON {"claims": [...]}; kind is one of: trait, preference, habit, decision_rule,
-style, boundary.
+style, boundary. A boundary is a topic the owner does not want anyone to answer for them
+at all ("Never discusses the beekeeping club's disputes in writing"); a rule that makes
+the owner refuse or decline something under a condition ("Does not fence on weekends") is
+a decision_rule.
 """
     + _COMMON_RULES
     + """{categories}
 
 Example (Russian):
 Input:
-NOTE: По утрам не ем, только чёрный кофе. В долг даю только ту сумму, которую готов не получить назад.
+NOTE: Каллиграфией занимаюсь только по утрам, вечером рука уже не та. Свои перья даю только тем, кто сам пишет пером.
 Answer:
-{"claims": [{"kind": "habit", "category": "food", "proposed_category": null,
-"text": "Не завтракает, по утрам пьёт только чёрный кофе.", "confidence": 0.8},
-{"kind": "decision_rule", "category": "money", "proposed_category": null,
-"text": "Даёт в долг только сумму, которую готов не получить обратно.", "confidence": 0.8}]}
+{"claims": [{"kind": "habit", "category": "hobbies/calligraphy", "proposed_category": null,
+"text": "Занимается каллиграфией только по утрам.", "confidence": 0.8},
+{"kind": "decision_rule", "category": "hobbies/calligraphy", "proposed_category": null,
+"text": "Одалживает свои перья только тем, кто сам пишет пером.", "confidence": 0.8}]}
 """
 )
 
@@ -172,15 +180,15 @@ that follow it. Return JSON {"claims": [...]}; kind is decision_rule or preferen
 
 Example (Russian):
 Input:
-1. SITUATION: Подарок сестре на день рождения. CHOICE: Спросил, что ей нужно, и купил это.
-2. SITUATION: Подарок другу на новоселье. CHOICE: Подарил деньги, а не вещь.
-3. SITUATION: Тренировка в дождь. CHOICE: Пошёл бегать всё равно.
+1. SITUATION: Позвали на слёт моделистов железных дорог. CHOICE: Спросил, чьи макеты будут, и поехал.
+2. SITUATION: Позвали собрать макет вокзала. CHOICE: Сначала посмотрел чертежи, потом согласился.
+3. SITUATION: Стрельба из лука под дождём. CHOICE: Пошёл на стрельбище всё равно.
 Answer:
-{"claims": [{"kind": "decision_rule", "category": "money/gifts", "proposed_category": null,
-"text": "Дарит то, что человеку действительно нужно, а не сюрприз на свой вкус.",
+{"claims": [{"kind": "decision_rule", "category": "hobbies/model-trains", "proposed_category": null,
+"text": "Прежде чем согласиться, узнаёт подробности о макетах.",
 "confidence": 0.7, "support": 2},
-{"kind": "preference", "category": "sport", "proposed_category": null,
-"text": "Не пропускает пробежку из-за плохой погоды.", "confidence": 0.4, "support": 1}]}
+{"kind": "preference", "category": "hobbies/archery", "proposed_category": null,
+"text": "Не пропускает стрельбу из лука из-за плохой погоды.", "confidence": 0.4, "support": 1}]}
 """
 )
 
@@ -195,15 +203,15 @@ Rules:
 
 Example:
 Input:
-- sport/cycling
-- семья/праздники
+- hobbies/falconry
+- ремесло/каллиграфия
 Answer:
-{"descriptions": [{"path": "sport/cycling", "description": "How often and how far the owner rides a bike."},
-{"path": "семья/праздники", "description": "Как владелец отмечает семейные праздники и кого зовёт."}]}
+{"descriptions": [{"path": "hobbies/falconry", "description": "How often and where the owner flies their birds of prey."},
+{"path": "ремесло/каллиграфия", "description": "Чем и когда владелец пишет и кому показывает работы."}]}
 """
 
 ALLOWED_KINDS = {
-    "replies": ("style", "boundary", "preference"),
+    "replies": ("style", "boundary", "decision_rule", "preference"),
     "statements": KINDS,
     "decisions": ("decision_rule", "preference"),
 }

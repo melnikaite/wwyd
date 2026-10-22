@@ -18,6 +18,7 @@ from typing import Any, Literal, Protocol
 
 Purpose = Literal[
     "route",
+    "analyze",
     "answer",
     "shorten",
     "judge",

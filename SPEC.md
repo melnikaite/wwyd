@@ -231,7 +231,7 @@ food  travel  money  health  family  hobbies  tech  other
 | `id` | `clm_…` | |
 | `kind` | `trait \| preference \| habit \| decision_rule \| style \| boundary` | |
 | `category` | path | |
-| `text` | string ≤ 500 chars | one statement, owner in third person or neutral ("Short, no greeting…") |
+| `text` | string ≤ 500 chars | one statement, owner in third person or neutral ("Short, no greeting…"); behaviour, not an identity label |
 | `audiences` | `"all"` or list of audience names | where the claim **applies** |
 | `visibility` | `owner_only \| shared` | who may **see** it through `predict`: `shared` claims reach the audiences they apply to; import maps `audiences` and `anyone` to `shared` (D1) |
 | `status` | `pending \| approved \| rejected \| archived` | `archived` is added for compaction |
@@ -275,7 +275,10 @@ Examples:
   least 20 minutes and 10 minutes of buffer before and after other calls."
 - habit, key `builtin:time_activity:cat_…` (`work/meetings`): "No meetings on Friday
   afternoons (0 of 212 meetings in 6 months)."
-- boundary: "Never discusses salary in writing."
+- boundary: "Never discusses salary in writing." A `boundary` is a topic the owner does
+  not want anyone (an auto-responder included) to answer for them at all; a rule that
+  makes the owner decline something under a condition ("Does not take work calls on
+  weekends") is a `decision_rule`, and `predict` answers it with the decline.
 
 **Rejected claims are kept as negative memory**: a new derivation that matches a rejected
 claim is dropped instead of re-entering the review queue. They are text-only (evidence
@@ -557,8 +560,17 @@ always ready to send in the owner's voice and never asserts what wwyd cannot kno
 says "let me check and get back to you", not "15:00 works", when it does not know the
 owner's time). `depends_on` is one or two plain sentences, from the owner's applicable
 claims, on what the owner's actual answer depends on ("talks to friends after 18:00 and
-keeps at least 5 minutes between calls"); `null` when nothing outside the persona
-matters. There is no structure in it and no domain vocabulary: the client decides how to
+keeps at least 5 minutes between calls"); `null` when the owner's applicable claims put
+no condition on the answer, or the situation or `context` settles it. wwyd models the
+person, not the world: `depends_on` lists only conditions that come from the owner's
+claims, and wwyd never adds conditions of its own (free time, money, health) when no
+claim makes the answer conditional. When no claim other than style is about the situation's
+topic at all, the result is `escalate: "out_of_persona"` rather than a guess (§8.1 step
+6). A `null` `depends_on` therefore does not mean the
+client's own facts agree: a client that can see the calendar or other facts checks them
+before sending `answer` as is, or passes what it found in `context`. While `depends_on` is not `null`, `answer` neither accepts nor
+declines; the server checks this (§8.1 step 7) rather than trusting the prompt alone.
+There is no structure in it and no domain vocabulary: the client decides how to
 use it. A simple client sends `answer` as is; a client with its own LLM and tools refines
 the answer from `depends_on`; a client that wants the final wording in the owner's voice
 calls `predict` again with the same situation and what it found out in `context`, as a
@@ -632,7 +644,8 @@ nothing to resume because nothing was saved (P1).
   the spend state, besides the limiter's own check; a call that would not fit is not
   started. The job then ends `partial` (`rate_limited` / `spend_cap`) with
   `remaining_records`; so does an LLM error raised by the backend (`llm_unavailable`
-  included). A batch submitted with no budget left is still accepted: analyzers run and the
+  included, after the client's single transient retry, §12; it carries no `retry_after`,
+  and the server never retries a job itself). A batch submitted with no budget left is still accepted: analyzers run and the
   job ends `partial` before the first call. Authoring and word-usage calls cover no
   episodes, so one that does not fit or fails is skipped (`skipped_llm_budget`,
   `authoring_failed`, `word_usage_failed`) and the job goes on. `failed` is kept for real
@@ -777,7 +790,7 @@ sha256-pinned) (D18).
 ### 7.6 LLM passes
 Which episodes go to which pass (the token-saving switch):
 - **(a) Statements** → claims of any kind (the former notes). Never skipped.
-- **(b) Replies** → `style` / `boundary` / `preference` claims per audience: `said` with
+- **(b) Replies** → `style` / `boundary` / `decision_rule` / `preference` claims per audience: `said` with
   its `situation` as context, chunked to ~2500 chars per call, sampled with saturation
   (§7.1).
 - **(c) Decisions** → `decision_rule` claims when the same pattern shows up at least twice
@@ -794,6 +807,9 @@ Which episodes go to which pass (the token-saving switch):
   kind and category; `contradicts` resolves by evidence weight (§10.2), where the
   correction weighs `correction_weight` times. `same` merges or absorbs only when kind
   and category match; across them it is treated as `different`.
+- Claim text (passes and LLM-analyzer statements alike) states what the owner does or
+  prefers, never a label or identity ("Does not eat meat or fish.", not "Vegetarian."):
+  small predict models misread labels as conditions.
 - Results are deduplicated among themselves within a flush window (§7.1), then absorbed
   against existing claims (§10.1); only genuinely new ones become `pending`.
 - With `llm_for_ingest: false` there is no description call, annotation, authoring or LLM
@@ -838,23 +854,78 @@ through it.
 5. **Load context:** visible claims in the routed categories, plus the always-on core:
    `style` and `boundary` claims for that audience. Capped at a token budget, highest
    confidence × evidence first.
-6. **Answer:** one LLM call with the owner's display name, the audience description, the
-   claims (with IDs), the client's `context` and the situation. For `kind: reply`, the approved
-   stylometry claims visible to the resolved audience also contribute explicit
-   parameters: typical length, lowercase-start share, ending punctuation, emoji habits,
-   favourite words and phrases (D22). The model returns strict JSON:
-   `{"type":"answer","answer","depends_on","confidence","used_claims","language"}` or
-   `{"type":"escalate","escalate":"out_of_persona"|"boundary","reason"}`. Internally the
-   reply also starts with a one-line scratch note (`a_check`: the claims applied to the
-   situation and the context, and whether that settles it), which is never returned,
-   stored or logged; on small local models it is what lets a `context` that answers the
-   condition actually settle the answer. The context line comes after the situation in
-   the prompt.
-7. **Post-process:** drop `used_claims` IDs not in the context; `confidence <
-   escalate_below` (default 0.6) → `escalate: "low_confidence"`; add the `disclosure`;
-   write the audit row; count usage.
+6. **Analyze, then answer** (two LLM calls; 2026-10-20). Every claim is shown under a
+   short label (`c1`, `c2`, …), never its ID. Both calls get the current weekday, date and
+   time in the persona's `timezone` (`Now: Monday 2026-10-19 18:40 (Europe/Berlin)`;
+   default and fallback UTC; set it with `update_settings`), against which relative dates
+   in the situation and context are resolved; the time is not stored or audited. The
+   client's `context` line comes after the situation. Both system prompts are static and
+   byte-identical across calls (prefix cache); everything variable is in the user
+   message. Their worked examples are set in unusual areas so a small model cannot copy
+   them onto common inputs.
+   - **Call 1, `analyze`** (internal, never returned, stored or logged): input the
+     claims, `Now`, situation and context. Strict JSON whose keys sort into generation
+     order for alphabetical JSON grammars: `a_check` (a one-line scratch note that first
+     names what the situation asks the owner to do and then compares it only with claims
+     about that same thing; a limit on another activity at the same day and hour does not
+     apply, which one worked example and one contrastive pair show), `b_applicable` (labels of the claims about the situation's topic, style
+     claims excluded; a claim that is a short label for the owner, such as "Early
+     riser.", is read as the behaviour it implies), `c_excluded_by` (the label of an applicable claim that excludes the
+     request, else empty; asked before the verdict because one excluding claim settles
+     it even when another would make the answer conditional), `d_verdict` (`none` |
+     `boundary` | `ruled_out` | `open` | `settled`), `e_label` (the deciding claim for
+     `boundary`/`ruled_out`) and `f_depends_on` (only for `open`: the applicable claims' conditions applied to this
+     situation; this becomes the public `depends_on`). Conditions come only from the
+     claims; the model never adds its own (free time, money, health) (D23, 2026-10-20
+     note).
+   - **Code decides:** labels not shown and style claims are dropped from the applicable
+     set; a valid `c_excluded_by` makes the verdict `ruled_out` (unless it is `boundary`).
+     No applicable claim (or verdict `none`) → `escalate: "out_of_persona"`: wwyd
+     models the person, and a situation no claim other than style covers (an opinion, a
+     favour, a plan) is not guessed. `boundary` → `escalate: "boundary"` when the
+     deciding claim (or another applicable one) is a `boundary` claim on the topic: a
+     boundary claim that is really a refusal rule is a `ruled_out` verdict and is answered
+     with the decline. Otherwise (no boundary claim) it is treated as `settled`. An `open`
+     verdict without a condition is `settled`. Neither escalation makes the second call.
+   - **Call 2, `answer`:** the owner's display name, the audience description, the style
+     claims plus the applicable claims, the kind, `Now`, `Answer language: <code>
+     (<name>)` when the server detects the situation's language (a small deterministic
+     detector over function words and letters for en, ru, de, uk, es, fr; no line when
+     unsure), situation, context, for `open` a `Depends on:` line, and a server
+     instruction by verdict: `open` → non-committal in the owner's voice, neither accept
+     nor decline (a condition about the owner is one the owner will check; only what the
+     other person can know is asked of them); `ruled_out` → decline in the owner's voice (may suggest or ask about what
+     the claims allow, never state that the owner is free or able to do it: the
+     owner's calendar and plans are unknown); `settled` → answer as the claims and context decide,
+     with the analyze call's `a_check` passed as an internal `Analysis:` line the answer
+     must follow (only for `settled`; never returned, stored or logged). A `Case:` line
+     comes from the stylometry profile only and appears only when the profile decides it
+     (lowercase start when the profile's lowercase-start share is ≥ 0.8, a capital start
+     when it is ≤ 0.2); otherwise there is no line, the answer uses the language's normal
+     capitalisation unless a style claim says lowercase (style claim text is never parsed).
+     The answer is in the owner's first person in every language (claims are third
+     person). For `kind: reply` the
+     approved stylometry claims visible to the resolved audience also contribute explicit
+     parameters: typical length, lowercase-start share, ending punctuation, emoji habits,
+     favourite words and phrases (D22). Strict JSON: `answer`, `confidence`, `language`,
+     `used_claims`, `z_commits` (boolean: the answer accepts, agrees, promises or
+     declines; internal, never returned, stored or logged).
+7. **Post-process:** first the re-ask guards on call 2, at most one re-ask in total,
+   carrying the note of each guard that fired (tokens count): the **commit guard**
+   (verdict `open` and `z_commits: true`; if the re-asked answer still commits, the
+   result is `escalate: "low_confidence"`, "the answer committed although it depends on
+   something unknown") and the **language guard** (the detected situation language
+   differs from the answer's: its own detected language when confident, else the
+   `language` field). After the re-ask a remaining language mismatch is accepted (a claim
+   such as "always writes in Russian" keeps working). Call 1 is never re-asked. Then an
+   empty answer → `escalate: "low_confidence"`; map `used_claims` labels to IDs and drop
+   those not shown (none left → the applicable claims); `confidence < escalate_below`
+   (default 0.6) → `escalate: "low_confidence"`; add the `disclosure` (by the answer's
+   `language`, else the detected one); write the audit row (tokens of all calls summed,
+   no text); count usage.
 8. **Style post-processing** (reply only, only where the audience's profile is strong,
-   share ≥ 0.8): lowercase the first letter if the owner starts lowercase; drop a trailing
+   share ≥ 0.8): lowercase the first letter if the owner starts lowercase, capitalise it if
+   the owner starts with a capital (lowercase-start share ≤ 0.2); drop a trailing
    period if the owner rarely ends with one; if the answer is longer than 3× the owner's
    p90 length, ask once to shorten (counts against limits), else keep it. Typos are never
    injected.
@@ -1120,7 +1191,8 @@ fall back to `reasoning_content` when `content` is empty; strip Markdown fences 
 wrap bare arrays; sanitise chat-template markers in input; generous `max_tokens`; every
 field the model must emit is `required` in the JSON shape we ask for; a few worked examples
 per prompt, including in Russian, since rules leak language through examples. Preflight
-`GET /models` when a backend is saved.
+`GET /models` when a backend is saved. Decision calls (`route`, `analyze`, `judge`) run at
+temperature 0 so the same input gets the same decision; all other calls use 0.2.
 
 **Private addresses (SSRF).** `[llm] allow_private_base_urls` /
 `WWYD_LLM_ALLOW_PRIVATE_BASE_URLS` (default `true`, since a self-hosted instance talks to
@@ -1132,7 +1204,11 @@ instance backend is exempt. Changing a backend's host or preset without sending 
 again is rejected rather than forwarding the stored key to the new host. Errors returned to
 callers say only "LLM backend unreachable or rejected the request" (never the upstream
 status or reachability detail); rate-limit (429) and credit (402) responses keep their
-codes.
+codes. A transient failure (connection error, HTTP 502/503/504) is retried once after a
+~2 s pause taken outside the concurrency gate; read timeouts are retried the same way only
+for ingest-side purposes, never for predict (`route`, `analyze`, `answer`, `shorten`, `judge`), where
+a second 120 s wait costs more than failing. Only then does the call raise
+`llm_unavailable`.
 
 ---
 
@@ -1335,7 +1411,9 @@ Jobs now flush candidates every 20 calls and on the way out, and report which ba
 indices were not processed. A job is accepted even with no budget left (detectors still
 run, the harness gets `remaining_records` and `retry_after`) rather than rejected, so one
 resend loop handles every case. Only indices, timestamps and counts are stored (P1): the
-remaining records are resent by the harness, never kept by the server. Saturation is
+remaining records are resent by the harness, never kept by the server, so the server
+never retries a job; only a single LLM call is retried once on a transient error (§12).
+Saturation is
 style-only because style repeats across thousands of messages, while each note and
 decision can carry a rule seen nowhere else; it uses the cheap absorb similarity (no LLM
 judge) so it costs no tokens. Detectors run after the LLM phase and only over processed
@@ -1384,8 +1462,8 @@ Merges and splits apply without review because they move claims without changing
 every step is a `changes` row and undoable, and aliases keep old paths routing.
 
 **D22. Style in `predict` as numbers plus deterministic post-processing.** Small models
-ignore "write briefly"; explicit parameters and a few code rules (lowercase start, no final
-period, one shorten re-ask) are reliable and testable. Typos are never injected: they would
+ignore "write briefly"; explicit parameters and a few code rules (lowercase or capital
+start, no final period, one shorten re-ask) are reliable and testable. Typos are never injected: they would
 imitate the owner's mistakes, not their style.
 
 **D23. Client contract revision (2026-10-19, M8).** Feedback from the first client after
@@ -1415,6 +1493,20 @@ works against one generic model for every area of life.
   on what the real answer depends on, and the client resolves them with whatever it has.
   `facts: [{what, value}]` becomes a single `context` string for a client that wants the
   final wording in the owner's voice.
+- *No invented conditions (2026-10-20).* A prompt rule "a request for a specific time
+  always depends on whether the owner is free" was tried after live tests and dropped as
+  domain-specific: `depends_on` carries only the conditions of the owner's applicable
+  claims, and the client checks its own facts (calendar, balance, ...) before sending
+  `answer` as is.
+- *No claim, no guess; analyze before writing (2026-10-20).* With no applicable claim a
+  small model invented reasons for favours ("help me move"); such a situation is now
+  `out_of_persona`. Live runs on an 8B model also showed one call doing both the
+  decision and the wording copying worked examples, answering English in German, and
+  escalating `out_of_persona` despite an applicable claim. predict therefore splits into
+  an internal `analyze` call (applicable claims and a verdict, internal fields only) and
+  an `answer` call that only writes the message under a server instruction; the
+  escalations are decided in code, and the answer language is detected in code. The
+  client contract is unchanged.
 - *Exclusions* are stated in the storage model's terms: behaviour and preferences from any
   area of life (money, health included) are welcome, including thresholds the owner
   applies; records about the owner (diagnoses, balances, amounts, account data) are not

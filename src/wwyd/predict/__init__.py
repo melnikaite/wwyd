@@ -11,7 +11,9 @@ import json
 import logging
 import sqlite3
 import time
+from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from wwyd.errors import LLMUnavailable, RateLimited, SpendCap
 from wwyd.limits import get_limiter
@@ -21,7 +23,16 @@ from wwyd.predict import answer as answer_step
 from wwyd.predict import style as style_step
 from wwyd.predict.context import budgeted, fts_match, in_categories, visible_claims
 from wwyd.predict.disclosure import build_disclosure
-from wwyd.predict.prompts import answer_user, claim_line
+from wwyd.predict.language import answer_line, detect, normalise
+from wwyd.predict.prompts import (
+    COMMIT_RETRY_NOTE,
+    COMMITS_KEY,
+    INSTRUCTIONS,
+    LANGUAGE_RETRY_NOTE,
+    analyze_user,
+    answer_user,
+    claim_line,
+)
 from wwyd.predict.route import MAX_ROUTES, route
 from wwyd.store import audit as audit_store
 from wwyd.store.audiences import DEFAULT_ALIAS, find_audience
@@ -76,6 +87,23 @@ class _Run:
         result.pop("_confidence", None)
         log.info("predict finished: %s", outcome)
         return result
+
+
+def _now() -> datetime:
+    """The current time (tests monkeypatch this)."""
+    return datetime.now(UTC)
+
+
+def now_line(timezone: str | None) -> str:
+    """``Monday 2026-10-19 18:40 (Europe/Berlin)`` in the persona timezone; a missing or
+    unknown zone falls back to UTC."""
+    try:
+        tz = ZoneInfo(timezone or "UTC")
+        name = timezone or "UTC"
+    except (ZoneInfoNotFoundError, ValueError):
+        tz, name = ZoneInfo("UTC"), "UTC"
+    local = _now().astimezone(tz)
+    return f"{local.strftime('%A %Y-%m-%d %H:%M')} ({name})"
 
 
 def _escalate(code: str, reason: str, **extra: Any) -> dict[str, Any]:
@@ -166,9 +194,9 @@ async def predict(
             conn.execute("SELECT settings FROM personas WHERE id = ?", (persona_id,)).fetchone()[0]
             or "{}"
         )
-        owner = conn.execute(
-            "SELECT display_name FROM personas WHERE id = ?", (persona_id,)
-        ).fetchone()[0]
+        owner, timezone = conn.execute(
+            "SELECT display_name, timezone FROM personas WHERE id = ?", (persona_id,)
+        ).fetchone()
         # Style parameters (D22): replies only, from the audience's approved, visible
         # stylometry claim (same SQL filter as the context).
         profile = (
@@ -177,47 +205,110 @@ async def predict(
             else None
         )
         labels = {f"c{i}": c.id for i, c in enumerate(claims, 1)}
+        kinds = {label: c.kind for label, c in zip(labels, claims, strict=True)}
+        lines = {label: claim_line(label, c) for label, c in zip(labels, claims, strict=True)}
+        now = now_line(timezone)
+        # Call 1, analyze: which claims apply and what they decide (internal only).
+        run.llm_called = True
+        data, tokens = await answer_step.analyze_call(
+            llm,
+            analyze_user(
+                claims=list(lines.values()), context=context, situation=situation, now=now
+            ),
+        )
+        run.tokens += tokens
+        found = answer_step.read_analysis(data, kinds)
+        if found.verdict == "none":
+            return run.finish(
+                _escalate("out_of_persona", "no claim of the persona covers this situation")
+            )
+        if found.verdict == "boundary":
+            return run.finish(_escalate("boundary", "a boundary claim covers this topic"))
+        # Call 2, answer: the message in the owner's voice, doing what the verdict says.
+        lang = detect(situation)
+        shown = [x for x in labels if kinds[x] == "style" or x in found.applicable]
         user = answer_user(
             owner=owner,
             audience=row["name"],
             audience_description=row["description"],
-            claims=[claim_line(label, c) for label, c in zip(labels, claims, strict=True)],
+            claims=[lines[x] for x in shown],
             context=context,
             kind=kind,
             situation=situation,
+            now=now,
+            instruction=INSTRUCTIONS[found.verdict].replace("{label}", found.label or ""),
+            depends_on=found.depends_on,
+            analysis=found.check,
+            case=style_step.case_line(profile),
             style=style_step.parameters(profile) if profile is not None else None,
+            language=answer_line(lang) if lang else None,
         )
-        run.llm_called = True
         data, tokens = await answer_step.ask(llm, user, kind=kind)
         run.tokens += tokens
+        # Step 7 guards (SPEC §8.1): at most one re-ask, carrying the note of each guard
+        # that fired. An "open" answer that still commits escalates; a remaining language
+        # mismatch is accepted (a claim may name the language).
+        notes = []
+        if found.verdict == "open" and data.get(COMMITS_KEY) is True:
+            notes.append(COMMIT_RETRY_NOTE)
+        if _language_mismatch(lang, data):
+            notes.append(LANGUAGE_RETRY_NOTE)
+        if notes:
+            data, tokens = await answer_step.ask(llm, user + "".join(notes), kind=kind)
+            run.tokens += tokens
+            if found.verdict == "open" and data.get(COMMITS_KEY) is True:
+                return run.finish(
+                    _escalate(
+                        "low_confidence",
+                        "the answer committed although it depends on something unknown",
+                        _confidence=0.0,
+                    )
+                )
     except (SpendCap, RateLimited) as exc:
         run.llm_called = run.tokens > 0
         return run.finish(_llm_error(exc))
     except LLMUnavailable as exc:
         return run.finish(_llm_error(exc))
 
-    result = answer_step.interpret(
-        data,
-        labels,
-        has_boundary=any(c.kind == "boundary" for c in claims),
-    )
-    if result["type"] == "answer":
-        threshold = float(settings.get("escalate_below", DEFAULT_SETTINGS["escalate_below"]))
-        if result["confidence"] < threshold:
-            return run.finish(
-                _escalate(
-                    "low_confidence",
-                    f"confidence {result['confidence']:.2f} is below {threshold:.2f}",
-                    _confidence=result["confidence"],
-                )
-            )
-        language = result.pop("language")
-        if profile is not None:
-            result["answer"] = await _styled(llm, run, result["answer"], profile)
-        result["disclosure"] = build_disclosure(
-            owner, language, settings.get("disclosure_template")
+    text = answer_step.answer_text(data)
+    if not text:
+        return run.finish(
+            _escalate("low_confidence", "the model returned no answer", _confidence=0.0)
         )
+    shown_ids = {x: labels[x] for x in shown}
+    used = answer_step.used_claims(data, shown_ids) or [labels[x] for x in found.applicable]
+    result: dict[str, Any] = {
+        "type": "answer",
+        "answer": text,
+        "depends_on": found.depends_on,
+        "confidence": answer_step.confidence(data.get("confidence")),
+        "used_claims": used,
+    }
+    threshold = float(settings.get("escalate_below", DEFAULT_SETTINGS["escalate_below"]))
+    if result["confidence"] < threshold:
+        return run.finish(
+            _escalate(
+                "low_confidence",
+                f"confidence {result['confidence']:.2f} is below {threshold:.2f}",
+                _confidence=result["confidence"],
+            )
+        )
+    if profile is not None:
+        result["answer"] = await _styled(llm, run, result["answer"], profile)
+    result["disclosure"] = build_disclosure(
+        owner, answer_step.language(data) or lang, settings.get("disclosure_template")
+    )
     return run.finish(result)
+
+
+def _language_mismatch(want: str | None, data: dict[str, Any]) -> bool:
+    """The situation's detected language differs from the answer's: its own detected
+    language when that is confident, else the model's ``language`` field."""
+    text = answer_step.answer_text(data)
+    if want is None or not text:
+        return False
+    got = detect(text) or normalise(data.get("language"))
+    return got is not None and got != want
 
 
 async def _styled(llm, run: _Run, text: str, profile: style_step.StyleProfile) -> str:  # noqa: ANN001

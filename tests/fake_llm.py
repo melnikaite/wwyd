@@ -3,12 +3,27 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
 from wwyd.llm import LLMResult
 
 Handler = Callable[[dict[str, Any]], Any]
+
+
+def settled(call: dict[str, Any]) -> dict[str, Any]:
+    """Default predict analysis: every claim shown applies and settles it (style claims
+    are dropped by the server)."""
+    labels = re.findall(r"^\[(c\d+)\]", call["user"], re.M)
+    return {
+        "a_check": "",
+        "b_applicable": labels,
+        "c_excluded_by": "",
+        "d_verdict": "settled",
+        "e_label": "",
+        "f_depends_on": "",
+    }
 
 
 class FakeLLM:
@@ -18,7 +33,7 @@ class FakeLLM:
     what the model was shown."""
 
     def __init__(self) -> None:
-        self.responses: dict[str, Any] = {}
+        self.responses: dict[str, Any] = {"analyze": settled}
         self.calls: list[dict[str, Any]] = []
 
     def on(self, purpose: str, response: Any | Handler) -> None:

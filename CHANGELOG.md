@@ -139,8 +139,63 @@ shapes (see Changed), so the first release bumps the minor version.
 
 ### Fixed
 
+- `predict`: a settled answer now gets the analyze call's conclusion as an internal
+  `Analysis:` line, so it no longer contradicts it ("3 hours is within 4" answered "too
+  far"). A `Case:` line only when the stylometry profile decides it and a capital
+  start post-fix for owners who start with a capital; the first-person rule now covers
+  verb forms in every language, with a worked example outside English.
+- Decision LLM calls (`route`, `analyze` and the eval `judge`) run at temperature 0, so
+  the same situation gets the same decision; text-writing calls keep 0.2.
 - `/revoke` accepts public clients with `client_id` only (RFC 7009); it is now our own
   handler. It also revokes wwyd API keys passed as `token`, and is throttled like `/token`.
+- `predict` knows the current date: the answer prompt gets a `Now:` line (weekday, date,
+  time) in the persona's timezone, so "tomorrow" and "on Saturday" resolve correctly.
+- `predict` no longer accepts or declines while `depends_on` is set; `depends_on` lists
+  only conditions from the owner's claims (no invented ones such as free time), the
+  worked examples no longer mirror typical inputs and are spread over several areas, and a server-side guard re-asks once and otherwise escalates
+  `low_confidence`.
+- `predict` detects the situation's language in code (en, ru, de, uk, es, fr, from
+  function words and letters; no new dependency), tells the model the answer language,
+  and re-asks once when the answer is in another language (this also catches German
+  answers to English messages, which a script check could not see); a remaining
+  mismatch is accepted so a claim such as "always writes in Russian" keeps working.
+- `predict` runs two calls: an internal `analyze` call decides which claims apply and
+  what they decide (none, boundary, ruled out, open, settled) and supplies `depends_on`;
+  the answer call then only writes the message in the owner's voice under a server
+  instruction for that verdict. `out_of_persona` and `boundary` escalate in code without
+  the second call; the commit guard runs only for an open verdict; still at most one
+  re-ask (of the answer call).
+- `predict` escalates `out_of_persona` when no claim other than style is about the
+  situation's topic (favours, plans and opinions included) instead of guessing.
+- `predict` applies claims that are short labels for the owner (such as "Vegetarian.")
+  as the behaviour they imply instead of escalating `out_of_persona`, and a decline may
+  only suggest or ask about an alternative, never state that the owner is free or able
+  to do it.
+- `predict` answers use the language's normal capitalisation (German nouns, formal
+  «Вы»/"Sie" where the style says so) and lowercase only when a style claim or the
+  style parameters say so; they speak as the owner in the first person instead of
+  copying the third-person claim text; and in an open answer a condition about the
+  owner is one the owner will check, while only what the other person can know is
+  asked of them. The answer examples now vary case with their style claims.
+- The worked examples in the `predict` prompts are set in unusual areas (cacti,
+  birdwatching, pottery, chess, gardening, boats) so the model cannot copy them onto
+  common inputs.
+- `predict` no longer applies a claim that limits one activity by day and hour to a
+  request for a different activity at that time: the `analyze` scratch note first names
+  what is asked and compares it only with claims about the same thing, backed by a
+  worked example and a contrastive pair (same claim, one situation it limits and one it
+  does not cover).
+- Ingest, annotation, analyzer-authoring and upkeep prompts no longer illustrate their
+  rules with common areas (salary, work calls, breakfast, loans, gifts, running, films,
+  standups); their examples use unusual areas, so a copied example cannot become a
+  fabricated claim or label.
+- `boundary` now means a topic nobody may answer for the owner; refusal rules are
+  `decision_rule` claims (ingest and analyzer prompts), and `predict` answers a stored
+  refusal-style boundary with the decline instead of escalating, and ignores boundary
+  claims about other topics.
+- The LLM client retries a single call once after a short pause on a transient error
+  (connection failure, HTTP 502/503/504; read timeouts only outside `predict`) before
+  reporting `llm_unavailable`.
 
 ### Security
 
