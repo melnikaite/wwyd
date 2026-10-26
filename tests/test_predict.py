@@ -1004,7 +1004,7 @@ async def test_when_call_only_without_routing(conn, user, pid, fake_llm, monkeyp
     update_settings(conn, pid, weekend_days=["Friday", "saturday"])
     fake_llm.on("when", {"when": "sun"})
     await predict(conn, owner(user), situation="Call?", audience="default")
-    assert "\nWhen: Sunday 2026-10-25\n" in fake_llm.by_purpose("analyze")[-1]["user"]
+    assert "\nWhen: Sunday 2026-10-25 (working day)\n" in fake_llm.by_purpose("analyze")[-1]["user"]
 
 
 @pytest.mark.parametrize("value", ["", "whenever you like", "the 5th", None, "fail"])
@@ -1036,6 +1036,13 @@ async def test_route_when_reaches_both_calls(conn, user, pid, fake_llm, monkeypa
     for purpose in ("analyze", "answer"):
         user_msg = fake_llm.by_purpose(purpose)[-1]["user"]
         assert "\nWhen: Saturday 2026-10-24 (weekend)\n" in user_msg
+    # A named weekday days ahead is marked as a working day on the route path too.
+    monkeypatch.setattr(predict_pkg, "_now", lambda: datetime(2026, 10, 26, 8, 0, tzinfo=UTC))
+    fake_llm.on("route", {"categories": ["work/meetings"], "when": "fri 17:00"})
+    await predict(conn, owner(user), situation="Meet on Friday?", audience="everyone")
+    for purpose in ("analyze", "answer"):
+        user_msg = fake_llm.by_purpose(purpose)[-1]["user"]
+        assert "\nWhen: Friday 2026-10-30 (working day)\n" in user_msg
 
 
 async def test_ruled_out_answer_that_does_not_decline_is_reasked(conn, user, pid, fake_llm):

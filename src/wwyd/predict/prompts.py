@@ -410,7 +410,7 @@ Kind: reply
 Now: Thursday 2026-04-09 19:00 (Europe/Riga)
 Answer language: en
 Situation: Juggling meetup in the park this Saturday at 11?
-When: Saturday 2026-04-11 11:00 (weekend)
+When: Saturday 2026-04-11 (weekend)
 Context: none
 Analysis: The meetup is on Saturday at 11, which is exactly when the owner goes to it.
 Instruction: The claims, the situation and the Context line settle it, as the Analysis line concludes. Answer as that analysis concludes.

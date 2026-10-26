@@ -14,6 +14,7 @@ from wwyd.store.personas import create_user, get_settings, update_settings
 
 THU = date(2026, 10, 22)
 SAT = date(2026, 10, 24)
+MON = date(2026, 10, 26)
 
 
 @pytest.mark.parametrize(
@@ -98,12 +99,16 @@ def test_resolve_rejects_garbage(text):
 
 
 def test_when_line_marks():
-    assert when_line(resolve("tomorrow 17:00", THU)) == "Friday 2026-10-23"
+    assert when_line(resolve("tomorrow 17:00", THU)) == "Friday 2026-10-23 (working day)"
     assert when_line(resolve("sat", THU)) == "Saturday 2026-10-24 (weekend)"
     assert when_line(resolve("this weekend", THU)) == (
         "Saturday 2026-10-24 to Sunday 2026-10-25 (weekend)"
     )
-    assert when_line(resolve("next week", THU)) == "Monday 2026-10-26 to Sunday 2026-11-01"
+    assert (
+        when_line(resolve("next week", THU)) == "Monday 2026-10-26 to Sunday 2026-11-01"
+    )  # mixed: no mark
+    assert when_line(resolve("fri", MON)) == "Friday 2026-10-30 (working day)"
+    assert when_line(resolve("in 2 weeks", MON)) == "Monday 2026-11-09 (working day)"
     assert when_line(None) == ""
     # A deadline renders no line (it was read as a constraint).
     assert when_line(resolve("this week", THU)) == ""
@@ -111,21 +116,24 @@ def test_when_line_marks():
     assert when_line(resolve("this week", SAT)) == ""
     # A custom weekend changes the marks and the weekend block.
     fri_sat = ["friday", "saturday"]
-    assert when_line(resolve("sun", THU, fri_sat), fri_sat) == "Sunday 2026-10-25"
+    assert when_line(resolve("sun", THU, fri_sat), fri_sat) == "Sunday 2026-10-25 (working day)"
     assert resolve("this weekend", THU, fri_sat) == When(date(2026, 10, 23), SAT)
     assert resolve("this weekend", THU, []) is None
-    assert when_line(resolve("sat", THU, []), []) == "Saturday 2026-10-24"
+    assert when_line(resolve("sat", THU, []), []) == "Saturday 2026-10-24 (working day)"
+    assert when_line(resolve("next week", THU, []), []) == (
+        "Monday 2026-10-26 to Sunday 2026-11-01 (working days)"
+    )
 
 
 def test_resolved_when_uses_persona_timezone_and_dst(monkeypatch):
     # 21:30 UTC on Saturday 2026-10-24 is already Sunday in Tokyo, still Saturday in Berlin.
     monkeypatch.setattr(P, "_now", lambda: datetime(2026, 10, 24, 21, 30, tzinfo=UTC))
-    assert P.resolved_when("tomorrow", "Asia/Tokyo", None) == "Monday 2026-10-26"
+    assert P.resolved_when("tomorrow", "Asia/Tokyo", None) == "Monday 2026-10-26 (working day)"
     assert P.resolved_when("tomorrow", "Europe/Berlin", None) == "Sunday 2026-10-25 (weekend)"
     # Berlin leaves summer time on 2026-10-25: that evening it is UTC+1, so 23:30 UTC is
     # already Monday there and 22:30 UTC still Sunday (under UTC+2 both would be Monday).
     monkeypatch.setattr(P, "_now", lambda: datetime(2026, 10, 25, 23, 30, tzinfo=UTC))
-    assert P.resolved_when("today", "Europe/Berlin", None) == "Monday 2026-10-26"
+    assert P.resolved_when("today", "Europe/Berlin", None) == "Monday 2026-10-26 (working day)"
     monkeypatch.setattr(P, "_now", lambda: datetime(2026, 10, 25, 22, 30, tzinfo=UTC))
     assert P.resolved_when("today", "Europe/Berlin", None) == "Sunday 2026-10-25 (weekend)"
     assert P.resolved_when("today", "Not/AZone", None) == "Sunday 2026-10-25 (weekend)"

@@ -23,7 +23,7 @@ A week runs Monday to Sunday whatever the persona's weekend days. "this week" (a
 single day the rest resolves to ("by next fri" like "next fri"). A deadline covers
 today to its last day and is never read as "the weekend".
 
-Rendering (``when_line``) shows only the date or range and the weekend mark. The time is
+Rendering (``when_line``) shows only the date or range and its mark, (weekend) or (working day). The time is
 parsed but not shown: the situation already carries it, and a second, canonical time
 confused the model's comparisons. A deadline renders no line at all: a "by <day>" line was
 read as a constraint on the owner.
@@ -179,9 +179,11 @@ def resolve(
 
 
 def when_line(when: When | None, weekend: list[str] | tuple[str, ...] | None = None) -> str:
-    """``Saturday 2026-10-24 (weekend)`` or ``Thursday 2026-10-22``; a working day has no mark,
-    a range is marked only when all its days are weekend days. No time (the situation carries
-    it). "" for None and for a deadline (it was read as a constraint)."""
+    """``Saturday 2026-10-24 (weekend)`` or ``Thursday 2026-10-22 (working day)``: every day
+    is marked both ways, since an unmarked day was read as a weekend. A range is marked
+    ``(weekend)`` or ``(working days)`` when all its days are alike and left unmarked when
+    mixed. No time (the situation carries it). "" for None and for a deadline (it was read
+    as a constraint)."""
     if when is None or when.deadline:
         return ""
     days = _weekend_set(weekend)
@@ -190,6 +192,8 @@ def when_line(when: When | None, weekend: list[str] | tuple[str, ...] | None = N
     text = when.start.strftime("%A %Y-%m-%d")
     if when.end != when.start:
         text += f" to {when.end.strftime('%A %Y-%m-%d')}"
-    if marks == {True}:  # only weekends are marked; an unmarked day is a working day
+    if marks == {True}:
         text += " (weekend)"
+    elif marks == {False}:
+        text += " (working days)" if len(span) > 1 else " (working day)"
     return text

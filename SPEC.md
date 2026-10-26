@@ -901,9 +901,14 @@ through it.
    grammar gives no line (never a wrong date). The result is one line,
    `When: Saturday 2026-10-24 (weekend)`, the date or range only: the time is parsed but
    not shown, since the situation carries it and a second canonical time confused the
-   model's comparisons (2026-10-26). Only weekend days (per the persona's
-   `weekend_days`) are marked, a working day carries no mark (a range is marked only
-   when all its days are weekend days), in both the
+   model's comparisons (2026-10-26). Every day is marked per the persona's
+   `weekend_days`, `(weekend)` or `(working day)`: with weekend-only marks the model read
+   an unmarked named weekday ("on Friday" asked on a Monday) as a weekend (2026-10-26).
+   A range is marked `(weekend)` or `(working days)` when all its days are alike and
+   carries no mark when mixed. The prompts keep their one-sided wording ("only a day
+   marked (weekend) is one"): rewording them two-sided made the analyze call rule a
+   Tuesday call out under a weekend-only claim it had itself called inapplicable
+   (2026-10-26). The line goes to both the
    analyze and the answer call. The prompts say to trust it
    for the day and whether it is a weekend, never to recount, that it only dates the
    situation (whether a claim applies depends on what the situation asks, never on the

@@ -164,8 +164,8 @@ shapes (see Changed), so the first release bumps the minor version.
 - `predict`: the model no longer computes dates. It only extracts the situation's time
   in a canonical English form (routing's `when` field, or one small `when` call when
   routing is skipped); code resolves it in the persona timezone into one
-  `When: Friday 2026-10-23` line (date only, since the situation carries the time; only weekend days get a `(weekend)`
-  mark), so "tomorrow" asked on a Thursday is
+  `When: Friday 2026-10-23 (working day)` line (date only, since the situation carries the time; every day is
+  marked `(weekend)` or `(working day)`, a mixed range is unmarked), so "tomorrow" asked on a Thursday is
   no longer declined as a weekend day. New persona setting `weekend_days` (default
   Saturday and Sunday) in `get_settings`/`update_settings` and the persona export.
   A deadline or period ("by the end of the week", "by Friday", "this week") is a

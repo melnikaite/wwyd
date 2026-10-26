@@ -2585,6 +2585,357 @@
         "language": "ru",
         "stance": "decline"
       }
+    },
+    {
+      "id": "days_ru_mon_fri",
+      "persona": "weekdays_ru",
+      "now": "2026-10-26T08:00:00+00:00",
+      "situation": "Созвонимся в пятницу в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "accept",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "days_ru_tue_fri",
+      "persona": "weekdays_ru",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Созвонимся в пятницу в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "accept",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "days_ru_wed_fri",
+      "persona": "weekdays_ru",
+      "now": "2026-10-28T08:00:00+00:00",
+      "situation": "Созвонимся в пятницу в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "accept",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "days_ru_tue_mon",
+      "persona": "weekdays_ru",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Созвонимся в понедельник в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "accept",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "days_ru_thu_mon",
+      "persona": "weekdays_ru",
+      "now": "2026-10-29T08:00:00+00:00",
+      "situation": "Созвонимся в понедельник в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "accept",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "days_ru_sat_mon",
+      "persona": "weekdays_ru",
+      "now": "2026-10-31T08:00:00+00:00",
+      "situation": "Созвонимся в понедельник в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "accept",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "days_ru_mon_sat",
+      "persona": "weekdays_ru",
+      "now": "2026-10-26T08:00:00+00:00",
+      "situation": "Созвонимся в субботу в 11:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_ru_wed_sat",
+      "persona": "weekdays_ru",
+      "now": "2026-10-28T08:00:00+00:00",
+      "situation": "Созвонимся в субботу в 11:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_ru_thu_sat",
+      "persona": "weekdays_ru",
+      "now": "2026-10-29T08:00:00+00:00",
+      "situation": "Созвонимся в субботу в 11:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_en_mon_fri",
+      "persona": "weekdays_en",
+      "now": "2026-10-26T08:00:00+00:00",
+      "situation": "Can we have a call on Friday at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_en_tue_fri",
+      "persona": "weekdays_en",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Can we have a call on Friday at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_en_wed_fri",
+      "persona": "weekdays_en",
+      "now": "2026-10-28T08:00:00+00:00",
+      "situation": "Can we have a call on Friday at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_en_tue_mon",
+      "persona": "weekdays_en",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Can we have a call on Monday at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_en_thu_mon",
+      "persona": "weekdays_en",
+      "now": "2026-10-29T08:00:00+00:00",
+      "situation": "Can we have a call on Monday at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_en_sat_mon",
+      "persona": "weekdays_en",
+      "now": "2026-10-31T08:00:00+00:00",
+      "situation": "Can we have a call on Monday at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_en_mon_sat",
+      "persona": "weekdays_en",
+      "now": "2026-10-26T08:00:00+00:00",
+      "situation": "Can we have a call on Saturday at 11:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_en_wed_sat",
+      "persona": "weekdays_en",
+      "now": "2026-10-28T08:00:00+00:00",
+      "situation": "Can we have a call on Saturday at 11:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_en_thu_sat",
+      "persona": "weekdays_en",
+      "now": "2026-10-29T08:00:00+00:00",
+      "situation": "Can we have a call on Saturday at 11:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_de_mon_fri",
+      "persona": "weekdays_de",
+      "now": "2026-10-26T08:00:00+00:00",
+      "situation": "Können wir am Freitag um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "accept",
+        "absent_any": [
+          "wochenende"
+        ]
+      }
+    },
+    {
+      "id": "days_de_tue_fri",
+      "persona": "weekdays_de",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Können wir am Freitag um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "accept",
+        "absent_any": [
+          "wochenende"
+        ]
+      }
+    },
+    {
+      "id": "days_de_wed_fri",
+      "persona": "weekdays_de",
+      "now": "2026-10-28T08:00:00+00:00",
+      "situation": "Können wir am Freitag um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "accept",
+        "absent_any": [
+          "wochenende"
+        ]
+      }
+    },
+    {
+      "id": "days_de_tue_mon",
+      "persona": "weekdays_de",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Können wir am Montag um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "accept",
+        "absent_any": [
+          "wochenende"
+        ]
+      }
+    },
+    {
+      "id": "days_de_thu_mon",
+      "persona": "weekdays_de",
+      "now": "2026-10-29T08:00:00+00:00",
+      "situation": "Können wir am Montag um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "accept",
+        "absent_any": [
+          "wochenende"
+        ]
+      }
+    },
+    {
+      "id": "days_de_sat_mon",
+      "persona": "weekdays_de",
+      "now": "2026-10-31T08:00:00+00:00",
+      "situation": "Können wir am Montag um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "accept",
+        "absent_any": [
+          "wochenende"
+        ]
+      }
+    },
+    {
+      "id": "days_de_mon_sat",
+      "persona": "weekdays_de",
+      "now": "2026-10-26T08:00:00+00:00",
+      "situation": "Können wir am Samstag um 11 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_de_wed_sat",
+      "persona": "weekdays_de",
+      "now": "2026-10-28T08:00:00+00:00",
+      "situation": "Können wir am Samstag um 11 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_de_thu_sat",
+      "persona": "weekdays_de",
+      "now": "2026-10-29T08:00:00+00:00",
+      "situation": "Können wir am Samstag um 11 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "decline"
+      }
     }
   ]
 }
