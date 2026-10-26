@@ -25,6 +25,15 @@ from wwyd.netguard import BlockedAddress, PinnedRequest, SyncResolver, resolve_s
 log = logging.getLogger(__name__)
 
 MIN_MAX_TOKENS = 1024  # small models wander; a short budget cuts JSON off mid-object
+# Predict-path calls keep the budget their caller sets (SPEC §8.1): their replies are small
+# and known, and a model caught in a repetition loop must stop after seconds, not after
+# MIN_MAX_TOKENS tokens.
+EXACT_BUDGET_PURPOSES: frozenset[str] = frozenset({"route", "when", "analyze", "answer", "shorten"})
+# Sent on the retry after a reply hit max_tokens: a changed input breaks a greedy loop,
+# while echoing the looping text back would only feed it.
+CUT_OFF_RETRY = (
+    "\n\nKeep every text field of the reply short (one sentence at most); do not repeat yourself."
+)
 PREFLIGHT_TIMEOUT_S = 10.0
 
 # What callers see for any transport/HTTP failure: never the upstream status or whether the
@@ -41,7 +50,7 @@ RETRY_PAUSE_S = 2.0
 # Sampling temperature per purpose (SPEC §12). Decision calls (routing, the analysis of
 # which rules apply, the eval judge) run greedy so the same input gets the same decision;
 # calls that write text keep a little variety.
-DECISION_PURPOSES: frozenset[str] = frozenset({"route", "analyze", "judge"})
+DECISION_PURPOSES: frozenset[str] = frozenset({"route", "when", "analyze", "judge"})
 DECISION_TEMPERATURE = 0.0
 DEFAULT_TEMPERATURE = 0.2
 
@@ -167,6 +176,14 @@ def _message_text(payload: dict[str, Any]) -> str:
     if not str(content).strip():
         content = message.get("reasoning_content") or message.get("reasoning") or ""
     return str(content)
+
+
+def _cut_off(payload: dict[str, Any]) -> bool:
+    """True when the backend stopped the reply at max_tokens."""
+    try:
+        return payload["choices"][0].get("finish_reason") == "length"
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return False
 
 
 def _usage(payload: dict[str, Any], backend: Backend) -> tuple[int, int, float | None]:
@@ -306,7 +323,9 @@ class OpenAICompatClient:
             "model": self.backend.model,
             "messages": messages,
             "temperature": temperature_for(purpose),
-            "max_tokens": max(max_tokens, MIN_MAX_TOKENS),
+            "max_tokens": (
+                max_tokens if purpose in EXACT_BUDGET_PURPOSES else max(max_tokens, MIN_MAX_TOKENS)
+            ),
             "reasoning_effort": "none",
             "response_format": {
                 "type": "json_schema",
@@ -329,6 +348,17 @@ class OpenAICompatClient:
                 )
             except ValueError:
                 log.info("LLM reply for %s was not valid JSON (attempt %d)", purpose, attempt + 1)
+                if _cut_off(payload):
+                    # Cut off by max_tokens (usually a repetition loop): ask afresh with a
+                    # nudge instead of echoing the runaway text back.
+                    body = {
+                        **body,
+                        "messages": [
+                            messages[0],
+                            {"role": "user", "content": sanitize(user) + CUT_OFF_RETRY},
+                        ],
+                    }
+                    continue
                 body = {
                     **body,
                     "messages": [

@@ -1,5 +1,5 @@
 {
-  "_doc": "Live predict evaluation (tests/test_predict_eval.py). Checks: type (answer | escalate), escalate (code, when type is escalate), depends_on (null | set | any), language (ru | en | de | uk), stance (accept | decline | non_committal | any). Principle: depends_on comes only from the owner's claims; no applicable claim -> out_of_persona. Ids ending in _p1/_p2 are paraphrases of the scenario with the same id prefix: same persona, facts and expectations, different wording, to measure robustness over wording. Optional style checks (only on type: answer): style.<persona> applies to every answer of that persona: max_chars, lowercase_start, capital_start, no_final_period, absent_any (case-insensitive substrings).",
+  "_doc": "Live predict evaluation (tests/test_predict_eval.py). Checks: type (answer | escalate), escalate (code, when type is escalate), depends_on (null | set | any), language (ru | en | de | uk), stance (accept | decline | non_committal | any). Principle: depends_on comes only from the owner's claims; no applicable claim -> out_of_persona. Ids ending in _p1/_p2 are paraphrases of the scenario with the same id prefix: same persona, facts and expectations, different wording, to measure robustness over wording. Optional style checks (only on type: answer): style.<persona> applies to every answer of that persona: max_chars, lowercase_start, capital_start, no_final_period, absent_any (case-insensitive substrings). Optional per-scenario now (ISO time) overrides the global now.",
   "personas": {
     "calendar": {
       "timezone": "Europe/Berlin",
@@ -508,6 +508,126 @@
           "kind": "decision_rule",
           "category": "hobbies/woodburning",
           "text": "Випалює по дереву на замовлення, лише якщо має вільний тиждень."
+        }
+      ]
+    },
+    "weekdays_ru": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Пишет коротко, на ты, без смайликов."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work",
+          "text": "Соглашается на рабочие созвоны в будни с 10 до 19."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work",
+          "text": "Не берёт рабочие звонки по выходным."
+        }
+      ]
+    },
+    "weekdays_en": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Writes briefly and casually, no emoji."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work",
+          "text": "Agrees to work calls on weekdays between 10:00 and 19:00."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work",
+          "text": "Does not take work calls on weekends."
+        }
+      ]
+    },
+    "weekdays_de": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Schreibt kurz und locker, duzt, ohne Smileys."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work",
+          "text": "Telefoniert beruflich gern an Werktagen zwischen 10 und 19 Uhr."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work",
+          "text": "Nimmt am Wochenende keine beruflichen Anrufe an."
+        }
+      ]
+    },
+    "refusal_over_boundary": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Пишет коротко и вежливо, без смайликов."
+        },
+        {
+          "kind": "boundary",
+          "category": "work/salary",
+          "text": "Не обсуждает свою зарплату письменно."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work/salary",
+          "text": "Вежливо отказывается называть свою зарплату, когда её спрашивают."
+        }
+      ]
+    },
+    "weekdays_pl": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "Pisze krótko, na ty, bez emotek."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work",
+          "text": "Zgadza się na rozmowy służbowe w dni robocze od 10 do 19."
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work",
+          "text": "Nie odbiera służbowych telefonów w weekendy."
+        }
+      ]
+    },
+    "weekdays_ja": {
+      "timezone": "Europe/Berlin",
+      "claims": [
+        {
+          "kind": "style",
+          "category": "communication/style",
+          "text": "短く、くだけた口調で書く。絵文字は使わない。"
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work",
+          "text": "平日の10時から19時までは仕事の電話に応じる。"
+        },
+        {
+          "kind": "decision_rule",
+          "category": "work",
+          "text": "週末は仕事の電話を受けない。"
         }
       ]
     }
@@ -1935,6 +2055,535 @@
           "має вільний",
           "якщо має"
         ]
+      }
+    },
+    {
+      "id": "days_ru_thu_tom",
+      "persona": "weekdays_ru",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Созвонимся завтра в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "accept",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "days_ru_thu_dat",
+      "persona": "weekdays_ru",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Созвонимся послезавтра в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_ru_fri_tom",
+      "persona": "weekdays_ru",
+      "now": "2026-10-23T20:20:00+00:00",
+      "situation": "Созвонимся завтра в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_ru_fri_dat",
+      "persona": "weekdays_ru",
+      "now": "2026-10-23T20:20:00+00:00",
+      "situation": "Созвонимся послезавтра в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_ru_sun_tom",
+      "persona": "weekdays_ru",
+      "now": "2026-10-25T20:20:00+00:00",
+      "situation": "Созвонимся завтра в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "accept",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "days_ru_sun_dat",
+      "persona": "weekdays_ru",
+      "now": "2026-10-25T20:20:00+00:00",
+      "situation": "Созвонимся послезавтра в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "accept",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "days_ru_sat_sat",
+      "persona": "weekdays_ru",
+      "now": "2026-10-24T08:00:00+00:00",
+      "situation": "Созвонимся в субботу в 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_ru_thu_taken",
+      "persona": "weekdays_ru",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Созвонимся завтра в 15:00?",
+      "context": "завтра (пт 2026-10-23) 15:00–15:30 занято",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "decline",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "days_en_thu_tom",
+      "persona": "weekdays_en",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Can we have a call tomorrow at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_en_thu_dat",
+      "persona": "weekdays_en",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Can we have a call the day after tomorrow at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_en_fri_tom",
+      "persona": "weekdays_en",
+      "now": "2026-10-23T20:20:00+00:00",
+      "situation": "Can we have a call tomorrow at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_en_fri_dat",
+      "persona": "weekdays_en",
+      "now": "2026-10-23T20:20:00+00:00",
+      "situation": "Can we have a call the day after tomorrow at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_en_sun_tom",
+      "persona": "weekdays_en",
+      "now": "2026-10-25T20:20:00+00:00",
+      "situation": "Can we have a call tomorrow at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_en_sun_dat",
+      "persona": "weekdays_en",
+      "now": "2026-10-25T20:20:00+00:00",
+      "situation": "Can we have a call the day after tomorrow at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_en_sat_sat",
+      "persona": "weekdays_en",
+      "now": "2026-10-24T08:00:00+00:00",
+      "situation": "Can we have a call on Saturday at 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_en_thu_taken",
+      "persona": "weekdays_en",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Can we have a call tomorrow at 15:00?",
+      "context": "tomorrow (Fri 2026-10-23) 15:00-15:30 is taken",
+      "expect": {
+        "type": "answer",
+        "language": "en",
+        "stance": "decline",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_de_thu_tom",
+      "persona": "weekdays_de",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Können wir morgen um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "accept",
+        "absent_any": [
+          "wochenende"
+        ]
+      }
+    },
+    {
+      "id": "days_de_thu_dat",
+      "persona": "weekdays_de",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Können wir übermorgen um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_de_fri_tom",
+      "persona": "weekdays_de",
+      "now": "2026-10-23T20:20:00+00:00",
+      "situation": "Können wir morgen um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_de_fri_dat",
+      "persona": "weekdays_de",
+      "now": "2026-10-23T20:20:00+00:00",
+      "situation": "Können wir übermorgen um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_de_sun_tom",
+      "persona": "weekdays_de",
+      "now": "2026-10-25T20:20:00+00:00",
+      "situation": "Können wir morgen um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "accept",
+        "absent_any": [
+          "wochenende"
+        ]
+      }
+    },
+    {
+      "id": "days_de_sun_dat",
+      "persona": "weekdays_de",
+      "now": "2026-10-25T20:20:00+00:00",
+      "situation": "Können wir übermorgen um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "accept",
+        "absent_any": [
+          "wochenende"
+        ]
+      }
+    },
+    {
+      "id": "days_de_sat_sat",
+      "persona": "weekdays_de",
+      "now": "2026-10-24T08:00:00+00:00",
+      "situation": "Können wir am Samstag um 17 Uhr telefonieren?",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_de_thu_taken",
+      "persona": "weekdays_de",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Können wir morgen um 15 Uhr telefonieren?",
+      "context": "morgen (Fr 2026-10-23) 15:00–15:30 ist belegt",
+      "expect": {
+        "type": "answer",
+        "language": "de",
+        "stance": "decline",
+        "absent_any": [
+          "wochenende"
+        ]
+      }
+    },
+    {
+      "id": "days_pl_thu_tom",
+      "persona": "weekdays_pl",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Zdzwonimy się jutro o 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "pl",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_pl_thu_dat",
+      "persona": "weekdays_pl",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Zdzwonimy się pojutrze o 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "pl",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_pl_fri_tom",
+      "persona": "weekdays_pl",
+      "now": "2026-10-23T20:20:00+00:00",
+      "situation": "Zdzwonimy się jutro o 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "pl",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_pl_fri_dat",
+      "persona": "weekdays_pl",
+      "now": "2026-10-23T20:20:00+00:00",
+      "situation": "Zdzwonimy się pojutrze o 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "pl",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_pl_sun_tom",
+      "persona": "weekdays_pl",
+      "now": "2026-10-25T20:20:00+00:00",
+      "situation": "Zdzwonimy się jutro o 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "pl",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_pl_sun_dat",
+      "persona": "weekdays_pl",
+      "now": "2026-10-25T20:20:00+00:00",
+      "situation": "Zdzwonimy się pojutrze o 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "pl",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_pl_sat_sat",
+      "persona": "weekdays_pl",
+      "now": "2026-10-24T08:00:00+00:00",
+      "situation": "Zdzwonimy się w sobotę o 17:00?",
+      "expect": {
+        "type": "answer",
+        "language": "pl",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_pl_thu_taken",
+      "persona": "weekdays_pl",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "Zdzwonimy się jutro o 15:00?",
+      "context": "jutro (pt 2026-10-23) 15:00–15:30 zajęte",
+      "expect": {
+        "type": "answer",
+        "language": "pl",
+        "stance": "decline",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "days_ja_thu_tom",
+      "persona": "weekdays_ja",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "明日の17時に電話できる？",
+      "expect": {
+        "type": "answer",
+        "language": "ja",
+        "stance": "accept",
+        "absent_any": [
+          "週末",
+          "休日"
+        ]
+      }
+    },
+    {
+      "id": "days_ja_thu_dat",
+      "persona": "weekdays_ja",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "明後日の17時に電話できる？",
+      "expect": {
+        "type": "answer",
+        "language": "ja",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_ja_fri_tom",
+      "persona": "weekdays_ja",
+      "now": "2026-10-23T20:20:00+00:00",
+      "situation": "明日の17時に電話できる？",
+      "expect": {
+        "type": "answer",
+        "language": "ja",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_ja_fri_dat",
+      "persona": "weekdays_ja",
+      "now": "2026-10-23T20:20:00+00:00",
+      "situation": "明後日の17時に電話できる？",
+      "expect": {
+        "type": "answer",
+        "language": "ja",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_ja_sun_tom",
+      "persona": "weekdays_ja",
+      "now": "2026-10-25T20:20:00+00:00",
+      "situation": "明日の17時に電話できる？",
+      "expect": {
+        "type": "answer",
+        "language": "ja",
+        "stance": "accept",
+        "absent_any": [
+          "週末",
+          "休日"
+        ]
+      }
+    },
+    {
+      "id": "days_ja_sun_dat",
+      "persona": "weekdays_ja",
+      "now": "2026-10-25T20:20:00+00:00",
+      "situation": "明後日の17時に電話できる？",
+      "expect": {
+        "type": "answer",
+        "language": "ja",
+        "stance": "accept",
+        "absent_any": [
+          "週末",
+          "休日"
+        ]
+      }
+    },
+    {
+      "id": "days_ja_sat_sat",
+      "persona": "weekdays_ja",
+      "now": "2026-10-24T08:00:00+00:00",
+      "situation": "土曜日の17時に電話できる？",
+      "expect": {
+        "type": "answer",
+        "language": "ja",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "days_ja_thu_taken",
+      "persona": "weekdays_ja",
+      "now": "2026-10-22T20:20:00+00:00",
+      "situation": "明日の15時に電話できる？",
+      "context": "明日（金 2026-10-23）15:00〜15:30は予定が入っている",
+      "expect": {
+        "type": "answer",
+        "language": "ja",
+        "stance": "decline",
+        "absent_any": [
+          "週末",
+          "休日"
+        ]
+      }
+    },
+    {
+      "id": "refusal_over_boundary",
+      "persona": "refusal_over_boundary",
+      "situation": "Сколько ты сейчас получаешь?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "decline"
+      }
+    },
+    {
+      "id": "refusal_over_boundary_p1",
+      "persona": "refusal_over_boundary",
+      "situation": "Какая у тебя зарплата на новой работе?",
+      "expect": {
+        "type": "answer",
+        "language": "ru",
+        "stance": "decline"
       }
     }
   ]

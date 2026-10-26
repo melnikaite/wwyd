@@ -15,7 +15,13 @@
       "additionalProperties": false,
       "properties": {
         "display_name": {"type": "string", "minLength": 1, "maxLength": 100},
-        "timezone": {"type": "string", "minLength": 1, "maxLength": 64}
+        "timezone": {"type": "string", "minLength": 1, "maxLength": 64},
+        "weekend_days": {
+          "type": "array",
+          "maxItems": 7,
+          "uniqueItems": true,
+          "items": {"enum": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]}
+        }
       }
     },
     "audiences": {

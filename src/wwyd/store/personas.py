@@ -53,6 +53,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "escalate_below": 0.6,
     "disclosure_template": DEFAULT_DISCLOSURE,
     "llm_for_ingest": True,
+    "weekend_days": ["saturday", "sunday"],
 }
 
 
@@ -195,6 +196,7 @@ def get_settings(conn: sqlite3.Connection, persona_id: str) -> dict[str, Any]:
     return {
         "display_name": row["display_name"],
         "timezone": row["timezone"],
+        "weekend_days": stored["weekend_days"],
         "escalate_below": stored["escalate_below"],
         "disclosure_template": stored["disclosure_template"],
         "llm_for_ingest": stored["llm_for_ingest"],
@@ -234,12 +236,28 @@ def check_timezone(value: str) -> str:
     return value
 
 
+def check_weekend_days(value: Any) -> list[str]:
+    """A plain list of English weekday names (any case); stored lowercase, in week order."""
+    from wwyd.predict.when import WEEKDAYS
+
+    if not isinstance(value, list) or len(value) > 7:
+        raise Invalid("weekend_days must be a list of weekday names", field="weekend_days")
+    names = {str(v).strip().lower() for v in value}
+    if not names <= set(WEEKDAYS):
+        raise Invalid(
+            "weekend_days must contain English weekday names, e.g. saturday",
+            field="weekend_days",
+        )
+    return [d for d in WEEKDAYS if d in names]
+
+
 def update_settings(
     conn: sqlite3.Connection,
     persona_id: str,
     *,
     display_name: str | None = None,
     timezone: str | None = None,
+    weekend_days: list[str] | None = None,
     escalate_below: float | None = None,
     disclosure_template: str | None = None,
     llm_for_ingest: bool | None = None,
@@ -265,6 +283,8 @@ def update_settings(
         new_display = display_name
     if timezone is not None:
         new_tz = check_timezone(timezone)
+    if weekend_days is not None:
+        settings["weekend_days"] = check_weekend_days(weekend_days)
     if escalate_below is not None:
         if not 0 <= escalate_below <= 1:
             raise Invalid("escalate_below must be between 0 and 1", field="escalate_below")

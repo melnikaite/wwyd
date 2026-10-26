@@ -123,7 +123,7 @@ def echo(call):
                 "proposed_category": f"people/{NAME.lower()}",
                 "text": t,
                 "confidence": 0.9,
-                "support": 2,
+                "used_items": [1, 2],
             }
             for t in texts
         ]

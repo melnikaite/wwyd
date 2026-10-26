@@ -33,27 +33,3 @@ def absorbed_confidence(a: float, b: float) -> float:
     """Confidence after two claims agree: goes up, never reaches 1."""
     hi, lo = max(a, b), min(a, b)
     return round(min(0.99, hi + (1 - hi) * lo * 0.5), 4)
-
-
-# Negation/polarity markers (i18n data: en, ru, uk, de, es, fr). A pair with Jaccard
-# >= DUPLICATE_JACCARD whose token symmetric difference contains one of these may be a
-# contradiction, so it goes to the judge instead of merging. Tokens are casefolded \w+
-# words, so "don't" appears as "don" + "t".
-POLARITY_MARKERS = frozenset(
-    {
-        # en
-        "never", "not", "no", "none", "nobody", "nothing", "don", "doesn", "didn", "won",
-        "isn", "aren", "wasn", "can", "cannot", "rarely", "seldom", "hardly", "avoids",
-        "avoid", "declines", "decline", "refuses", "refuse", "without",
-        # ru
-        "не", "ни", "никогда", "нет", "редко", "избегает", "отказывается", "без",
-        # uk
-        "ніколи", "ні", "рідко", "уникає", "відмовляється",
-        # de
-        "nicht", "nie", "niemals", "kein", "keine", "keinen", "selten", "ohne",
-        # es
-        "nunca", "jamás", "rara", "sin",
-        # fr
-        "ne", "pas", "jamais", "rarement", "sans", "aucun", "aucune",
-    }
-)  # fmt: skip

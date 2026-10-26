@@ -33,7 +33,7 @@ class FakeLLM:
     what the model was shown."""
 
     def __init__(self) -> None:
-        self.responses: dict[str, Any] = {"analyze": settled}
+        self.responses: dict[str, Any] = {"analyze": settled, "when": {"when": ""}}
         self.calls: list[dict[str, Any]] = []
 
     def on(self, purpose: str, response: Any | Handler) -> None:

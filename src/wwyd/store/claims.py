@@ -287,11 +287,24 @@ def jaccard(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
-def polarity_differs(a: str, b: str) -> bool:
-    """True if a negation/polarity marker occurs in only one of the two texts."""
-    from wwyd.compact.constants import POLARITY_MARKERS
+def token_sequence(text: str) -> tuple[str, ...]:
+    """Casefolded ``\\w+`` words in order: the text minus punctuation, case and spacing."""
+    return tuple(t.casefold() for t in _FTS_TOKEN.findall(text))
 
-    return bool((text_tokens(a) ^ text_tokens(b)) & POLARITY_MARKERS)
+
+def numbers_differ(a: str, b: str) -> bool:
+    """True if a word with a digit (amount, decimal part, HH:MM part) occurs in only one
+    of the two texts: "40 euros" and "60 euros" are not the same claim."""
+    return any(any(ch.isdigit() for ch in t) for t in text_tokens(a) ^ text_tokens(b))
+
+
+def auto_duplicate(a: str, b: str) -> bool:
+    """True if two texts are the same claim without asking the judge (SPEC §10.1): the
+    same words in the same order, differing only in punctuation, case or spacing. Any
+    other wording difference may flip the meaning (negation, numbers, order) in any
+    language, so it goes to the judge instead."""
+    ta = token_sequence(a)
+    return ta == token_sequence(b) if ta else normalize_text(a) == normalize_text(b)
 
 
 def find_similar(
@@ -619,7 +632,7 @@ def _absorb_target(
         for row, score in find_similar(
             conn, persona_id, kind=kind, category_id=category_id, text=text, limit=FTS_CANDIDATES
         )
-        if score >= DUPLICATE_JACCARD and not polarity_differs(text, row["text"])
+        if score >= DUPLICATE_JACCARD and auto_duplicate(text, row["text"])
     ]
     if not found:
         return None

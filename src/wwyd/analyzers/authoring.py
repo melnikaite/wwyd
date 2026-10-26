@@ -346,7 +346,10 @@ def is_duplicate(template: str, others: Sequence[str]) -> bool:
     for other in others:
         theirs = _norm_statement(other)
         union = mine | theirs
-        if mine == theirs or (union and len(mine & theirs) / len(union) >= DUPLICATE_JACCARD):
+        if mine == theirs:
+            return True
+        numbers_differ = any(any(ch.isdigit() for ch in t) for t in mine ^ theirs)
+        if union and len(mine & theirs) / len(union) >= DUPLICATE_JACCARD and not numbers_differ:
             return True
     return False
 

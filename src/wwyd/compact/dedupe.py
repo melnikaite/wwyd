@@ -18,7 +18,7 @@ from wwyd.compact.constants import (
 )
 from wwyd.compact.run import Run, evidence_weight
 from wwyd.errors import LLMUnavailable, RateLimited, SpendCap
-from wwyd.store.claims import find_similar, polarity_differs
+from wwyd.store.claims import auto_duplicate, find_similar
 
 log = logging.getLogger(__name__)
 
@@ -169,7 +169,7 @@ async def run_pairs(
     def sure(p: Pair) -> bool:
         if p in must:
             return False
-        return pairs[p] >= DUPLICATE_JACCARD and not polarity_differs(
+        return pairs[p] >= DUPLICATE_JACCARD and auto_duplicate(
             rows[p[0]]["text"], rows[p[1]]["text"]
         )
 

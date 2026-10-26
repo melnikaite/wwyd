@@ -23,17 +23,19 @@ from wwyd.predict import answer as answer_step
 from wwyd.predict import style as style_step
 from wwyd.predict.context import budgeted, fts_match, in_categories, visible_claims
 from wwyd.predict.disclosure import build_disclosure
-from wwyd.predict.language import answer_line, detect, normalise
+from wwyd.predict.language import answer_line, normalise, script
 from wwyd.predict.prompts import (
     COMMIT_RETRY_NOTE,
     COMMITS_KEY,
     INSTRUCTIONS,
     LANGUAGE_RETRY_NOTE,
+    RULED_OUT_RETRY_NOTE,
     analyze_user,
     answer_user,
     claim_line,
 )
-from wwyd.predict.route import MAX_ROUTES, route
+from wwyd.predict.route import MAX_ROUTES, extract_when, route
+from wwyd.predict.when import resolve, when_line
 from wwyd.store import audit as audit_store
 from wwyd.store.audiences import DEFAULT_ALIAS, find_audience
 from wwyd.store.personas import DEFAULT_SETTINGS
@@ -94,16 +96,28 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def now_line(timezone: str | None) -> str:
-    """``Monday 2026-10-19 18:40 (Europe/Berlin)`` in the persona timezone; a missing or
-    unknown zone falls back to UTC."""
+def _local(timezone: str | None) -> tuple[datetime, str]:
     try:
         tz = ZoneInfo(timezone or "UTC")
         name = timezone or "UTC"
     except (ZoneInfoNotFoundError, ValueError):
         tz, name = ZoneInfo("UTC"), "UTC"
-    local = _now().astimezone(tz)
+    return _now().astimezone(tz), name
+
+
+def now_line(timezone: str | None) -> str:
+    """``Monday 2026-10-19 18:40 (Europe/Berlin)`` in the persona timezone; a missing or
+    unknown zone falls back to UTC."""
+    local, name = _local(timezone)
     return f"{local.strftime('%A %Y-%m-%d %H:%M')} ({name})"
+
+
+def resolved_when(text: str, timezone: str | None, weekend: list[str] | None) -> str:
+    """The When line body for the model's canonical time (``predict.when``), "" when there
+    is none or it does not parse."""
+    if not text:
+        return ""
+    return when_line(resolve(text, _local(timezone)[0].date(), weekend), weekend)
 
 
 def _escalate(code: str, reason: str, **extra: Any) -> dict[str, Any]:
@@ -168,6 +182,7 @@ async def predict(
         )
 
     llm = get_llm(conn, persona_id)
+    route_when = ""  # the situation's time in canonical English (routing or the when call)
     try:
         # Routing picks up to MAX_ROUTES categories; with that few it cannot narrow anything.
         if (
@@ -175,10 +190,14 @@ async def predict(
             or len({c.category for c in visible}) <= MAX_ROUTES
         ):
             selected = visible
+            # No routing call to carry the time reference: one small call does (§8.1).
+            run.llm_called = True
+            route_when, tokens = await extract_when(llm, situation)
+            run.tokens += tokens
         else:
             categories = _categories(conn, persona_id, {c.category for c in visible})
             run.llm_called = True
-            paths, tokens = await route(llm, categories, situation)
+            paths, tokens, route_when = await route(llm, categories, situation)
             run.tokens += tokens
             if paths:
                 selected = [c for c in visible if in_categories(c, paths)]
@@ -208,16 +227,23 @@ async def predict(
         kinds = {label: c.kind for label, c in zip(labels, claims, strict=True)}
         lines = {label: claim_line(label, c) for label, c in zip(labels, claims, strict=True)}
         now = now_line(timezone)
+        weekend = settings.get("weekend_days", DEFAULT_SETTINGS["weekend_days"])
+        when = resolved_when(route_when, timezone, weekend)
         # Call 1, analyze: which claims apply and what they decide (internal only).
         run.llm_called = True
         data, tokens = await answer_step.analyze_call(
             llm,
             analyze_user(
-                claims=list(lines.values()), context=context, situation=situation, now=now
+                claims=list(lines.values()),
+                context=context,
+                situation=situation,
+                now=now,
+                when=when,
             ),
         )
         run.tokens += tokens
-        found = answer_step.read_analysis(data, kinds)
+        cats = {label: c.category for label, c in zip(labels, claims, strict=True)}
+        found = answer_step.read_analysis(data, kinds, cats)
         if found.verdict == "none":
             return run.finish(
                 _escalate("out_of_persona", "no claim of the persona covers this situation")
@@ -225,7 +251,7 @@ async def predict(
         if found.verdict == "boundary":
             return run.finish(_escalate("boundary", "a boundary claim covers this topic"))
         # Call 2, answer: the message in the owner's voice, doing what the verdict says.
-        lang = detect(situation)
+        lang = found.language
         shown = [x for x in labels if kinds[x] == "style" or x in found.applicable]
         user = answer_user(
             owner=owner,
@@ -236,6 +262,7 @@ async def predict(
             kind=kind,
             situation=situation,
             now=now,
+            when=when,
             instruction=INSTRUCTIONS[found.verdict].replace("{label}", found.label or ""),
             depends_on=found.depends_on,
             analysis=found.check,
@@ -251,7 +278,9 @@ async def predict(
         notes = []
         if found.verdict == "open" and data.get(COMMITS_KEY) is True:
             notes.append(COMMIT_RETRY_NOTE)
-        if _language_mismatch(lang, data):
+        if found.verdict == "ruled_out" and data.get(COMMITS_KEY) is False:
+            notes.append(RULED_OUT_RETRY_NOTE)
+        if _language_mismatch(situation, lang, data):
             notes.append(LANGUAGE_RETRY_NOTE)
         if notes:
             data, tokens = await answer_step.ask(llm, user + "".join(notes), kind=kind)
@@ -275,14 +304,18 @@ async def predict(
         return run.finish(
             _escalate("low_confidence", "the model returned no answer", _confidence=0.0)
         )
-    shown_ids = {x: labels[x] for x in shown}
-    used = answer_step.used_claims(data, shown_ids) or [labels[x] for x in found.applicable]
+    # used_claims and confidence are decided in code, not by the model (SPEC §8.1 step 7).
+    used = [labels[x] for x in found.applicable]
+    used += [labels[x] for x in shown if kinds[x] == "style"]
+    if profile is not None:
+        used.append(profile.claim_id)
+    weights = {x: c.weight for x, c in zip(labels, claims, strict=True)}
     result: dict[str, Any] = {
         "type": "answer",
         "answer": text,
         "depends_on": found.depends_on,
-        "confidence": answer_step.confidence(data.get("confidence")),
-        "used_claims": used,
+        "confidence": answer_step.score(found, weights, reasked=bool(notes)),
+        "used_claims": list(dict.fromkeys(used)),
     }
     threshold = float(settings.get("escalate_below", DEFAULT_SETTINGS["escalate_below"]))
     if result["confidence"] < threshold:
@@ -301,18 +334,23 @@ async def predict(
     return run.finish(result)
 
 
-def _language_mismatch(want: str | None, data: dict[str, Any]) -> bool:
-    """The situation's detected language differs from the answer's: its own detected
-    language when that is confident, else the model's ``language`` field."""
+def _language_mismatch(situation: str, want: str | None, data: dict[str, Any]) -> bool:
+    """The answer is not in the situation's language, judged only by universal signals:
+    the Unicode scripts of situation and answer differ, or the answer's own ``language``
+    field differs from the language the analyze call named."""
     text = answer_step.answer_text(data)
-    if want is None or not text:
+    if not text:
         return False
-    got = detect(text) or normalise(data.get("language"))
-    return got is not None and got != want
+    asked, got = script(situation), script(text)
+    if asked and got and asked != got:
+        return True
+    said = normalise(data.get("language"))
+    return want is not None and said is not None and said != want
 
 
 async def _styled(llm, run: _Run, text: str, profile: style_step.StyleProfile) -> str:  # noqa: ANN001
-    """Step 8: one shorten re-ask if far too long, then the deterministic rules."""
+    """Step 8: cut in code, a shorten re-ask only if still far too long, then the rules."""
+    text = style_step.compact(text, profile)
     if style_step.too_long(text, profile):
         shorter, tokens = await style_step.shorten(llm, text, profile)
         run.tokens += tokens

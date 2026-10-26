@@ -25,6 +25,7 @@ from wwyd.errors import Invalid
 from wwyd.ingest.episodes import Batch
 from wwyd.ingest.guard import BatchGuard
 from wwyd.store.categories import normalize_category_path
+from wwyd.store.claims import numbers_differ
 from wwyd.store.common import KINDS, MAX_TEXT, normalize_text, parent_path
 
 CHUNK_CHARS = 2500
@@ -83,7 +84,13 @@ def _schema(extra: dict[str, Any] | None = None) -> dict[str, Any]:
 
 REPLIES_SCHEMA = _schema()
 STATEMENTS_SCHEMA = _schema()
-DECISIONS_SCHEMA = _schema({"support": {"type": "integer"}})
+# ``used_items``: the numbers of the listed decisions a rule follows; code counts them
+# (a small model miscounts). Named to sort after ``text``: LocalAI emits keys in
+# alphabetical order, so the model writes the rule before choosing its items.
+# The plain wording and the closing language line are measured: with an inline
+# "e.g. [1, 3]" and no closing line, qwen3-vl-8b wrote English input's claims in the
+# Russian of the worked example in most runs (2026-10-23).
+DECISIONS_SCHEMA = _schema({"used_items": {"type": "array", "items": {"type": "integer"}}})
 DESCRIBE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -172,8 +179,8 @@ Answer:
 
 DECISIONS_SYSTEM = (
     """The input lists decisions the owner made: a situation and the owner's choice.
-Find the rules behind them. For each rule set support to the number of listed decisions
-that follow it. Return JSON {"claims": [...]}; kind is decision_rule or preference.
+Find the rules behind them. For each rule set used_items to the numbers of the listed
+decisions that follow it. Return JSON {"claims": [...]}; kind is decision_rule or preference.
 """
     + _COMMON_RULES
     + """{categories}
@@ -186,9 +193,11 @@ Input:
 Answer:
 {"claims": [{"kind": "decision_rule", "category": "hobbies/model-trains", "proposed_category": null,
 "text": "Прежде чем согласиться, узнаёт подробности о макетах.",
-"confidence": 0.7, "support": 2},
+"confidence": 0.7, "used_items": [1, 2]},
 {"kind": "preference", "category": "hobbies/archery", "proposed_category": null,
-"text": "Не пропускает стрельбу из лука из-за плохой погоды.", "confidence": 0.4, "support": 1}]}
+"text": "Не пропускает стрельбу из лука из-за плохой погоды.", "confidence": 0.4, "used_items": [3]}]}
+
+Write the claims in the language of the input above, not in the example's language.
 """
 )
 
@@ -280,6 +289,8 @@ class Call:
     meta: Any = None
     # A correction's own call: the claim IDs the corrected prediction used (D23).
     corrected_claims: tuple[str, ...] | None = None
+    # Numbered calls (decisions): the timestamp of item i + 1, in prompt order.
+    item_stamps: tuple[datetime | None, ...] = ()
 
     @property
     def estimated_tokens(self) -> int:
@@ -398,6 +409,7 @@ def build_calls(
                     default_category=cats.most_common(1)[0][0],
                     allowed=allowed,
                     corrected_claims=correction,
+                    item_stamps=tuple(it[0] for it in chunk) if numbered else (),
                 )
             )
 
@@ -569,9 +581,24 @@ def to_candidates(
         if not isinstance(confidence, int | float) or isinstance(confidence, bool):
             confidence = 0.5
         confidence = min(1.0, max(0.0, float(confidence)))
+        period, sources = call.period, dict(call.sources)
         if call.purpose == "decisions":
-            support = item.get("support")
-            support = support if isinstance(support, int) and not isinstance(support, bool) else 1
+            # Code counts the distinct listed items the model names (SPEC §7.6).
+            raw = item.get("used_items")
+            picked = sorted(
+                {
+                    i
+                    for i in (raw if isinstance(raw, list) else [])
+                    if isinstance(i, int)
+                    and not isinstance(i, bool)
+                    and 1 <= i <= len(call.item_stamps)
+                }
+            )
+            support = len(picked)
+            if picked:
+                period = _month_period(call.item_stamps[i - 1] for i in picked) or period
+                key = next(iter(sources))
+                sources = {key: support}
             if support >= 2 and kind == "decision_rule":
                 confidence = max(min(confidence, 0.8), RULE_CONFIDENCE)
             else:
@@ -594,8 +621,8 @@ def to_candidates(
                 text=text,
                 audiences=call.audiences,
                 confidence=confidence,
-                sources=dict(call.sources),
-                period=call.period,
+                sources=sources,
+                period=period,
                 proposed_category=proposed,
                 judge_with=call.corrected_claims or (),
             )
@@ -658,7 +685,11 @@ def dedupe(candidates: list[Candidate], counts: DeriveCounts) -> list[Candidate]
                 continue
             union = tokens | other_tokens
             same = normalize_text(other.text) == normalize_text(cand.text)
-            if same or (union and len(tokens & other_tokens) / len(union) >= DEDUPE_JACCARD):
+            if same or (
+                union
+                and len(tokens & other_tokens) / len(union) >= DEDUPE_JACCARD
+                and not numbers_differ(cand.text, other.text)
+            ):
                 for name, n in cand.sources.items():
                     other.sources[name] = other.sources.get(name, 0) + n
                 other.period = _widen(other.period, cand.period)
@@ -684,7 +715,11 @@ def same_claim(a: Candidate, b: Candidate) -> bool:
         return True
     ta, tb = _tokens(a.text), _tokens(b.text)
     union = ta | tb
-    return bool(union) and len(ta & tb) / len(union) >= DEDUPE_JACCARD
+    return (
+        bool(union)
+        and len(ta & tb) / len(union) >= DEDUPE_JACCARD
+        and not numbers_differ(a.text, b.text)
+    )
 
 
 def guard_for(batch: Batch, vocabulary: set[str]) -> BatchGuard:

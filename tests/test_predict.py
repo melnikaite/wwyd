@@ -14,7 +14,12 @@ from wwyd.limits import get_limiter
 from wwyd.mcp.caller import Caller
 from wwyd.predict import predict
 from wwyd.predict.disclosure import TEMPLATES
-from wwyd.predict.prompts import COMMIT_RETRY_NOTE, INSTRUCTIONS, LANGUAGE_RETRY_NOTE
+from wwyd.predict.prompts import (
+    COMMIT_RETRY_NOTE,
+    INSTRUCTIONS,
+    LANGUAGE_RETRY_NOTE,
+    RULED_OUT_RETRY_NOTE,
+)
 from wwyd.store import audit
 from wwyd.store.audiences import upsert_audience
 from wwyd.store.claims import add_claims
@@ -89,8 +94,9 @@ async def test_small_set_skips_routing(conn, user, pid, fake_llm):
     assert out["hints"] == []
     assert not fake_llm.by_purpose("route")
     # Claims are shown under short labels, never their IDs.
-    assert "[c1]" in fake_llm.calls[0]["user"] and "[c2]" in fake_llm.calls[0]["user"]
-    assert not any(i in fake_llm.calls[0]["user"] for i in ids)
+    prompt = fake_llm.by_purpose("analyze")[0]["user"]
+    assert "[c1]" in prompt and "[c2]" in prompt
+    assert not any(i in prompt for i in ids)
 
 
 def big_set(conn, pid) -> dict[str, str]:
@@ -235,7 +241,7 @@ def test_schema_keys_sort_into_generation_order():
     from wwyd.predict.prompts import ANALYZE_SCHEMA, ANSWER_SCHEMA, COMMITS_KEY
 
     keys = list(ANALYZE_SCHEMA["properties"])
-    assert keys == sorted(keys) and keys[0] == "a_check" and keys[-1] == "f_depends_on"
+    assert keys == sorted(keys) and keys[0] == "a_check" and keys[-1] == "g_language"
     assert "c_excluded_by" in keys
     assert set(ANALYZE_SCHEMA["required"]) == set(keys)
     assert ANALYZE_SCHEMA["properties"]["d_verdict"]["enum"] == [
@@ -264,14 +270,17 @@ KINDS = {"c1": "style", "c2": "decision_rule", "c3": "boundary"}
         (_analysis("boundary", ["c3"], "c3"), "boundary", ["c3"], "c3"),
         (_analysis("boundary", ["c2", "c3"], "c2"), "boundary", ["c2", "c3"], "c3"),
         (_analysis("boundary", ["c2"], "c2"), "settled", ["c2"], None),  # no boundary claim
-        (_analysis("ruled_out", [], "[c2]"), "ruled_out", ["c2"], "c2"),
+        (_analysis("ruled_out", [], "[c2]"), "none", [], None),  # e_label alone is ignored
         (_analysis("ruled_out", ["c2"], "q7"), "ruled_out", ["c2"], "c2"),
         (_analysis("banana", ["c2"]), "settled", ["c2"], None),
         ({}, "none", [], None),
         (_analysis("open", ["c2"], c_excluded_by="c2", depends="x"), "ruled_out", ["c2"], "c2"),
         (_analysis("settled", [], c_excluded_by="c2"), "ruled_out", ["c2"], "c2"),
         (_analysis("settled", ["c2"], c_excluded_by="c1"), "settled", ["c2"], None),  # style
-        (_analysis("boundary", ["c3"], "c3", c_excluded_by="c2"), "boundary", ["c3"], "c3"),
+        # A refusal rule beats a boundary verdict; a boundary claim excluding does not.
+        (_analysis("boundary", ["c3"], "c3", c_excluded_by="c2"), "ruled_out", ["c3", "c2"], "c2"),
+        (_analysis("boundary", ["c3"], "c3", c_excluded_by="c3"), "boundary", ["c3"], "c3"),
+        (_analysis("boundary", ["c3"], "c3", c_excluded_by="c1"), "boundary", ["c3"], "c3"),
     ],
 )
 def test_read_analysis(data, verdict, applicable, label):
@@ -279,6 +288,17 @@ def test_read_analysis(data, verdict, applicable, label):
 
     found = read_analysis(data, KINDS)
     assert (found.verdict, found.applicable, found.label) == (verdict, applicable, label)
+
+
+def test_refusal_rule_in_the_boundary_category_beats_boundary():
+    from wwyd.predict.answer import read_analysis
+
+    data = _analysis("boundary", ["c3", "c2"], "c3", c_excluded_by="c3")
+    same = read_analysis(data, KINDS, {"c2": "work/salary", "c3": "work/salary"})
+    assert (same.verdict, same.label) == ("ruled_out", "c2")
+    other = read_analysis(data, KINDS, {"c2": "work/meetings", "c3": "work/salary"})
+    assert (other.verdict, other.label) == ("boundary", "c3")
+    assert read_analysis(data, KINDS).verdict == "boundary"
 
 
 async def test_none_verdict_escalates_without_answer_call(conn, user, pid, fake_llm):
@@ -294,7 +314,7 @@ async def test_style_only_persona_is_out_of_persona(conn, user, pid, fake_llm):
     seed(conn, pid, [STYLE])
     out = await predict(conn, owner(user), situation="Help me move?", audience="default")
     assert out["escalate"] == "out_of_persona"
-    assert [c["purpose"] for c in fake_llm.calls] == ["analyze"]
+    assert [c["purpose"] for c in fake_llm.calls] == ["when", "analyze"]
 
 
 async def test_boundary_escalates_without_answer_call(conn, user, pid, fake_llm):
@@ -341,11 +361,12 @@ async def test_answer_call_sees_style_and_applicable_claims_only(conn, user, pid
     assert "[c1] (style" in second and "[c2] (decision_rule" in second
 
 
-async def test_used_claims_fall_back_to_applicable(conn, user, pid, fake_llm):
+async def test_used_claims_decided_in_code(conn, user, pid, fake_llm):
+    """Applicable claims first, then the style claims shown; whatever the model says."""
     ids = seed(conn, pid, [STYLE, MEETING])
     fake_llm.on("answer", _reply("sure", used_claims=["c9"]))
     out = await predict(conn, owner(user), situation="Call?", audience="default")
-    assert out["used_claims"] == [ids[1]]
+    assert out["used_claims"] == [ids[1], ids[0]]
 
 
 async def test_empty_answer_is_low_confidence(conn, user, pid, fake_llm):
@@ -398,21 +419,23 @@ async def test_commit_guard_no_retry(conn, user, pid, fake_llm, verdict, commits
 RU_SITUATION = "Одолжишь мне пятьдесят евро до пятницы?"
 
 
-async def test_language_line_in_answer_call_only(conn, user, pid, fake_llm):
+async def test_language_line_from_the_analysis(conn, user, pid, fake_llm):
     seed(conn, pid, [STYLE, MEETING])
-    fake_llm.on("answer", _reply("конечно, без проблем", language="ru"))
-    await predict(conn, owner(user), situation=RU_SITUATION, audience="default")
+    fake_llm.on("analyze", _scripted(_analysis(g_language="pl"), _analysis(g_language="??")))
+    fake_llm.on("answer", _reply("jasne, pasuje", language="pl"))
+    await predict(conn, owner(user), situation="Pożyczysz mi 50 euro?", audience="default")
     await predict(conn, owner(user), situation="Ok?", audience="default")
-    ru, unsure = fake_llm.by_purpose("answer")
-    assert "\nAnswer language: ru (Russian)\nSituation: " in ru["user"]
+    pl, unsure = fake_llm.by_purpose("answer")
+    assert "\nAnswer language: pl\nSituation: " in pl["user"]
     assert "Answer language" not in unsure["user"]
-    assert ru["system"] == unsure["system"]
+    assert pl["system"] == unsure["system"]
     assert all("Answer language" not in c["user"] for c in fake_llm.by_purpose("analyze"))
 
 
-async def test_language_guard_reasks_once(conn, user, pid, fake_llm):
+async def test_language_guard_reasks_once_on_script(conn, user, pid, fake_llm):
+    """Cyrillic situation, Latin answer: caught by the script alone."""
     seed(conn, pid, [STYLE, MEETING])
-    wrong = _reply("sure, no problem at all")
+    wrong = _reply("sure, no problem at all", language="ru")
     right = _reply("конечно, без проблем", language="ru")
     fake_llm.on("answer", _scripted(wrong, right))
     out = await predict(conn, owner(user), situation=RU_SITUATION, audience="default")
@@ -424,8 +447,9 @@ async def test_language_guard_reasks_once(conn, user, pid, fake_llm):
 
 
 async def test_language_guard_same_script(conn, user, pid, fake_llm):
-    """English situation, German answer: a script check could not see this one."""
+    """English situation, German answer: the script is the same, the language fields differ."""
     seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis(g_language="en"))
     wrong = _reply("ja, gerne", language="de")
     right = _reply("sure, happy to", language="en")
     fake_llm.on("answer", _scripted(wrong, right))
@@ -434,6 +458,19 @@ async def test_language_guard_same_script(conn, user, pid, fake_llm):
     )
     assert len(fake_llm.by_purpose("answer")) == 2
     assert out["answer"] == "sure, happy to"
+
+
+async def test_language_guard_any_script(conn, user, pid, fake_llm):
+    """No per-language code: a Japanese situation answered in English is re-asked."""
+    seed(conn, pid, [STYLE, MEETING])
+    wrong = _reply("sure, see you tomorrow", language="ja")
+    right = _reply("はい、明日大丈夫です", language="ja")
+    fake_llm.on("answer", _scripted(wrong, right))
+    out = await predict(
+        conn, owner(user), situation="明日の17時に電話できますか？", audience="default"
+    )
+    assert len(fake_llm.by_purpose("answer")) == 2
+    assert out["answer"] == "はい、明日大丈夫です"
 
 
 async def test_language_mismatch_accepted_on_second_reply(conn, user, pid, fake_llm):
@@ -467,41 +504,38 @@ async def test_combined_notes_single_reask(conn, user, pid, fake_llm):
 )
 async def test_language_guard_ignores_unclear(conn, user, pid, fake_llm, situation, text, lang):
     seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis(g_language="ru" if situation == RU_SITUATION else ""))
     fake_llm.on("answer", _reply(text, language=lang))
     await predict(conn, owner(user), situation=situation, audience="default")
     assert len(fake_llm.by_purpose("answer")) == 1
 
 
 @pytest.mark.parametrize(
-    ("text", "code"),
+    ("text", "name"),
     [
-        ("Can you lend me 30 euros until Friday?", "en"),
-        ("What do you think about the new phone?", "en"),
-        ("Одолжишь 150 евро до зарплаты?", "ru"),
-        ("Созвонимся завтра в 17:00?", "ru"),
-        ("Позичиш мені 50 євро до п'ятниці?", "uk"),
-        ("Hast du morgen Lust auf einen Kaffee?", "de"),
-        ("vienna ist zu weit für einen weekendtrip, sorry!", "de"),
-        ("¿Vienes mañana a la cena con nosotros?", "es"),
-        ("Tu viens demain soir au cinéma avec nous ?", "fr"),
+        ("Can you lend me 30 euros until Friday?", "LATIN"),
+        ("Pożyczysz mi 50 euro do piątku?", "LATIN"),
+        ("Одолжишь 150 евро до зарплаты?", "CYRILLIC"),
+        ("明日の17時に電話できますか？", "CJK"),
+        ("明天下午五点打电话可以吗", "CJK"),
+        ("내일 다섯 시에 통화할 수 있어요?", "HANGUL"),
+        ("Καλημέρα, τι κάνεις;", "GREEK"),
         ("ok", None),
-        ("Call at 15?", None),
-        ("ja, gerne", None),
         ("Привет hello мир world", None),
-        ("Müller, señor?", None),
     ],
 )
-def test_language_detection(text, code):
-    from wwyd.predict.language import detect
+def test_script(text, name):
+    from wwyd.predict.language import script
 
-    assert detect(text) == code
+    assert script(text) == name
 
 
 def test_language_normalise():
     from wwyd.predict.language import normalise
 
     assert normalise("de-DE") == "de" and normalise(" RU ") == "ru"
-    assert normalise("pt") is None and normalise(None) is None
+    assert normalise("pl") == "pl" and normalise("fil") == "fil"
+    assert normalise("Polish") is None and normalise("") is None and normalise(None) is None
 
 
 def test_prompts_static_and_no_favour_fallback():
@@ -528,7 +562,7 @@ async def test_now_line_in_persona_timezone(conn, user, pid, fake_llm, monkeypat
     conn.execute("UPDATE personas SET timezone = 'Not/AZone' WHERE id = ?", (pid,))
     await predict(conn, owner(user), situation="Call?", audience="default")
     utc, berlin, bad = fake_llm.by_purpose("answer")[-3:]
-    assert "Now: Monday 2026-10-19 16:40 (UTC)\nSituation: Call?" in utc["user"]
+    assert "Now: Monday 2026-10-19 16:40 (UTC)\n" in utc["user"]
     assert all("Now: " in c["user"] for c in fake_llm.by_purpose("analyze"))
     assert "Now: Monday 2026-10-19 18:40 (Europe/Berlin)\n" in berlin["user"]
     assert "Now: Monday 2026-10-19 16:40 (UTC)\n" in bad["user"]
@@ -609,12 +643,13 @@ async def test_no_visible_claims_escalates_without_llm(conn, user, pid, fake_llm
 
 
 async def test_low_confidence(conn, user, pid, fake_llm):
-    seed(conn, pid, [STYLE, MEETING])
-    fake_llm.on("answer", answer(confidence=0.4))
+    """Confidence comes from the claims' support, not from the model."""
+    seed(conn, pid, [STYLE, {**MEETING, "confidence": 0.1}])
+    fake_llm.on("answer", answer(confidence=0.99))
     out = await predict(conn, owner(user), situation="Hi", audience="everyone")
     assert out["type"] == "escalate" and out["escalate"] == "low_confidence"
     assert "answer" not in out
-    assert audit.list_audit(conn, pid)["entries"][0]["confidence"] == 0.4
+    assert audit.list_audit(conn, pid)["entries"][0]["confidence"] == 0.55
     update_settings(conn, pid, escalate_below=0.3)
     out = await predict(conn, owner(user), situation="Hi", audience="everyone")
     assert out["type"] == "answer"
@@ -640,11 +675,11 @@ async def test_disclosure_override(conn, user, pid, fake_llm):
 
 
 async def test_used_claims_not_in_context_dropped(conn, user, pid, fake_llm, audiences):
-    _, shown = seed(conn, pid, [STYLE, MEETING])
+    style, shown = seed(conn, pid, [STYLE, MEETING])
     (hidden,) = seed(conn, pid, [{**MEETING, "text": "Hidden.", "visibility": "owner_only"}])
     fake_llm.on("answer", answer(used=[shown, hidden, "clm_a1", shown]))
     out = await predict(conn, owner(user), situation="Hi", audience="work")
-    assert out["used_claims"] == [shown]
+    assert out["used_claims"] == [shown, style]
 
 
 # --- scopes and visibility (asserted on what the model saw) -------------------------------
@@ -768,11 +803,11 @@ async def test_predict_limits(conn, user, pid, fake_llm, audiences):
 
 async def test_audit_rows(conn, user, pid, fake_llm, audiences):
     seed(conn, pid, [STYLE, MEETING])
-    fake_llm.on("answer", answer(confidence=0.77))
+    fake_llm.on("answer", answer(confidence=0.11))
     caller = respond(user, client_name="Responder", subject_id="grt_abc")
     await predict(conn, caller, situation="Hi", audience="work")
     (entry,) = audit.list_audit(conn, pid)["entries"]
-    assert entry["outcome"] == "answer" and entry["confidence"] == 0.77
+    assert entry["outcome"] == "answer" and entry["confidence"] == 0.75
     assert (entry["scope"], entry["client_name"], entry["grant_id"]) == (
         "respond",
         "Responder",
@@ -878,20 +913,13 @@ async def test_predict_privacy_canary(conn, user, pid, fake_llm, audiences, capl
         assert not any(canary in str(v) for v in tuple(row) for canary in CANARIES)
 
 
-def test_labels_map_back_to_claim_ids():
-    from wwyd.predict.answer import used_claims
-
-    data = _reply(used_claims=["c2", "[c1]", "a2", "c9"])
-    assert used_claims(data, {"c1": "clm_one", "c2": "clm_two"}) == ["clm_two", "clm_one"]
-
-
 async def test_prediction_id_and_used_claims_in_audit(conn, user, pid, fake_llm, audiences):
     (style, meeting) = seed(conn, pid, [STYLE, MEETING])
     fake_llm.on("answer", answer("Sure.", used=[meeting]))
     out = await predict(conn, owner(user), situation="Sync Tuesday?", audience="everyone")
     assert out["type"] == "answer" and out["prediction_id"].startswith("adt_")
     entries = {e["id"]: e for e in audit.list_audit(conn, pid)["entries"]}
-    assert entries[out["prediction_id"]]["used_claims"] == [meeting]
+    assert entries[out["prediction_id"]]["used_claims"] == [meeting, style]
     stored = conn.execute(
         "SELECT used_claims FROM audit WHERE id = ?", (out["prediction_id"],)
     ).fetchone()[0]
@@ -952,3 +980,69 @@ def test_answer_user_lines_in_order():
         instruction="Instruction: x",
     )
     assert "Analysis:" not in plain and "Case:" not in plain
+
+
+async def test_when_call_only_without_routing(conn, user, pid, fake_llm, monkeypatch):
+    from datetime import UTC, datetime
+
+    import wwyd.predict as predict_pkg
+
+    # Thursday 22:20 in Berlin; "day after tomorrow" is Saturday.
+    monkeypatch.setattr(predict_pkg, "_now", lambda: datetime(2026, 10, 22, 20, 20, tzinfo=UTC))
+    seed(conn, pid, [STYLE, MEETING])
+    update_settings(conn, pid, timezone="Europe/Berlin")
+    fake_llm.on("when", {"when": "day after tomorrow 17:00"})
+    fake_llm.on("answer", lambda call: _reply())
+    await predict(conn, owner(user), situation="Call?", audience="default")
+    assert [c["purpose"] for c in fake_llm.calls] == ["when", "analyze", "answer"]
+    assert fake_llm.by_purpose("when")[0]["user"] == "Situation: Call?"
+    for purpose in ("analyze", "answer"):
+        user_msg = fake_llm.by_purpose(purpose)[-1]["user"]
+        assert "\nWhen: Saturday 2026-10-24 (weekend)\n" in user_msg
+        assert "Days:" not in user_msg
+    # A custom weekend: Friday and Saturday; Sunday is a working day.
+    update_settings(conn, pid, weekend_days=["Friday", "saturday"])
+    fake_llm.on("when", {"when": "sun"})
+    await predict(conn, owner(user), situation="Call?", audience="default")
+    assert "\nWhen: Sunday 2026-10-25\n" in fake_llm.by_purpose("analyze")[-1]["user"]
+
+
+@pytest.mark.parametrize("value", ["", "whenever you like", "the 5th", None, "fail"])
+async def test_no_when_line_without_a_parseable_time(conn, user, pid, fake_llm, value):
+    def failing(call):
+        raise LLMUnavailable("down")
+
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("when", failing if value == "fail" else {"when": value})
+    fake_llm.on("answer", lambda call: _reply())
+    out = await predict(conn, owner(user), situation="Call?", audience="default")
+    assert out["type"] == "answer"  # fail safe: predict still answers
+    for purpose in ("analyze", "answer"):
+        assert "\nWhen:" not in fake_llm.by_purpose(purpose)[-1]["user"]
+
+
+async def test_route_when_reaches_both_calls(conn, user, pid, fake_llm, monkeypatch):
+    from datetime import UTC, datetime
+
+    import wwyd.predict as predict_pkg
+
+    monkeypatch.setattr(predict_pkg, "_now", lambda: datetime(2026, 10, 23, 9, 0, tzinfo=UTC))
+    big_set(conn, pid)
+    fake_llm.on("route", {"categories": ["work/meetings"], "when": "tomorrow 17:00"})
+    fake_llm.on("answer", answer())
+    await predict(conn, owner(user), situation="Meet tomorrow?", audience="everyone")
+    assert "when" in fake_llm.by_purpose("route")[0]["schema"]["required"]
+    assert not fake_llm.by_purpose("when")  # routing carried it: no extra call
+    for purpose in ("analyze", "answer"):
+        user_msg = fake_llm.by_purpose(purpose)[-1]["user"]
+        assert "\nWhen: Saturday 2026-10-24 (weekend)\n" in user_msg
+
+
+async def test_ruled_out_answer_that_does_not_decline_is_reasked(conn, user, pid, fake_llm):
+    seed(conn, pid, [STYLE, MEETING])
+    fake_llm.on("analyze", _analysis("settled", c_excluded_by="c2"))
+    fake_llm.on("answer", _scripted(_reply("maybe", z_commits=False), _reply("no", z_commits=True)))
+    out = await predict(conn, owner(user), situation="Call at 15?", audience="default")
+    calls = fake_llm.by_purpose("answer")
+    assert len(calls) == 2 and RULED_OUT_RETRY_NOTE in calls[1]["user"]
+    assert out["type"] == "answer" and out["answer"] == "no" and out["confidence"] == 0.65

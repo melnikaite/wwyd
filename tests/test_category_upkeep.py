@@ -318,6 +318,53 @@ async def test_nightly_merge_episode_pair_newer_into_older(conn, pid, fake_llm):
     assert aliases(conn, pid) == {"movies": old}
 
 
+async def test_nightly_merge_code_candidates_confirmed(conn, pid, fake_llm):
+    ca.upsert_category(conn, pid, "hobbies/films")  # owner
+    ca.upsert_category(conn, pid, "leisure")
+    episode_cat(conn, pid, "leisure/films")  # same leaf, other parent
+    episode_cat(conn, pid, "hobbies/film")  # one edit away
+    episode_cat(conn, pid, "кино")  # nothing in common: open search only
+    seen = []
+
+    def confirm(call):
+        items = json.loads(call["user"])
+        seen.extend((i["a"]["path"], i["b"]["path"]) for i in items)
+        return {"answers": [{"pair": i["pair"], "same": i["a"]["path"] != "hobbies/film"}
+                            for i in items]}  # fmt: skip
+
+    fake_llm.on("category_confirm", confirm)
+    fake_llm.on("category_merge", {"pairs": []})
+    out = await compact(conn, pid, apply=True, steps=["category_merge"])
+    assert ("leisure/films", "hobbies/films") in seen and ("hobbies/film", "hobbies/films") in seen
+    assert len(fake_llm.by_purpose("category_confirm")) == 1
+    (open_call,) = fake_llm.by_purpose("category_merge")
+    assert [c["path"] for c in json.loads(open_call["user"])["new"]] == ["кино"]
+    paths = set(ca.category_ids_by_path(conn, pid))
+    assert "leisure/films" not in paths and "hobbies/film" in paths  # only confirmed merges
+    assert [c["op"] for c in out["changes"]] == ["category_merge"]
+
+
+async def test_nightly_merge_all_covered_skips_open_search(conn, pid, fake_llm):
+    ca.upsert_category(conn, pid, "hobbies/films")
+    ca.upsert_category(conn, pid, "leisure")
+    episode_cat(conn, pid, "leisure/films")
+    fake_llm.on("category_confirm", {"answers": [{"pair": 1, "same": False}]})
+    out = await compact(conn, pid, apply=True, steps=["category_merge"])
+    assert len(fake_llm.calls) == 1 and out["changes"] == []
+
+
+def test_merge_candidate_pairs_rules(conn, pid):
+    from wwyd.compact.categories import candidate_pairs, merge_candidates
+
+    ca.upsert_category(conn, pid, "art")
+    episode_cat(conn, pid, "arts/painting")
+    episode_cat(conn, pid, "car")  # short leaves only match when identical
+    episode_cat(conn, pid, "arts/painting/oil")  # descendant of a new one: refused
+    new, others = merge_candidates(conn, pid)
+    got = {(a["path"], b["path"]) for a, b in candidate_pairs(new, others)}
+    assert got == set()
+
+
 async def test_nightly_merge_watermark_and_scheduler(conn, pid, fake_llm):
     episode_cat(conn, pid, "films")
     fake_llm.on("category_merge", {"pairs": []})
@@ -403,7 +450,6 @@ async def test_split_threshold_and_depth(conn, pid, fake_llm):
 @pytest.mark.parametrize(
     "make",
     [
-        lambda call: grouping(call, drop=1),  # partial
         lambda call: grouping(call, names=("fruit", "fruit")),  # duplicate name
         lambda call: grouping(call, names=("a/b", "other")),  # not one segment
         lambda call: grouping(call, names=("call-5551234567", "other")),  # guard
@@ -419,6 +465,30 @@ async def test_split_bad_groupings_discarded(conn, pid, fake_llm, make):
     assert out["changes"] == [] and out["discarded_splits"] == 1
     assert {get_claim(conn, pid, i)["category"] for i in ids} == {"food"}
     assert not any(p.startswith("food/") for p in ca.category_ids_by_path(conn, pid))
+
+
+async def test_split_partial_grouping_is_accepted(conn, pid, fake_llm):
+    ids = fill(conn, pid, "food", 21)
+
+    def partial(call):
+        out = grouping(call, drop=1)  # c1 is missed
+        groups = out["groups"]
+        groups[1]["claims"].append(groups[0]["claims"][0])  # c2 listed twice
+        groups[1]["claims"].append("c999")  # unknown label
+        groups.append({"name": "bad/name", "description": "x", "claims": ["c1"]})
+        return out
+
+    fake_llm.on("category_split", partial)
+    out = await compact(conn, pid, apply=True, steps=["category_split"])
+    assert [c["op"] for c in out["changes"]] == ["category_split"]
+    labels = {f"c{i + 1}": cid for i, cid in enumerate(reversed(ids))}  # shown newest first
+    assert get_claim(conn, pid, labels["c1"])["category"] == "food"  # stays in the parent
+    assert get_claim(conn, pid, labels["c2"])["category"] == "food/fruit"  # first wins
+    assert {get_claim(conn, pid, i)["category"] for i in ids} == {
+        "food",
+        "food/fruit",
+        "food/other-food",
+    }
 
 
 async def test_split_description_guarded(conn, pid, fake_llm):

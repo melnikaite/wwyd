@@ -176,7 +176,7 @@ async def test_decisions_rules_and_singles(client, fake_llm):
                     "proposed_category": None,
                     "text": "Moves evening calls to the next morning.",
                     "confidence": 0.9,
-                    "support": 2,
+                    "used_items": [1, 2],
                 },
                 {
                     "kind": "decision_rule",
@@ -184,7 +184,7 @@ async def test_decisions_rules_and_singles(client, fake_llm):
                     "proposed_category": "work/meetings/evening",
                     "text": "Takes morning slots.",
                     "confidence": 0.9,
-                    "support": 1,
+                    "used_items": [1],
                 },
                 {
                     "kind": "decision_rule",
@@ -192,7 +192,7 @@ async def test_decisions_rules_and_singles(client, fake_llm):
                     "proposed_category": None,
                     "text": "Prefers trains.",
                     "confidence": 0.9,
-                    "support": 2,
+                    "used_items": [1, 2],
                 },
             ]
         }

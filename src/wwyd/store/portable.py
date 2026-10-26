@@ -23,6 +23,7 @@ from wwyd.store.claims import _SELECT, _to_dicts, check_evidence, check_text, in
 from wwyd.store.personas import (
     DEFAULT_AUDIENCE,
     check_timezone,
+    check_weekend_days,
     get_settings,
     wipe_persona_content,
 )
@@ -89,7 +90,11 @@ def export_persona(conn: sqlite3.Connection, persona_id: str) -> dict[str, Any]:
         "format": FORMAT,
         "version": VERSION,
         "exported_at": now_iso(),
-        "persona": {"display_name": settings["display_name"], "timezone": settings["timezone"]},
+        "persona": {
+            "display_name": settings["display_name"],
+            "timezone": settings["timezone"],
+            "weekend_days": settings["weekend_days"],
+        },
         "audiences": audiences,
         "categories": categories,
         "category_aliases": aliases,
@@ -282,6 +287,13 @@ def _import_persona_fields(conn: sqlite3.Connection, persona_id: str, persona: d
         check_timezone(persona["timezone"])
         conn.execute(
             "UPDATE personas SET timezone = ? WHERE id = ?", (persona["timezone"], persona_id)
+        )
+    if "weekend_days" in persona:
+        days = check_weekend_days(persona["weekend_days"])
+        row = conn.execute("SELECT settings FROM personas WHERE id = ?", (persona_id,)).fetchone()
+        settings = {**json.loads(row[0] or "{}"), "weekend_days": days}
+        conn.execute(
+            "UPDATE personas SET settings = ? WHERE id = ?", (json.dumps(settings), persona_id)
         )
     if "display_name" in persona:
         conn.execute(

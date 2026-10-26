@@ -72,6 +72,13 @@ def register(server: WwydServer) -> None:
         timezone: Annotated[
             Name | None, Field(description="IANA name, e.g. Europe/Berlin.")
         ] = None,
+        weekend_days: Annotated[
+            Annotated[list[Name], Field(max_length=7)] | None,
+            Field(
+                description='Weekday names that are the owner\'s weekend, e.g. ["saturday",'
+                ' "sunday"] (the default); [] for none.'
+            ),
+        ] = None,
         escalate_below: Annotated[
             float | None, Field(description="predict escalates below this confidence (0..1).")
         ] = None,
@@ -102,6 +109,7 @@ def register(server: WwydServer) -> None:
             current_caller().persona_id,
             display_name=display_name,
             timezone=timezone,
+            weekend_days=weekend_days,
             escalate_below=escalate_below,
             disclosure_template=disclosure_template,
             llm_for_ingest=llm_for_ingest,

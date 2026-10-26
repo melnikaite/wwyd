@@ -18,7 +18,9 @@ from dataclasses import dataclass, field
 from wwyd.analyzers.builtin import stylometry
 from wwyd.errors import LLMUnavailable, RateLimited, SpendCap
 from wwyd.llm import LLM
+from wwyd.predict.answer import _SENTENCE_END, QUESTION_MARKS
 from wwyd.predict.context import _AUDIENCE, _VISIBILITY
+from wwyd.sandbox.helpers import wwyd_helpers as h
 
 STRONG = 0.8  # a post-processing rule applies only where the profile is this consistent
 SHORTEN_FACTOR = 3  # re-ask when the answer is longer than 3 x the owner's p90 length
@@ -113,14 +115,18 @@ def _pct(x: float) -> str:
 
 def parameters(p: StyleProfile) -> str:
     """The style block of the answer's user message (the system prompt stays static)."""
+    # Case and the final period are left out where apply_rules enforces them anyway (a
+    # decisive case also gets the answer call's Case: line): fewer lines for a small model.
+    ending = f"- usual ending: {p.ending.replace('_', ' ')} ({_pct(p.ending_share)})"
+    if not _drops_period(p):
+        ending += f"; final period in {_pct(p.period_share)}"
     lines = [
         f"- length: typically {int(p.chars_p50)} characters, 90% under {int(p.chars_p90)};"
         f" {int(p.sentences_p50)} sentence(s), at most {int(p.sentences_p90)} usually",
-        f"- starts lowercase in {_pct(p.lowercase_share)} of messages",
-        f"- usual ending: {p.ending.replace('_', ' ')} ({_pct(p.ending_share)});"
-        f" final period in {_pct(p.period_share)}",
-        f"- emoji in {_pct(p.emoji_share)} of messages",
     ]
+    if case_line(p) is None:
+        lines.append(f"- starts lowercase in {_pct(p.lowercase_share)} of messages")
+    lines += [ending, f"- emoji in {_pct(p.emoji_share)} of messages"]
     if p.words:
         lines.append("- favourite words: " + ", ".join(p.words))
     if p.phrases:
@@ -185,9 +191,67 @@ def apply_rules(text: str, p: StyleProfile) -> str:
         text = _lower_first(text)
     elif p.lowercase_share <= 1 - STRONG:
         text = _upper_first(text)
-    if 1 - p.period_share >= STRONG:
+    if _drops_period(p):
         text = _drop_period(text)
     return text
+
+
+def _drops_period(p: StyleProfile) -> bool:
+    return 1 - p.period_share >= STRONG
+
+
+RARE_EMOJI = 0.05  # emoji are stripped when the owner uses them in at most 5% of messages
+_EMOJI_JOINERS = {"‍", "️", "︎", "⃣"}
+
+
+def strip_emoji(text: str) -> str:
+    """``text`` without emoji (Unicode emoji detection, so any language), their skin-tone
+    modifiers and joiners; whitespace left behind is collapsed."""
+    kept = [
+        ch
+        for ch in text
+        if not (h.is_emoji(ch) or 0x1F3FB <= ord(ch) <= 0x1F3FF or ch in _EMOJI_JOINERS)
+    ]
+    if len(kept) == len(text):
+        return text
+    out = re.sub(r"[ \t]{2,}", " ", "".join(kept))
+    return re.sub(r"[ \t]+([.,!?…;:])", r"\1", out).strip()
+
+
+def sentences(text: str) -> list[str]:
+    """``text`` split after sentence-final punctuation (the ``depends_on`` splitter)."""
+    out, start = [], 0
+    for m in _SENTENCE_END.finditer(text):
+        part = text[start : m.end()].strip()
+        if part:
+            out.append(part)
+        start = m.end()
+    tail = text[start:].strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def compact(text: str, p: StyleProfile) -> str:
+    """Deterministic shortening, so most replies need no shorten re-ask: strip emoji when
+    the owner rarely uses them, keep at most ``sentences_p90`` sentences. When no kept
+    sentence asks anything, the first cut question is kept too if the result still fits
+    the owner's p90 length, so a reply that asks back does not silently lose its
+    question."""
+    if p.emoji_share <= RARE_EMOJI:
+        text = strip_emoji(text)
+    if p.sentences_p90 <= 0:
+        return text
+    parts = sentences(text)
+    limit = max(1, int(p.sentences_p90 + 0.5))
+    if len(parts) <= limit:
+        return text
+    kept, rest = parts[:limit], parts[limit:]
+    if not any(s.endswith(QUESTION_MARKS) for s in kept):
+        question = next((s for s in rest if s.endswith(QUESTION_MARKS)), None)
+        if question is not None and len(" ".join([*kept, question])) <= p.chars_p90:
+            kept.append(question)
+    return " ".join(kept)
 
 
 def too_long(text: str, p: StyleProfile) -> bool:

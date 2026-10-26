@@ -400,7 +400,7 @@ async def test_correction_own_call_marker_and_source(client, conn, pid, fake_llm
         "decisions",
         {"claims": [{"kind": "decision_rule", "category": "work/meetings",
                      "proposed_category": None, "text": "Accepts evening calls.",
-                     "confidence": 0.7, "support": 2}]},
+                     "confidence": 0.7, "used_items": [1]}]},
     )  # fmt: skip
     plain = {"category": "work/meetings", "situation": "Standup at 9", "decision": "went"}
     _, status = await ingest(client, [plain, correction(pred)])

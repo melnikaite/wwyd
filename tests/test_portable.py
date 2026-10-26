@@ -79,7 +79,11 @@ def test_export_validates_against_schema(conn, pid):
     doc = portable.export_persona(conn, pid)
     portable.validate_document(doc)
     assert doc["format"] == "wwyd.persona" and doc["version"] == 1
-    assert doc["persona"] == {"display_name": "Alex", "timezone": "Europe/Berlin"}
+    assert doc["persona"] == {
+        "display_name": "Alex",
+        "timezone": "Europe/Berlin",
+        "weekend_days": ["saturday", "sunday"],
+    }
     statuses = sorted(c["status"] for c in doc["claims"])
     assert statuses == ["approved", "approved", "archived", "pending", "rejected"]
 

@@ -25,7 +25,7 @@ import wwyd.predict as P
 from wwyd.analyzers.builtin import stylometry
 from wwyd.eval import judge_stance
 from wwyd.mcp.caller import Caller
-from wwyd.predict.language import detect
+from wwyd.predict.language import script
 from wwyd.store.audiences import get_audience
 from wwyd.store.categories import category_ids_by_path, upsert_category
 from wwyd.store.claims import add_claims, insert_claim
@@ -34,7 +34,11 @@ from wwyd.store.personas import create_user, update_settings
 pytestmark = [pytest.mark.llm, pytest.mark.anyio]
 EVAL_FILE = os.environ.get("WWYD_EVAL_FILE") or "predict_scenarios.json"
 DATA = json.loads((Path(__file__).parent / "data" / Path(EVAL_FILE).name).read_text("utf-8"))
-_GERMAN = re.compile(r"[äöüß]|\b(ich|nicht|morgen|zu|kalt|leider|laufen|heute|bin|das)\b", re.I)
+_GERMAN = re.compile(
+    r"[äöüß]|\b(ich|nicht|morgen|zu|kalt|leider|laufen|heute|bin|das|ja|gerne?|klappt)\b", re.I
+)
+# Languages the eval checks only by script (a coarse check; ru/en/de have a finer one).
+_SCRIPTS = {"uk": "CYRILLIC", "es": "LATIN", "fr": "LATIN", "pl": "LATIN", "ja": "CJK"}
 
 
 def language_of(text: str) -> str:
@@ -66,9 +70,12 @@ def style_fails(exp: dict[str, Any], answer: str) -> list[str]:
 
 
 def answer_language(text: str, expected: str) -> str:
-    if expected in ("uk", "es", "fr"):
-        # The detector abstains on very short texts (a few words, emoji): not a failure.
-        return detect(text) or expected
+    if expected in _SCRIPTS:
+        found = script(text)
+        if expected == "uk" and re.search(r"[ыэъё]", text, re.I):
+            return "ru"
+        # Too few letters to tell: not a failure.
+        return expected if found in (None, _SCRIPTS[expected]) else (found or "").lower()
     return language_of(text)
 
 
@@ -107,6 +114,18 @@ async def test_predict_eval(conn, monkeypatch):
     runs = int(os.environ.get("WWYD_EVAL_RUNS", "3"))
     threshold = float(os.environ.get("WWYD_EVAL_MIN_PASS", "0"))
     only = {s for s in os.environ.get("WWYD_EVAL_ONLY", "").split(",") if s}
+    show = os.environ.get("WWYD_EVAL_SHOW") == "1"  # print every answer (debugging)
+    if show:
+        from wwyd.predict import answer as answer_step
+
+        analyze = answer_step.analyze_call
+
+        async def spy(llm, user):
+            data, tokens = await analyze(llm, user)
+            print("  analyze:", json.dumps(data, ensure_ascii=False))
+            return data, tokens
+
+        monkeypatch.setattr(answer_step, "analyze_call", spy)
     now = datetime.fromisoformat(DATA["now"])
     monkeypatch.setattr(P, "_now", lambda: now)
 
@@ -149,6 +168,8 @@ async def test_predict_eval(conn, monkeypatch):
     rows, passed, total = [], 0, 0
     for sc in scenarios:
         caller = owners[sc["persona"]]
+        at = datetime.fromisoformat(sc.get("now") or DATA["now"])
+        monkeypatch.setattr(P, "_now", lambda at=at: at)
         ok, reasons = 0, []
         for _ in range(runs):
             out = await P.predict(
@@ -161,6 +182,8 @@ async def test_predict_eval(conn, monkeypatch):
                 audit=False,
             )
             fails = await check(conn, caller.persona_id, sc, out)
+            if show:
+                print(f"{sc['id']}: {out.get('answer') or out.get('escalate')!r} {fails}")
             ok += not fails
             reasons.extend(fails)
         passed, total = passed + ok, total + runs

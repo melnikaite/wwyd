@@ -59,7 +59,7 @@ def test_absorb_into_approved_keeps_text_and_sums_evidence(conn, pid):
     _, res = add(
         conn,
         pid,
-        "Short replies with no greeting during work hours.",
+        "short replies - no greeting - during work hours",
         absorb=True,
         evidence={"sources": {"message": 3}},
     )
@@ -74,17 +74,22 @@ def test_absorb_into_approved_keeps_text_and_sums_evidence(conn, pid):
 
 def test_absorb_into_pending_takes_newer_text(conn, pid):
     a, _ = add(conn, pid, "Short replies, no greeting, during work hours.")
-    add(conn, pid, "Short replies with no greeting during work hours.", absorb=True)
-    assert get(conn, pid, a)["text"] == "Short replies with no greeting during work hours."
+    add(conn, pid, "Short replies; no greeting; during work hours!", absorb=True)
+    assert get(conn, pid, a)["text"] == "Short replies; no greeting; during work hours!"
+
+
+def test_reworded_claim_is_not_absorbed_on_add(conn, pid):
+    # Above the Jaccard threshold but not the same words: left for the compaction judge.
+    add(conn, pid, "Short replies, no greeting, during work hours.")
+    b, res = add(conn, pid, "Short replies with no greeting during work hours.", absorb=True)
+    assert b is not None and res["absorbed"] == []
 
 
 def test_rejected_is_negative_memory_with_jaccard(conn, pid):
     a, _ = add(conn, pid, "Always answers calls on weekends without delay.")
     cl.review_claims(conn, pid, reject=[a])
     for absorb in (True, False):
-        _, res = add(
-            conn, pid, "Always answers calls on weekends, without any delay.", absorb=absorb
-        )
+        _, res = add(conn, pid, "always answers calls on weekends: without delay!", absorb=absorb)
         assert res["dropped"] == [{"index": 0, "reason": "previously_rejected"}]
     # Low overlap is a different claim.
     created, _ = add(conn, pid, "Prefers long weekend walks.")
@@ -131,12 +136,13 @@ async def test_proposal_dismissed(conn, pid):
     assert cl.review_claims(conn, pid, reject=[change["id"]])["skipped"] == [change["id"]]
 
 
-async def test_pending_near_rejected_is_dropped(conn, pid):
+async def test_pending_near_rejected_is_dropped(conn, pid, fake_llm):
     r, _ = add(conn, pid, "Always answers calls on weekends without delay.")
     cl.review_claims(conn, pid, reject=[r])
     # Inserted directly (bypassing add_claims' negative memory), as an older job might have.
     p, _ = add(conn, pid, "Different text first.")
     set_cols(conn, p, text="Always answers calls on weekends, without any delay.")
+    fake_llm.on("judge", {"verdicts": [{"pair": 1, "verdict": "same"}]})
     res = await compact(conn, pid, apply=True, steps=["dedupe"])
     assert res["changes"][0]["reason"] == "previously_rejected"
     assert get(conn, pid, p)["status"] == "archived"
@@ -444,6 +450,49 @@ async def test_tools(client, conn, pid):
     assert (await call(client, "undo_change", {"id": change_id}))["change"]["state"] == "undone"
     err = await call_error(client, "undo_change", {"id": change_id})
     assert err["code"] == "conflict"
+
+
+# --- auto-merge only for same-word pairs (no per-language negation list) ----------------
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("Spends at most 40 euros on a cooking course.", "Spends at most 60 euros on a cooking course."),
+        ("Goes to bed at 23:30 on weekdays.", "Goes to bed at 22:30 on weekdays."),
+        ("Drinks tea, not coffee, in the morning.", "Drinks coffee, not tea, in the morning."),
+        ("Nie trinkt er Kaffee am Abend.", "Trinkt er Kaffee am Abend."),
+    ],
+)  # fmt: skip
+async def test_high_jaccard_pair_goes_to_judge(conn, pid, fake_llm, a, b):
+    add(conn, pid, a)
+    b_id, res = add(conn, pid, b, absorb=True)
+    assert b_id is not None and res["absorbed"] == []
+    fake_llm.on("judge", {"verdicts": [{"pair": 1, "verdict": "different"}]})
+    res = await compact(conn, pid, apply=True, steps=["dedupe", "contradictions"])
+    assert len(fake_llm.by_purpose("judge")) == 1 and res["changes"] == []
+
+
+def test_numbers_differ_and_auto_duplicate():
+    assert cl.numbers_differ("costs 1.5 euros", "costs 1.25 euros")
+    assert not cl.numbers_differ("at 9:00", "at 9:00!")
+    assert cl.auto_duplicate("Short replies, no greeting.", "short replies; NO greeting!!")
+    assert not cl.auto_duplicate("prefers tea to coffee", "prefers coffee to tea")
+
+
+def test_ingest_and_authoring_dedupe_keep_number_variants_apart():
+    from wwyd.analyzers import authoring
+    from wwyd.ingest.passes import Candidate, same_claim
+
+    def cand(text):
+        return Candidate("preference", "money", text, "private", 0.6, {"message": 1}, None)
+
+    a = "Spends at most 40 euros on a cooking course."
+    b = "Spends at most 60 euros on a cooking course."
+    assert not same_claim(cand(a), cand(b))
+    assert same_claim(cand(a), cand("Spends at most 40 euros on a cooking course, really."))
+    assert not authoring.is_duplicate(a, [b])
+    assert authoring.is_duplicate(a, ["Spends at most 40 euros on a cooking course"])
 
 
 # --- polarity ---------------------------------------------------------------------------

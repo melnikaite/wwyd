@@ -83,7 +83,11 @@ shapes (see Changed), so the first release bumps the minor version.
     hypotheses, tested on older episodes with a recent holdout, a binomial test and
     Benjamini–Hochberg; rejected ones are kept as negative memory.
   - Style in `predict`: replies get the audience's approved stylometry parameters and
-    deterministic post-processing (lowercase start, no final period, one shorten re-ask).
+    deterministic post-processing (lowercase start, no final period, a cut to the
+    owner's p90 sentence count (sentence ends found by the punctuation of any script) that keeps a cut question when it fits, emoji stripped
+    when the owner rarely uses them; the shorten re-ask only when the cut reply is still
+    over 3x the p90 length). Case and final-period lines that the rules enforce
+    are left out of the style parameters.
   - Per-user limits `max_categories`, `new_categories_per_job`, `max_analyzers`,
     `sandbox_cpu_seconds_per_day`; instance `sandbox_concurrency`; config
     `analyzer_min_episodes`, `split_threshold`.
@@ -107,6 +111,9 @@ shapes (see Changed), so the first release bumps the minor version.
 
 ### Changed
 
+- Ingest decisions pass: the model names the supporting decisions (`used_items`) instead
+  of counting them; code counts distinct items and derives the claim's sources and period
+  from them.
 - An episode with `said` and an explicit `audience` but no `situation` is an outgoing
   message the owner started and feeds the reply/style side for that audience; `said` alone
   stays a statement about self.
@@ -131,6 +138,10 @@ shapes (see Changed), so the first release bumps the minor version.
   `situation_at` instead of an interval on a reply.
 - Before 1.0 every breaking change on `main` bumps the minor version, also between
   releases (docs/clients.md § Versioning, RELEASING.md).
+- predict: `confidence` and `used_claims` are computed in code (claim confidence ×
+  evidence, agreement, guards) instead of being asked of the model; the deciding claim
+  label is derived from `c_excluded_by` / the applicable boundary claim; a `ruled_out`
+  answer that does not decline is re-asked once.
 
 ### Removed
 
@@ -139,6 +150,35 @@ shapes (see Changed), so the first release bumps the minor version.
 
 ### Fixed
 
+- Compaction and `add_claims` no longer merge claims that differ only in a number ("at
+  most 40 euros" / "60 euros"): only same-word duplicates (punctuation, case, spacing)
+  merge without the judge; every other similar pair goes to the judge. This replaces the
+  per-language negation word list. Ingest within-job dedupe and analyzer authoring keep
+  their Jaccard rule but never merge texts whose numbers differ.
+- Category split keeps partial groupings: a missed claim stays in the parent, a claim
+  listed twice keeps its first group, a bad group is dropped; only a grouping with fewer
+  than two valid groups is discarded.
+- Category merge: code proposes candidate pairs (same or close leaf names, overlapping
+  descriptions) and the model confirms each; the open synonym search now covers only the
+  new categories no candidate covered (at most two calls per run).
+- `predict`: the model no longer computes dates. It only extracts the situation's time
+  in a canonical English form (routing's `when` field, or one small `when` call when
+  routing is skipped); code resolves it in the persona timezone into one
+  `When: Friday 2026-10-23` line (date only, since the situation carries the time; only weekend days get a `(weekend)`
+  mark), so "tomorrow" asked on a Thursday is
+  no longer declined as a weekend day. New persona setting `weekend_days` (default
+  Saturday and Sunday) in `get_settings`/`update_settings` and the persona export.
+  A deadline or period ("by the end of the week", "by Friday", "this week") is a
+  deadline from today, never "this weekend", and gets no `When:` line (it was read as a
+  constraint); a week runs
+  Monday to Sunday.
+- LLM client: the predict-path calls keep their own small `max_tokens` (no 1024 floor),
+  and a reply cut off at `max_tokens` is retried fresh with a "keep it short" note
+  instead of being echoed back for repair, so a model stuck in a repetition loop costs
+  seconds instead of a minute and an `llm_unavailable` escalation.
+- `predict`: a refusal rule beats a boundary verdict: when a non-boundary claim excludes
+  the request, the owner declines politely instead of escalating `boundary`; a boundary claim alone still
+  escalates.
 - `predict`: a settled answer now gets the analyze call's conclusion as an internal
   `Analysis:` line, so it no longer contradicts it ("3 hours is within 4" answered "too
   far"). A `Case:` line only when the stylometry profile decides it and a capital
@@ -154,11 +194,12 @@ shapes (see Changed), so the first release bumps the minor version.
   only conditions from the owner's claims (no invented ones such as free time), the
   worked examples no longer mirror typical inputs and are spread over several areas, and a server-side guard re-asks once and otherwise escalates
   `low_confidence`.
-- `predict` detects the situation's language in code (en, ru, de, uk, es, fr, from
-  function words and letters; no new dependency), tells the model the answer language,
-  and re-asks once when the answer is in another language (this also catches German
-  answers to English messages, which a script check could not see); a remaining
-  mismatch is accepted so a claim such as "always writes in Russian" keeps working.
+- `predict` handles every language alike: the analyze call names the situation's
+  language (`g_language`), the answer call gets it as the answer language, and the
+  language guard re-asks once when the Unicode scripts of situation and answer differ
+  or the answer's own `language` differs from it (this also catches German answers to
+  English messages); no per-language word lists remain. A remaining mismatch is accepted
+  so a claim such as "always writes in Russian" keeps working.
 - `predict` runs two calls: an internal `analyze` call decides which claims apply and
   what they decide (none, boundary, ruled out, open, settled) and supplies `depends_on`;
   the answer call then only writes the message in the owner's voice under a server

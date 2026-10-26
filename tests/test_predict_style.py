@@ -17,6 +17,7 @@ from wwyd.analyzers import run_analyzers
 from wwyd.analyzers.builtin import base
 from wwyd.errors import LLMUnavailable
 from wwyd.predict import predict
+from wwyd.predict import style as style_step
 from wwyd.predict.prompts import ANSWER_SYSTEM
 from wwyd.store.claims import insert_claim
 
@@ -74,8 +75,9 @@ async def test_parameters_only_for_approved_visible_reply(conn, user, pid, fake_
     await predict(conn, owner(user), situation="dinner?", audience="family")
     first = fake_llm.by_purpose("answer")[-1]
     assert STYLE_HEADER in first["user"]
-    assert "90% under 30" in first["user"] and "starts lowercase in 95%" in first["user"]
-    assert "final period in 5%" in first["user"]
+    assert "90% under 30" in first["user"] and "starts lowercase in" not in first["user"]
+    # apply_rules enforces case and the missing period; the Case: line states the case.
+    assert "final period in" not in first["user"] and "Case: lowercase start" in first["user"]
     assert first["system"] == ANSWER_SYSTEM  # static, byte-identical
 
     # decision: no parameters
@@ -169,7 +171,7 @@ async def test_shorten_reask_is_counted(conn, user, pid, fake_llm, auds):
     assert out["answer"] == "sure, coming tonight!"
     calls = fake_llm.by_purpose("shorten")
     assert len(calls) == 1 and "at most 15 characters" in calls[0]["user"]
-    assert [c["purpose"] for c in fake_llm.calls] == ["analyze", "answer", "shorten"]
+    assert [c["purpose"] for c in fake_llm.calls] == ["when", "analyze", "answer", "shorten"]
     expected = sum(len(c["system"] + c["user"]) // 4 + 10 for c in fake_llm.calls)
     row = conn.execute("SELECT llm_tokens FROM audit ORDER BY rowid DESC LIMIT 1").fetchone()
     assert row["llm_tokens"] == expected
@@ -254,3 +256,57 @@ async def test_case_line_absent_without_profile(conn, user, pid, fake_llm, auds)
     fake_llm.on("answer", answer("ok"))
     await predict(conn, owner(user), situation="dinner?", audience="family")
     assert "Case:" not in _user(fake_llm)
+
+
+def test_parameters_keep_case_and_period_lines_when_not_decisive(conn, pid, auds):
+    style_claim(conn, pid, auds["family"], lowercase_share=0.5, period_share=0.5)
+    p = style_step.load_profile(conn, pid, auds["family"], include_private=False)
+    text = style_step.parameters(p)
+    assert "starts lowercase in 50%" in text and "final period in 50%" in text
+    assert style_step.case_line(p) is None
+
+
+@pytest.mark.parametrize(
+    ("stats", "given", "expected"),
+    [
+        # cut to sentences_p90 sentences in code, no LLM call
+        ({}, "Sure. Coming at seven. Bring wine. See you", "sure. Coming at seven"),
+        # a cut question is kept when it still fits the p90 length
+        ({"sentences_p90": 1.0, "chars_p90": 40.0}, "Sure. I will. When?", "sure. When?"),
+        ({"sentences_p90": 1.0, "chars_p90": 8.0}, "Sure. I will. When?", "sure"),
+        # emoji stripped when rare, in any script
+        ({"emoji_share": 0.0}, "да 👍🏽 приду ❤️!", "да приду!"),
+        ({"emoji_share": 0.3}, "да 👍", "да 👍"),
+    ],
+)
+async def test_compact_in_code(conn, user, pid, fake_llm, auds, stats, given, expected):
+    style_claim(conn, pid, auds["family"], **stats)
+    fake_llm.on("answer", answer(given))
+    out = await predict(conn, owner(user), situation="dinner?", audience="family")
+    assert out["answer"] == expected
+    assert not fake_llm.by_purpose("shorten")
+
+
+async def test_used_claims_include_the_applied_profile(conn, user, pid, fake_llm, auds):
+    profile = style_claim(conn, pid, auds["family"])
+    fake_llm.on("answer", answer("ok", used=[]))
+    out = await predict(conn, owner(user), situation="dinner?", audience="family")
+    assert out["type"] == "answer" and out["used_claims"][-1] == profile
+    assert out["used_claims"].count(profile) == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "parts"),
+    [
+        ("Ok. Sure! Why? Fine… end", ["Ok.", "Sure!", "Why?", "Fine…", "end"]),
+        ("好的。明天见！你来吗？", ["好的。", "明天见！", "你来吗？"]),
+        ("はい｡行きます", ["はい｡", "行きます"]),
+        ("حسنا. هل تأتي؟ نعم", ["حسنا.", "هل تأتي؟", "نعم"]),
+        ("ठीक है। कल मिलते हैं॥ हाँ", ["ठीक है।", "कल मिलते हैं॥", "हाँ"]),
+        ("v1.2 is out", ["v1.2 is out"]),
+    ],
+)
+def test_sentences_split_every_script(text, parts):
+    from wwyd.predict.style import sentences
+
+    assert sentences(text) == parts

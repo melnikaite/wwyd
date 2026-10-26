@@ -169,6 +169,45 @@ async def test_repair_retry(backend, openrouter):
         await complete(openrouter)
 
 
+def cut_off(text: str):
+    def reply(body):
+        msg = {"role": "assistant", "content": text}
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": msg, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+            },
+        )
+
+    return reply
+
+
+async def test_cut_off_reply_retried_fresh_without_echo(backend, openrouter):
+    loop = '{"categories": ["a week is a week, a week is a week, a week'
+    backend.replies += [cut_off(loop), content('{"categories": ["food"]}')]
+    result = await complete(openrouter, user="Situation: hi")
+    assert result.data == {"categories": ["food"]}
+    retry = backend.requests[1]["messages"]
+    assert [m["role"] for m in retry] == ["system", "user"]  # the loop is not echoed back
+    assert retry[1]["content"].startswith("Situation: hi") and "short" in retry[1]["content"]
+    backend.replies += [cut_off(loop), cut_off(loop)]
+    with pytest.raises(LLMUnavailable):
+        await complete(openrouter)
+
+
+@pytest.mark.parametrize(
+    ("purpose", "asked", "sent"),
+    [("analyze", 384, 384), ("when", 64, 64), ("answer", 384, 384), ("judge", 64, 1024)],
+)
+async def test_predict_purposes_keep_their_budget(backend, openrouter, purpose, asked, sent):
+    backend.replies.append(content('{"categories": []}'))
+    await openrouter.complete_json(
+        purpose=purpose, system="s", user="u", schema=SCHEMA, max_tokens=asked
+    )
+    assert backend.requests[0]["max_tokens"] == sent
+
+
 async def test_response_format_rejected_retries_without(backend, openrouter):
     backend.replies += [lambda body: httpx.Response(400, json={}), content('{"categories": []}')]
     assert (await complete(openrouter)).data == {"categories": []}

@@ -148,7 +148,9 @@ password_changed_at`. One persona per user, created with the user.
 ### 4.2 persona
 `id, user_id (unique), display_name` (used in the disclosure), `timezone` (IANA, used by
 analyzers and the nightly pass; the host converts every episode time to it first), `settings` (JSON: LLM backend, `llm_for_ingest`,
-`escalate_below`, `disclosure_template`, own limit overrides, budget), `spend_capped_at`,
+`escalate_below`, `disclosure_template`, own limit overrides, budget, `weekend_days`: a
+plain list of English weekday names, default `["saturday", "sunday"]`, `[]` for none; it
+marks the predict `When:` line, §8.1), `spend_capped_at`,
 `created_at`.
 
 ### 4.3 audience
@@ -332,7 +334,7 @@ A versioned JSON Schema (draft 2020-12). One JSON document:
   "format": "wwyd.persona",
   "version": 1,
   "exported_at": "2026-10-18T20:00:00Z",
-  "persona": {"display_name": "…", "timezone": "Europe/Berlin"},
+  "persona": {"display_name": "…", "timezone": "Europe/Berlin", "weekend_days": ["saturday", "sunday"]},
   "audiences": [{"name": "family", "description": "…", "is_default": false}],
   "categories": [{"path": "work/meetings", "description": "…"}],
   "category_aliases": [{"path": "films", "category": "movies"}],
@@ -586,7 +588,7 @@ The server keeps no state between calls.
   against `persona.v1.json`.
 - **`delete_persona`** — `in: { confirm: "<login>" }`. Deletes all persona content, audit,
   changes and jobs; the account and grants stay (a fresh empty persona is created).
-- **`get_settings`** → display name, timezone, LLM backend (key masked), `llm_for_ingest`,
+- **`get_settings`** → display name, timezone, `weekend_days`, LLM backend (key masked), `llm_for_ingest`,
   `escalate_below`, disclosure template, effective limits and ceilings, today's usage,
   `spend_capped` flag, the plain-language note about where raw text goes.
 - **`update_settings`** — any of the above that the user may change; limits only downward
@@ -654,8 +656,9 @@ nothing to resume because nothing was saved (P1).
   the job (`skipped_sandbox_budget`) without ending it `partial`.
 - **Saturation (replies only).** When 5 consecutive reply calls of one audience produce no
   new candidate (each was a duplicate of one derived earlier in the job or of an existing
-  pending/approved/rejected claim: same kind and category, equal normalised text or FTS +
-  token Jaccard ≥ 0.6, no LLM judge), the audience's remaining reply calls are skipped.
+  pending/approved/rejected claim: same kind and category; within the job equal normalised
+  text or token Jaccard ≥ 0.6 with no differing numbers, against stored claims the same
+  words in the same order (§10.1); no LLM judge), the audience's remaining reply calls are skipped.
   Their episodes count as processed (`skipped_saturated`, `saturated_audiences`).
   Statements and decisions are never skipped.
 - **Source watermark.** With `source`, episodes whose timestamp (`when` or `when.start`)
@@ -797,6 +800,14 @@ Which episodes go to which pass (the token-saving switch):
   in the batch, single decisions become low-confidence `preference` claims; only for
   categories with < `analyzer_min_episodes` episodes in the job. Larger volumes go through
   annotation and analyzers instead (§7.3, §7.4).
+  Decisions are numbered in the prompt; for each claim the model returns `used_items`
+  (the numbers of the decisions it follows, a key sorting after `text` so the model writes
+  the rule first), and code counts the distinct valid numbers as the support. A claim's
+  `sources` count and `period` come from those items' timestamps; a missing or
+  non-list `used_items` is support 1 with the call's period. The prompt ends with "write the claims in the
+  language of the input, not in the example's language": without it (and with an inline
+  `e.g. [1, 3]`) a small model wrote English input's claims in the Russian of the worked
+  example (2026-10-23).
 - The model chooses categories within the episode's subtree or sets `proposed_category`
   (§4.4); labels (§7.3) are passed along.
 - **Corrections** (D23) go to the pass of their shape, marked in the prompt as the owner's
@@ -847,9 +858,13 @@ through it.
    `respond` token the resolved audience must be within its scope, otherwise
    `escalate: "audience_not_permitted"`.
 3. **Load the visible set** in SQL (§8.3). If its total size is under ~1500 tokens, or it
-   spans at most 3 categories (routing could not narrow it), skip routing and use it all.
+   spans at most 3 categories (routing could not narrow it), skip routing and use it all;
+   then one small decision call (purpose `when`, temperature 0, one-field JSON
+   `{"when": "…"}`, max 64 tokens) extracts the situation's time instead (step 6). A failed
+   call only costs the `When:` line.
 4. **Route:** one cheap LLM call that sees only category paths and descriptions plus the
-   situation, and returns 1–3 paths (JSON). If the call fails or returns nothing, fall back
+   situation, and returns 1–3 paths (JSON) plus `when`, the situation's time in canonical
+   English (see step 6). If the call fails or returns nothing, fall back
    to FTS5 over the visible set with terms from the situation.
 5. **Load context:** visible claims in the routed categories, plus the always-on core:
    `style` and `boundary` claims for that audience. Capped at a token budget, highest
@@ -858,7 +873,42 @@ through it.
    short label (`c1`, `c2`, …), never its ID. Both calls get the current weekday, date and
    time in the persona's `timezone` (`Now: Monday 2026-10-19 18:40 (Europe/Berlin)`;
    default and fallback UTC; set it with `update_settings`), against which relative dates
-   in the situation and context are resolved; the time is not stored or audited. The
+   in the situation and context are resolved; the time is not stored or audited.
+   **The model never computes dates; code does** (a small model miscounted "tomorrow" and
+   "the day after tomorrow" into the wrong weekday, also with a lookup table of the next
+   days; 2026-10-22/23). The model only extracts the time the situation refers to and
+   translates it, from any language, into a small canonical English form (`today`,
+   `tonight`, `tomorrow 17:00`, `day after tomorrow`, `sat`, `next thu 15:00`,
+   `this weekend`, `next weekend`, `next week`, `this week`, `by fri`, `by next fri`,
+   `in 3 days`, `in 2 weeks`, `2026-10-30`, optional `HH:MM`, `5 pm`, `noon`, `midnight`, `morning`/`afternoon`/`evening`/`night`;
+   `""` when there is none; `overmorrow` is accepted for `day after tomorrow`). The
+   routing call carries it as `when`; when routing is skipped, the small `when` call of
+   step 3 does (an analyze field was tried first: the analyze call could not see its own
+   result and kept miscounting, 78% vs 95% on the date cases, 2026-10-23). Code (`predict/when.py`)
+   resolves it in the persona timezone against today: a bare weekday and
+   `this <weekday>` are its next occurrence counting today (`sat` asked on a Saturday is
+   today); `next <weekday>` is the next occurrence strictly after today (on a Thursday
+   `next thu` is a week later, on other days it equals `thu`); `this weekend` is the
+   coming block of weekend days (starting today when today is one), `next weekend` the
+   block after it; `next week` is the following Monday to Sunday. A week always runs
+   Monday to Sunday, whatever `weekend_days` says. A deadline or period is never a
+   weekend: `this week` (also for "by the end of the week") is a deadline on this
+   week's Sunday, `by <day>` a deadline on the single day the rest resolves to; a
+   deadline covers today to that day and shows no `When:` line (a `by <day>` line was
+   read as a constraint, 2026-10-26) ("до кінця тижня" had become
+   `this weekend`, and the analyze call looped on "a free week is not a weekend" until
+   it ran out of tokens, 2026-10-23). Anything outside this
+   grammar gives no line (never a wrong date). The result is one line,
+   `When: Saturday 2026-10-24 (weekend)`, the date or range only: the time is parsed but
+   not shown, since the situation carries it and a second canonical time confused the
+   model's comparisons (2026-10-26). Only weekend days (per the persona's
+   `weekend_days`) are marked, a working day carries no mark (a range is marked only
+   when all its days are weekend days), in both the
+   analyze and the answer call. The prompts say to trust it
+   for the day and whether it is a weekend, never to recount, that it only dates the
+   situation (whether a claim applies depends on what the situation asks, never on the
+   day), and the answer never gives
+   a reason it contradicts. The
    client's `context` line comes after the situation. Both system prompts are static and
    byte-identical across calls (prefix cache); everything variable is in the user
    message. Their worked examples are set in unusual areas so a small model cannot copy
@@ -873,13 +923,27 @@ through it.
      riser.", is read as the behaviour it implies), `c_excluded_by` (the label of an applicable claim that excludes the
      request, else empty; asked before the verdict because one excluding claim settles
      it even when another would make the answer conditional), `d_verdict` (`none` |
-     `boundary` | `ruled_out` | `open` | `settled`), `e_label` (the deciding claim for
-     `boundary`/`ruled_out`) and `f_depends_on` (only for `open`: the applicable claims' conditions applied to this
-     situation; this becomes the public `depends_on`). Conditions come only from the
+     `boundary` | `ruled_out` | `open` | `settled`), `e_label` (ignored by code, see
+     below) and `f_depends_on` (only for `open`: the applicable claims' conditions applied to this
+     situation; this becomes the public `depends_on`) and `g_language` (the ISO 639-1 code
+     of the situation's language as the model reads it, late so it does not disturb the
+     generation order of the others; normalised in code to a 2-3 letter code, otherwise
+     dropped). Conditions come only from the
      claims; the model never adds its own (free time, money, health) (D23, 2026-10-20
      note).
-   - **Code decides:** labels not shown and style claims are dropped from the applicable
-     set; a valid `c_excluded_by` makes the verdict `ruled_out` (unless it is `boundary`).
+   - **Code decides:** the deciding label is never taken from the model: for `ruled_out`
+     it is `c_excluded_by` (else the first applicable claim), for `boundary` the first
+     applicable `boundary` claim (a `settled` verdict with a stated `f_depends_on` stays
+     `settled`: turning it into `open` cost holdout, 2026-10-23). Labels not shown and style claims are dropped from the applicable
+     set; a valid `c_excluded_by` makes the verdict `ruled_out`. This holds for a
+     `boundary` verdict too when the excluding claim is not itself a `boundary` claim (only
+     `c_excluded_by` counts; an `e_label` alone does not, since it may name a rule that
+     allows the request), and also when the model names the boundary claim itself as
+     excluding while an applicable non-boundary claim in the same category is listed (the
+     model tends to pick the boundary claim even when the refusal rule sits next to it): a
+     refusal rule beats a boundary verdict, and the owner declines politely (e.g. salary
+     is a boundary topic, but "does not discuss salary with recruiters" as a decision
+     rule is answered with the decline; 2026-10-22).
      No applicable claim (or verdict `none`) → `escalate: "out_of_persona"`: wwyd
      models the person, and a situation no claim other than style covers (an opinion, a
      favour, a plan) is not guessed. `boundary` → `escalate: "boundary"` when the
@@ -888,10 +952,9 @@ through it.
      with the decline. Otherwise (no boundary claim) it is treated as `settled`. An `open`
      verdict without a condition is `settled`. Neither escalation makes the second call.
    - **Call 2, `answer`:** the owner's display name, the audience description, the style
-     claims plus the applicable claims, the kind, `Now`, `Answer language: <code>
-     (<name>)` when the server detects the situation's language (a small deterministic
-     detector over function words and letters for en, ru, de, uk, es, fr; no line when
-     unsure), situation, context, for `open` a `Depends on:` line, and a server
+     claims plus the applicable claims, the kind, `Now`, `Answer language: <code>`
+     from the analyze call's `g_language` (no line when it gave none; there is no
+     per-language code or word list, so every language is handled alike; 2026-10-22), situation, context, for `open` a `Depends on:` line, and a server
      instruction by verdict: `open` → non-committal in the owner's voice, neither accept
      nor decline (a condition about the owner is one the owner will check; only what the
      other person can know is asked of them); `ruled_out` → decline in the owner's voice (may suggest or ask about what
@@ -907,27 +970,44 @@ through it.
      person). For `kind: reply` the
      approved stylometry claims visible to the resolved audience also contribute explicit
      parameters: typical length, lowercase-start share, ending punctuation, emoji habits,
-     favourite words and phrases (D22). Strict JSON: `answer`, `confidence`, `language`,
-     `used_claims`, `z_commits` (boolean: the answer accepts, agrees, promises or
+     favourite words and phrases (D22). Strict JSON: `answer`, `language`, `z_commits` (boolean: the answer accepts, agrees, promises or
      declines; internal, never returned, stored or logged).
 7. **Post-process:** first the re-ask guards on call 2, at most one re-ask in total,
    carrying the note of each guard that fired (tokens count): the **commit guard**
    (verdict `open` and `z_commits: true`; if the re-asked answer still commits, the
    result is `escalate: "low_confidence"`, "the answer committed although it depends on
-   something unknown") and the **language guard** (the detected situation language
-   differs from the answer's: its own detected language when confident, else the
-   `language` field). After the re-ask a remaining language mismatch is accepted (a claim
+   something unknown"), the **decline guard** (verdict `ruled_out` and `z_commits:
+   false`: the answer did not decline; the re-asked answer is accepted either way) and
+   the **language guard**, from universal signals only: the
+   dominant Unicode script of situation and answer differ (Latin, Cyrillic, CJK with
+   kana, Hangul, Greek, Arabic ..., from `unicodedata`; no verdict under 4 letters or
+   without an 80 % majority), or the answer's `language` field differs from
+   `g_language`. After the re-ask a remaining language mismatch is accepted (a claim
    such as "always writes in Russian" keeps working). Call 1 is never re-asked. Then an
-   empty answer → `escalate: "low_confidence"`; map `used_claims` labels to IDs and drop
-   those not shown (none left → the applicable claims); `confidence < escalate_below`
+   empty answer → `escalate: "low_confidence"`; `used_claims` is set by code: the applicable
+   claims, then the style claims shown, then the stylometry claim whose profile was
+   applied; `confidence` is computed by code (the model gives neither):
+   `0.5 + 0.5 × min(1, rank)`, `rank` the context rank (confidence × (1 + log10(1 + Σ
+   weighted sources))) of the deciding claim (the excluding one for `ruled_out`, else the
+   strongest applicable one), +0.05 when two or more claims apply and none excludes,
+   −0.05 for `open`,
+   −0.1 when a guard re-asked, clamped to 0..1 and rounded to 2 decimals (a claim at the
+   default 0.5 without evidence gives 0.75; one below 0.2 without evidence escalates at
+   the default threshold); `confidence < escalate_below`
    (default 0.6) → `escalate: "low_confidence"`; add the `disclosure` (by the answer's
-   `language`, else the detected one); write the audit row (tokens of all calls summed,
+   `language`, else `g_language`; templates exist for en, ru, de, uk, es, fr, any other
+   language gets the English one unless the owner set `disclosure_template`); write the audit row (tokens of all calls summed,
    no text); count usage.
 8. **Style post-processing** (reply only, only where the audience's profile is strong,
    share ≥ 0.8): lowercase the first letter if the owner starts lowercase, capitalise it if
    the owner starts with a capital (lowercase-start share ≤ 0.2); drop a trailing
-   period if the owner rarely ends with one; if the answer is longer than 3× the owner's
-   p90 length, ask once to shorten (counts against limits), else keep it. Typos are never
+   period if the owner rarely ends with one. Before that, shorten in code: strip emoji
+   (Unicode emoji detection) when the owner's emoji share is ≤ 0.05, and keep at most the
+   owner's p90 sentence count (when no kept sentence is a question, the first cut question
+   is kept too if the result fits the p90 length). Only if the result is still longer than
+   3× the owner's p90 length, ask once to shorten (counts against limits), else keep it.
+   The style parameters (step 6) leave out the case and final-period lines where these
+   rules enforce them (a decisive case is stated by the `Case:` line). Typos are never
    injected.
 
 `depends_on` is how a decision rule reaches the client: the rule "accepts a call only with
@@ -1069,12 +1149,17 @@ persona's timezone (in-process scheduler, no cron), and on `compact`. Every writ
 ### 10.1 Dedupe and absorb
 - Candidates: same persona, same `kind`, same category, status `pending`/`approved`. For a
   new or changed claim, query FTS5 with its terms (top 5), then compute token-set Jaccard.
-- Jaccard ≥ 0.6 → duplicate, unless the token symmetric difference contains a polarity
-  marker (negations such as never/not/rarely/avoids and their equivalents in the supported
-  languages; the set lives in `compact/constants.py`). 0.3–0.6, and ≥ 0.6 pairs with such a
-  marker → one batched LLM judge call per category: `same | contradicts | different`.
-  `add_claims` has no LLM, so it never absorbs a marker pair: the claim lands as pending
-  and compaction judges the pair later. On any LLM error the pairs are skipped (counted).
+- Duplicate without the judge only when both texts have the same words in the same order
+  (casefolded `\w+` tokens; they differ only in punctuation, case or spacing). Any other
+  difference may flip the meaning (a negation, a number, swapped words) in any language,
+  and no per-language word list decides it: every other pair with Jaccard ≥ 0.3 → one
+  batched LLM judge call per category: `same | contradicts | different`. `add_claims` has
+  no LLM, so it absorbs (or drops against a rejected claim) only such same-word
+  duplicates: anything else lands as pending and compaction judges the pair later. On any
+  LLM error the pairs are skipped (counted).
+- The LLM-free Jaccard ≥ 0.6 duplicate tests elsewhere (within one ingest job, §7.1;
+  authored analyzer statements, §7.5) never merge two texts when a word with a digit
+  (an amount, a decimal, an `HH:MM` part) occurs in only one of them.
   `compact(apply=false)` does not call the judge (it would record usage); it reports the
   pairs it would send as `judge_pending`.
 - Keyed analyzer claims (§7.2, §7.4) merge by `key` without any of this.
@@ -1112,14 +1197,24 @@ depends on.
 
 ### 10.6 Categories (nightly)
 Both steps apply automatically, each with a `changes` row, and are undoable (D21).
-- **`category_merge`:** one LLM judge call over the paths and descriptions of the
-  categories created since the previous run against all others finds synonyms, including
-  across languages (`films` / `movies` / `кино`). The merged category's claims, analyzers
+- **`category_merge`:** for the categories created since the previous run, code proposes
+  candidate pairs against all categories: the same leaf name under different parents, leaf
+  names one edit apart (two for leaves of 8+ characters; leaves under 4 characters only
+  when equal), or description token Jaccard ≥ 0.5 (both with ≥ 3 tokens); pairs the merge
+  rules refuse are not proposed; at most 50. One batched call confirms them (`same:
+  true|false` per pair). One open-search LLM call over paths and descriptions then finds
+  synonyms code cannot see, including across languages (`films` / `movies` / `кино`),
+  but only for the new categories no candidate pair covered, so a run makes at most two
+  calls and the open search is skipped when every new category was proposed. The merged category's claims, analyzers
   and analyzer state move into the target (same-name builtins add their state), and its
   path becomes an alias.
 - **`category_split`:** a category with more than `split_threshold` (20) non-archived
   claims, below depth 3: one LLM call groups its claims into 2–5 subcategories (guarded
-  names and descriptions) within depth 3, and the claims move there. Analyzers stay bound
+  names and descriptions) within depth 3, and the claims move there. Partial answers are
+  kept: a group with an invalid name or description is dropped, a claim listed twice keeps
+  its first group, unknown labels are ignored, and unassigned claims stay in the parent;
+  only a grouping with fewer than two valid non-empty groups (or more than five) is
+  discarded (`discarded_splits`). Analyzers stay bound
   to the parent (their subtree still covers the claims).
 - `merge_categories` and renames by the owner write aliases the same way. Undo restores
   the snapshot (categories, aliases, claims, analyzers, state) and deletes categories the
@@ -1188,7 +1283,15 @@ persona: `base_url`, `api_key` (encrypted at rest), `model`, optional prices. Pr
 
 Robustness kit for small local models, applied to every call: `reasoning_effort: "none"`;
 fall back to `reasoning_content` when `content` is empty; strip Markdown fences around JSON;
-wrap bare arrays; sanitise chat-template markers in input; generous `max_tokens`; every
+wrap bare arrays; sanitise chat-template markers in input; generous `max_tokens` (at
+least 1024) off the predict path, while the predict calls (`route`, `when`, `analyze`,
+`answer`, `shorten`) get exactly the small budget their caller sets (analyze 384, a reply
+384, a decision 640, `when` 64), so a greedy repetition loop is cut after seconds; a reply
+that does not parse gets one repair retry, which echoes the bad reply back, except when
+the reply was cut off at `max_tokens` (`finish_reason: "length"`): then the request is
+sent again without the echo and with a "keep every text field short" note, since the
+changed input breaks the loop and an echo would feed it (JSON-schema `maxLength` is not
+enforced by LocalAI's grammar, measured 2026-10-23, so it is not relied on); every
 field the model must emit is `required` in the JSON shape we ask for; a few worked examples
 per prompt, including in Russian, since rules leak language through examples. Preflight
 `GET /models` when a backend is saved. Decision calls (`route`, `analyze`, `judge`) run at
@@ -1505,7 +1608,8 @@ works against one generic model for every area of life.
   escalating `out_of_persona` despite an applicable claim. predict therefore splits into
   an internal `analyze` call (applicable claims and a verdict, internal fields only) and
   an `answer` call that only writes the message under a server instruction; the
-  escalations are decided in code, and the answer language is detected in code. The
+  escalations are decided in code, and the answer language is detected in code (since 2026-10-22 the analyze call
+  names it and code only compares Unicode scripts, §8.1). The
   client contract is unchanged.
 - *Exclusions* are stated in the storage model's terms: behaviour and preferences from any
   area of life (money, health included) are welcome, including thresholds the owner

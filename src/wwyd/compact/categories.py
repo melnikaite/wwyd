@@ -3,10 +3,12 @@
 
 Both apply automatically, one ``changes`` row per merge or split, undoable (D21).
 
-* **Merge.** One judge call shows the episode-created categories made since the previous
-  nightly run (``compaction_runs.last_nightly_at``; every one on the first run) next to all
-  other categories, by path and description, and asks for synonym pairs (also across
-  languages). Direction: an episode category merges into a seed or owner one, never the
+* **Merge.** For the episode-created categories made since the previous nightly run
+  (``compaction_runs.last_nightly_at``; every one on the first run), code proposes
+  candidate pairs (same or close leaf name, overlapping description words) and one
+  batched call confirms each yes/no. One open-search call then shows the new categories
+  no candidate covered next to all others, by path and description, and asks for synonym
+  pairs (also across languages); it is skipped when nothing is left. Direction: an episode category merges into a seed or owner one, never the
   other way; two seed/owner categories are never merged automatically (the owner made
   them); between two episode categories the newer merges into the older. Ancestor and
   descendant pairs are refused. A merge collapses the source subtree into the target, so
@@ -15,8 +17,8 @@ Both apply automatically, one ``changes`` row per merge or split, undoable (D21)
 * **Split.** A category above ``split_threshold`` non-archived claims and above depth 3:
   one call groups its unkeyed claims (shown as ``c1``, ``c2``…; keyed analyzer claims stay
   with the parent, as do its analyzers) into 2–5 sub-categories. Names must normalise to
-  one path segment and pass the guard's regex part, like descriptions; a grouping that
-  misses or repeats a claim, or names an unknown one, is discarded whole.
+  one path segment and pass the guard's regex part, like descriptions. Partial groupings
+  are kept (see :func:`parse_groups`); only a degenerate one is discarded.
 
 ``apply=False`` makes no LLM call: it reports what would be sent. LLM errors and limits
 skip the step and are counted in ``skipped_steps``; they never fail the run.
@@ -34,6 +36,7 @@ from wwyd.db import transaction
 from wwyd.errors import Conflict, Invalid, LLMUnavailable, NotFound, RateLimited, SpendCap
 from wwyd.ingest.guard import find_identifier
 from wwyd.store import categories as cats
+from wwyd.store.claims import text_tokens
 from wwyd.store.common import MAX_CATEGORY_DEPTH, MAX_DESCRIPTION
 
 log = logging.getLogger(__name__)
@@ -42,6 +45,9 @@ CATEGORY_STEPS = ("category_merge", "category_split")
 MAX_MERGE_PAIRS = 50
 MAX_SPLIT_CLAIMS = 200
 SPLIT_GROUPS = (2, 5)
+MIN_CLOSE_NAME = 4  # shorter leaves are only candidates when identical
+MIN_DESCRIPTION_TOKENS = 3
+DESCRIPTION_JACCARD = 0.5
 _LLM_ERRORS = (LLMUnavailable, SpendCap, RateLimited)
 
 MERGE_SYSTEM = """\
@@ -68,6 +74,33 @@ MERGE_SCHEMA: dict[str, Any] = {
         }
     },
     "required": ["pairs"],
+    "additionalProperties": False,
+}
+
+CONFIRM_SYSTEM = """\
+You keep a person's category tree tidy. Each numbered pair shows two categories (a path
+with segments separated by "/" and a one-line description). For each pair answer
+"same": true when both mean the same topic (synonyms, singular/plural, a spelling
+variant, the same idea in another language), false when they are different topics, even
+related ones.
+Answer only with JSON: {"answers": [{"pair": <number>, "same": true|false}]} with exactly
+one entry per pair.
+"""
+
+CONFIRM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "answers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"pair": {"type": "integer"}, "same": {"type": "boolean"}},
+                "required": ["pair", "same"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["answers"],
     "additionalProperties": False,
 }
 
@@ -152,6 +185,59 @@ def plan_merge(a: sqlite3.Row, b: sqlite3.Row) -> tuple[str, str] | None:
     return src["path"], dst["path"]
 
 
+def _edit_distance(a: str, b: str) -> int:
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _close_names(a: str, b: str) -> bool:
+    """Same leaf, or leaves a typo or an inflection apart ("film"/"films")."""
+    if a == b:
+        return True
+    short = min(len(a), len(b))
+    if short < MIN_CLOSE_NAME:
+        return False
+    return _edit_distance(a, b) <= (1 if short < 8 else 2)
+
+
+def _close_descriptions(a: str, b: str) -> bool:
+    ta, tb = text_tokens(a or ""), text_tokens(b or "")
+    if len(ta) < MIN_DESCRIPTION_TOKENS or len(tb) < MIN_DESCRIPTION_TOKENS:
+        return False
+    return len(ta & tb) / len(ta | tb) >= DESCRIPTION_JACCARD
+
+
+def candidate_pairs(
+    new: list[sqlite3.Row], others: list[sqlite3.Row]
+) -> list[tuple[sqlite3.Row, sqlite3.Row]]:
+    """Code-proposed merge pairs (each has a new category): the same or a close leaf name,
+    or largely the same description words. Pairs the merge rules refuse are left out;
+    the model only confirms them. At most ``MAX_MERGE_PAIRS``."""
+    out: list[tuple[sqlite3.Row, sqlite3.Row]] = []
+    seen: set[tuple[str, str]] = set()
+    for a in new:
+        for b in new + others:
+            key = tuple(sorted((a["id"], b["id"])))
+            if a["id"] == b["id"] or key in seen:
+                continue
+            seen.add(key)
+            if plan_merge(a, b) is None:
+                continue
+            leaf_a, leaf_b = a["path"].rsplit("/", 1)[-1], b["path"].rsplit("/", 1)[-1]
+            if _close_names(leaf_a, leaf_b) or _close_descriptions(
+                a["description"], b["description"]
+            ):
+                out.append((a, b))
+                if len(out) >= MAX_MERGE_PAIRS:
+                    return out
+    return out
+
+
 async def run_merge(run: Run) -> None:
     new, others = merge_candidates(run.conn, run.persona_id)
     if not new or len(new) + len(others) < 2:
@@ -167,29 +253,67 @@ async def run_merge(run: Run) -> None:
     def show(rows: list[sqlite3.Row]) -> list[dict[str, str]]:
         return [{"path": r["path"], "description": r["description"]} for r in rows]
 
-    try:
-        result = await get_llm(run.conn, run.persona_id).complete_json(
-            purpose="category_merge",
-            system=MERGE_SYSTEM,
-            user=json.dumps({"new": show(new), "others": show(others)}, ensure_ascii=False),
-            schema=MERGE_SCHEMA,
-            max_tokens=64 + 40 * min(len(new), MAX_MERGE_PAIRS),
-        )
-    except _LLM_ERRORS as exc:
-        log.info("category merge skipped: %s", exc.code)
-        _skip(run, "category_merge")
-        return
-    data = result.data if isinstance(result.data, dict) else {}
-    pairs = data.get("pairs") if isinstance(data.get("pairs"), list) else []
-    new_paths = {r["path"] for r in new}
-    for pair in pairs[:MAX_MERGE_PAIRS]:
+    llm = None
+    candidates = candidate_pairs(new, others)
+    confirmed: list[tuple[str, str]] = []
+    if candidates:
+        items = [
+            {"pair": i + 1, "a": show([a])[0], "b": show([b])[0]}
+            for i, (a, b) in enumerate(candidates)
+        ]
+        try:
+            llm = get_llm(run.conn, run.persona_id)
+            result = await llm.complete_json(
+                purpose="category_confirm",
+                system=CONFIRM_SYSTEM,
+                user=json.dumps(items, ensure_ascii=False),
+                schema=CONFIRM_SCHEMA,
+                max_tokens=64 + 20 * len(candidates),
+            )
+        except _LLM_ERRORS as exc:
+            log.info("category merge skipped: %s", exc.code)
+            _skip(run, "category_merge")
+            return
+        data = result.data if isinstance(result.data, dict) else {}
+        yes = {
+            v["pair"]
+            for v in data.get("answers") or []
+            if isinstance(v, dict) and isinstance(v.get("pair"), int) and v.get("same") is True
+        }
+        confirmed = [(a["path"], b["path"]) for i, (a, b) in enumerate(candidates) if i + 1 in yes]
+    # The open search (synonyms the code cannot see, e.g. across languages) only shows
+    # the new categories that no code-proposed pair covered.
+    covered = {r["id"] for pair in candidates for r in pair}
+    rest = [r for r in new if r["id"] not in covered]
+    found: list[Any] = []
+    if rest:
+        try:
+            llm = llm or get_llm(run.conn, run.persona_id)
+            others_shown = [r for r in new + others if r["id"] not in {x["id"] for x in rest}]
+            result = await llm.complete_json(
+                purpose="category_merge",
+                system=MERGE_SYSTEM,
+                user=json.dumps(
+                    {"new": show(rest), "others": show(others_shown)}, ensure_ascii=False
+                ),
+                schema=MERGE_SCHEMA,
+                max_tokens=64 + 40 * min(len(rest), MAX_MERGE_PAIRS),
+            )
+        except _LLM_ERRORS as exc:
+            log.info("category merge skipped: %s", exc.code)
+            _skip(run, "category_merge")
+            result = None
+        data = result.data if result is not None and isinstance(result.data, dict) else {}
+        found = data.get("pairs") if isinstance(data.get("pairs"), list) else []
+    rest_paths = {r["path"] for r in rest}
+    pairs: list[tuple[str, str]] = list(confirmed)
+    for pair in found[:MAX_MERGE_PAIRS]:
         if not isinstance(pair, dict):
             continue
         a, b = pair.get("a"), pair.get("b")
-        if not isinstance(a, str) or not isinstance(b, str):
-            continue
-        if a not in new_paths and b not in new_paths:
-            continue
+        if isinstance(a, str) and isinstance(b, str) and (a in rest_paths or b in rest_paths):
+            pairs.append((a, b))
+    for a, b in pairs:
         rows = {r["path"]: r for r in _categories(run.conn, run.persona_id)}
         if a not in rows or b not in rows:
             continue  # gone (merged earlier in this run)
@@ -243,38 +367,43 @@ def _segment(name: Any) -> str | None:
 
 
 def parse_groups(data: Any, labels: dict[str, str]) -> list[dict[str, Any]] | None:
-    """Validated groups (claim IDs instead of labels), or None to discard the grouping."""
+    """Validated groups (claim IDs instead of labels), or None to discard the grouping.
+
+    Partial answers are accepted: a group with an invalid name or description, or a
+    repeated name, is dropped (its claims stay in the parent); unknown labels are
+    ignored; a claim listed twice keeps its first group; unlisted claims stay in the
+    parent. Only a degenerate grouping (fewer than two non-empty valid groups, or more
+    groups than allowed) is discarded."""
     groups = data.get("groups") if isinstance(data, dict) else None
-    if not isinstance(groups, list) or not SPLIT_GROUPS[0] <= len(groups) <= SPLIT_GROUPS[1]:
+    if not isinstance(groups, list) or len(groups) > SPLIT_GROUPS[1]:
         return None
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     names: set[str] = set()
     for g in groups:
         if not isinstance(g, dict):
-            return None
+            continue
         name = _segment(g.get("name"))
         desc = g.get("description")
         members = g.get("claims")
         if name is None or name in names:
-            return None
+            continue
         if not isinstance(desc, str) or len(desc) > MAX_DESCRIPTION:
-            return None
+            continue
         desc = " ".join(desc.split())
-        if find_identifier(desc) is not None:
-            return None
-        if not isinstance(members, list) or not members:
-            return None
+        if find_identifier(desc) is not None or not isinstance(members, list):
+            continue
         ids = []
         for label in members:
-            if not isinstance(label, str) or label not in labels or label in seen:
-                return None
-            seen.add(label)
-            ids.append(labels[label])
+            if isinstance(label, str) and label in labels and label not in seen:
+                seen.add(label)
+                ids.append(labels[label])
+        if not ids:
+            continue
         names.add(name)
         out.append({"name": name, "description": desc, "claims": ids})
-    if seen != set(labels):
-        return None  # partial grouping
+    if len(out) < SPLIT_GROUPS[0]:
+        return None
     return out
 
 
