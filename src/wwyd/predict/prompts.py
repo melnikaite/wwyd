@@ -477,14 +477,28 @@ def _context(context: str | None) -> str:
     return (context or "").strip() or "none"
 
 
+# Appended to the analyze call's user message only when the caller passed a context, so
+# calls without one stay byte-identical (changing ANALYZE_SYSTEM itself shifted unrelated
+# no-context scenarios). Static: the same text for every call with a context.
+CONTEXT_NOTE = (
+    "Note: The owner goes by the Context line even when no claim names it. When it says "
+    "the request cannot happen as asked (that time is taken, the thing is gone ...), the "
+    'owner declines, and suggests what it says is possible instead ("the kiln is booked '
+    'until 16:00" for a 14:00 firing: not at 14:00, suggest 16:00). No claim excludes '
+    'it then: "c_excluded_by" stays "", the verdict is "settled", and "a_check" '
+    "ends with that decision and its reason from the Context line."
+)
+
+
 def analyze_user(
     *, claims: list[str], context: str | None, situation: str, now: str, when: str = ""
 ) -> str:
     claim_block = "\n".join(claims) if claims else "(none)"
     when_part = f"When: {when}\n" if when else ""
+    note = f"\n{CONTEXT_NOTE}" if (context or "").strip() else ""
     return (
         f"Claims:\n{claim_block}\nNow: {now}\n{when_part}"
-        f"Situation: {situation}\nContext: {_context(context)}"
+        f"Situation: {situation}\nContext: {_context(context)}{note}"
     )
 
 

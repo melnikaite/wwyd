@@ -138,6 +138,12 @@ again with what you found in `context`. While `depends_on` is not `null`, `answe
 declines (the server re-asks once and otherwise escalates `low_confidence`). It has no structure and no fixed vocabulary, is not styled, and is at
 most 400 characters. A non-empty `depends_on` is not an escalation.
 
+`context` is taken as a checked fact the owner goes by, even when no claim mentions it.
+A `context` saying the asked time is taken ("tomorrow 15:00–15:30 is busy") gives a final
+decline with `depends_on: null`; one that names the free slot instead ("within 15:00–17:00
+tomorrow only 16:30–17:00 is free") gives a counter-offer: a decline of the asked time
+that suggests the free one.
+
 What to do with it is up to you:
 
 - send `answer` as is (simple auto-responders);

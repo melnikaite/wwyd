@@ -547,6 +547,18 @@ def test_prompts_static_and_no_favour_fallback():
         assert common not in ANALYZE_SYSTEM + ANSWER_SYSTEM
 
 
+def test_analyze_context_note_only_with_context():
+    from wwyd.predict.prompts import ANALYZE_SYSTEM, CONTEXT_NOTE, analyze_user
+
+    args = {"claims": ["[c1] x"], "situation": "S?", "now": "Mon", "when": "Tue"}
+    head = "Claims:\n[c1] x\nNow: Mon\nWhen: Tue\nSituation: S?\nContext: none"
+    assert analyze_user(context=None, **args) == head
+    assert analyze_user(context="  ", **args) == head
+    with_ctx = analyze_user(context="15:00 is taken", **args)
+    assert with_ctx == head.replace("none", "15:00 is taken") + "\n" + CONTEXT_NOTE
+    assert CONTEXT_NOTE not in ANALYZE_SYSTEM
+
+
 async def test_now_line_in_persona_timezone(conn, user, pid, fake_llm, monkeypatch):
     from datetime import UTC, datetime
 

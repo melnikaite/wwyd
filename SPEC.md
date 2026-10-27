@@ -563,7 +563,11 @@ says "let me check and get back to you", not "15:00 works", when it does not kno
 owner's time). `depends_on` is one or two plain sentences, from the owner's applicable
 claims, on what the owner's actual answer depends on ("talks to friends after 18:00 and
 keeps at least 5 minutes between calls"); `null` when the owner's applicable claims put
-no condition on the answer, or the situation or `context` settles it. wwyd models the
+no condition on the answer, or the situation or `context` settles it. A `context` that
+says the request cannot happen as asked ("tomorrow 15:00–15:30 is taken") is a fact the
+owner goes by even when no claim names it: the answer is a final decline with `depends_on`
+`null`, and one that also names what is possible ("only 16:30–17:00 is free") gives a
+decline that suggests it (2026-10-27, §8.1 step 6). wwyd models the
 person, not the world: `depends_on` lists only conditions that come from the owner's
 claims, and wwyd never adds conditions of its own (free time, money, health) when no
 claim makes the answer conditional. When no claim other than style is about the situation's
@@ -935,7 +939,17 @@ through it.
      generation order of the others; normalised in code to a 2-3 letter code, otherwise
      dropped). Conditions come only from the
      claims; the model never adds its own (free time, money, health) (D23, 2026-10-20
-     note).
+     note). The context is a checked fact the owner goes by, even when no claim names
+     it: when it says the request cannot happen as asked (that time is taken, the thing
+     is gone, the place is closed), the verdict is `settled` with `a_check` concluding a
+     decline, and when it also says what is possible instead, a decline suggesting that;
+     a condition the context already answers is not `open`. This is a static `Note:` paragraph
+     appended to the analyze user message after the `Context:` line only when a context
+     is given; the system prompt and every call without context stay unchanged, because
+     editing the system prompt shifted unrelated no-context scenarios (2026-10-27: before
+     this the model only let context interact with a claim's condition, so "15:00 is
+     taken" either was ignored and the answer accepted, or became an invented `open`
+     condition "if free").
    - **Code decides:** the deciding label is never taken from the model: for `ruled_out`
      it is `c_excluded_by` (else the first applicable claim), for `boundary` the first
      applicable `boundary` claim (a `settled` verdict with a stated `f_depends_on` stays

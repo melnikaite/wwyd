@@ -2936,6 +2936,214 @@
         "language": "de",
         "stance": "decline"
       }
+    },
+    {
+      "id": "ctx_ru_taken",
+      "persona": "weekdays_ru",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Созвонимся завтра в 15:00?",
+      "context": "tomorrow (Wed 2026-10-28) 15:00-15:30 is taken",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "ctx_ru_taken_p1",
+      "persona": "weekdays_ru",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Созвонимся завтра в 15:00?",
+      "context": "завтра (ср 2026-10-28) 15:00–15:30 занято",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "ctx_ru_free",
+      "persona": "weekdays_ru",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Созвонимся завтра в 15:00?",
+      "context": "tomorrow (Wed 2026-10-28) 15:00-15:30 is free",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "accept",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "ctx_ru_free_p1",
+      "persona": "weekdays_ru",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Созвонимся завтра в 15:00?",
+      "context": "завтра (ср 2026-10-28) 15:00–15:30 свободно",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "accept",
+        "absent_any": [
+          "выходн"
+        ]
+      }
+    },
+    {
+      "id": "ctx_ru_only",
+      "persona": "weekdays_ru",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Созвонимся завтра в 15:00?",
+      "context": "Within tomorrow (Wed 2026-10-28) 15:00-17:00 only 16:30-17:00 is free",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline",
+        "absent_any": [
+          "выходн"
+        ],
+        "mentions_any": [
+          "16:30",
+          "16.30"
+        ]
+      }
+    },
+    {
+      "id": "ctx_ru_only_p1",
+      "persona": "weekdays_ru",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Созвонимся завтра в 15:00?",
+      "context": "завтра (ср 2026-10-28) с 15:00 до 17:00 свободно только 16:30–17:00",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline",
+        "absent_any": [
+          "выходн"
+        ],
+        "mentions_any": [
+          "16:30",
+          "16.30"
+        ]
+      }
+    },
+    {
+      "id": "ctx_en_taken",
+      "persona": "weekdays_en",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Can we have a call tomorrow at 15:00?",
+      "context": "tomorrow (Wed 2026-10-28) 15:00-15:30 is taken",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "ctx_en_taken_p1",
+      "persona": "weekdays_en",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Can we have a call tomorrow at 15:00?",
+      "context": "Tomorrow (Wednesday 28 Oct) 15:00–15:30: busy",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "ctx_en_free",
+      "persona": "weekdays_en",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Can we have a call tomorrow at 15:00?",
+      "context": "tomorrow (Wed 2026-10-28) 15:00-15:30 is free",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "ctx_en_free_p1",
+      "persona": "weekdays_en",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Can we have a call tomorrow at 15:00?",
+      "context": "Tomorrow (Wednesday 28 Oct) 15:00–15:30: free",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ]
+      }
+    },
+    {
+      "id": "ctx_en_only",
+      "persona": "weekdays_en",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Can we have a call tomorrow at 15:00?",
+      "context": "Within tomorrow (Wed 2026-10-28) 15:00-17:00 only 16:30-17:00 is free",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline",
+        "absent_any": [
+          "weekend"
+        ],
+        "mentions_any": [
+          "16:30",
+          "16.30"
+        ]
+      }
+    },
+    {
+      "id": "ctx_en_only_p1",
+      "persona": "weekdays_en",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Can we have a call tomorrow at 15:00?",
+      "context": "Tomorrow between 15:00 and 17:00 the only free slot is 16:30–17:00",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline",
+        "absent_any": [
+          "weekend"
+        ],
+        "mentions_any": [
+          "16:30",
+          "16.30"
+        ]
+      }
     }
   ]
 }
