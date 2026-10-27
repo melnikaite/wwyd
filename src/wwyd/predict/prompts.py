@@ -484,7 +484,12 @@ CONTEXT_NOTE = (
     "Note: The owner goes by the Context line even when no claim names it. When it says "
     "the request cannot happen as asked (that time is taken, the thing is gone ...), the "
     'owner declines, and suggests what it says is possible instead ("the kiln is booked '
-    'until 16:00" for a 14:00 firing: not at 14:00, suggest 16:00). No claim excludes '
+    'until 16:00" for a 14:00 firing: not at 14:00, suggest 16:00). A time the Context '
+    "line calls taken is never accepted. When the request itself names a span of two "
+    "times and the Context line calls only a part of that span free, the request is "
+    'possible as asked: the owner accepts that part ("only 15:00-16:00 is '
+    'free", the rest is taken, for a firing between 1 and 5 pm, that is 13:00-17:00: '
+    "yes, at 15:00-16:00). No claim excludes "
     'it then: "c_excluded_by" stays "", the verdict is "settled", and "a_check" '
     "ends with that decision and its reason from the Context line."
 )

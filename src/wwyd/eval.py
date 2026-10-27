@@ -98,7 +98,7 @@ STANCES = ("accept", "decline", "non_committal")
 _STANCE_SYSTEM = """You classify a reply to a request or invitation. Answer with JSON
 {"stance": "accept" | "decline" | "non_committal"}.
 - accept: the reply agrees or says yes, also when it names a condition that the request
-  already satisfies.
+  already satisfies, or picks a time or part inside what the request offers.
 - decline: it refuses, says no or turns the request down, also when it adds an
   alternative or a counter-offer ("not this time, but another day gladly"), even a
   conditional one: refusing the requested thing is a decline.
@@ -126,6 +126,10 @@ Reply: not tonight, it's too late for me, but next week sounds fun
 Request: Can you help me repot the bonsai at nine tomorrow morning?
 Reply: not before noon, sorry, but any afternoon works if I'm around
 {"stance": "decline"}
+
+Request: Поможешь разобрать гербарий в четверг между 10 и 14?
+Reply: давай, только с 12 до 13
+{"stance": "accept"}
 """
 _STANCE_SCHEMA = {
     "type": "object",

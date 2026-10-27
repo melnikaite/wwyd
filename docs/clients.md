@@ -142,7 +142,8 @@ most 400 characters. A non-empty `depends_on` is not an escalation.
 A `context` saying the asked time is taken ("tomorrow 15:00–15:30 is busy") gives a final
 decline with `depends_on: null`; one that names the free slot instead ("within 15:00–17:00
 tomorrow only 16:30–17:00 is free") gives a counter-offer: a decline of the asked time
-that suggests the free one.
+that suggests the free one. When the request itself asks for a span that holds the free
+slot ("between 15 and 17?" and "only 16:00–17:00 is free"), the answer accepts that slot.
 
 What to do with it is up to you:
 

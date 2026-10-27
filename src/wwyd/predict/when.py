@@ -12,7 +12,21 @@ Grammar (case-insensitive, surrounding words "on", "at", "the" ignored)::
             | this <weekday> | next <weekday> | [this] weekend | next weekend
             | this week | next week | by <single day> | in N day(s) | in N week(s)
             | YYYY-MM-DD
-    time   := HH:MM | H[:MM] am|pm | noon | midnight | morning | afternoon | evening | night
+    time   := point | range | morning | afternoon | evening | night
+    point  := HH:MM | H[:MM] am|pm | noon | midnight
+    range  := P-P | P–P | P—P | between P and P | from P to|till|until|- P
+            | P to|till|until P | P P
+
+Inside a range P may also be a bare hour ("15-17", "between 3 and 5 pm"); the side-by-side
+form "P P" needs at least one point that is not bare. An am/pm on one point only is given to
+the other bare point too, unless that puts the start after the end, then the opposite one
+("3 and 5 pm" is 15:00-17:00, "11 to 1 pm" is 11:00-13:00). A range is stored as
+"15:00-17:00". A bare number alone is still not a time.
+
+Fallback: when no split parses but a leading day part does, and the rest looks like a time
+attempt (a digit, am/pm or a part-of-day word) with no day word of its own and the text has
+no "or", the day is kept with no time ("tomorrow 25:00", "fri 15:00 sharp"). Alternatives
+("tomorrow or thu", "tomorrow 15:00 or fri 10:00") stay None.
 
 A bare weekday (and "this <weekday>") is its next occurrence counting today, so "sat" asked
 on a Saturday is today. "next <weekday>" is the next occurrence strictly after today, so
@@ -47,6 +61,19 @@ _DAY_INDEX = {name: i for i, name in enumerate(WEEKDAYS)} | _ABBREV
 _PARTS = ("morning", "afternoon", "evening", "night")
 _TIME = re.compile(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$")
 _FILLER = {"on", "at", "the", "of"}
+_P = r"(\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?|noon|midnight)"
+_RANGES = (
+    re.compile(rf"^{_P}\s*[-–—]\s*{_P}$"),
+    re.compile(rf"^between\s+{_P}\s+and\s+{_P}$"),
+    re.compile(rf"^from\s+{_P}\s*(?:\s(?:to|till|until)\s|[-–—])\s*{_P}$"),
+    re.compile(rf"^{_P}\s+(?:to|till|until)\s+{_P}$"),
+)
+_SIDE_BY_SIDE = re.compile(rf"^{_P}\s+{_P}$")
+_DAY_WORDS = (
+    set(_DAY_INDEX)
+    | {"today", "tonight", "tomorrow", "overmorrow", "day", "days", "week", "weeks"}
+    | {"weekend", "next", "this", "by", "in"}
+)
 
 
 @dataclass(frozen=True)
@@ -75,7 +102,7 @@ def _time(tokens: list[str]) -> str | None:
         return "00:00"
     m = _TIME.match(text)
     if not m:
-        return None
+        return _range(text)
     hour, minute, ampm = int(m[1]), int(m[2] or 0), m[3]
     if ampm:
         if not 1 <= hour <= 12:
@@ -86,6 +113,65 @@ def _time(tokens: list[str]) -> str | None:
     if hour > 23 or minute > 59:
         return None
     return f"{hour:02d}:{minute:02d}"
+
+
+def _point(text: str) -> tuple[int, int, str | None, bool] | None:
+    """(hour, minute, am/pm, bare) of one range end; noon/midnight carry a fixed suffix."""
+    if text == "noon":
+        return 12, 0, "fixed", False
+    if text == "midnight":
+        return 0, 0, "fixed", False
+    m = _TIME.match(text)
+    if not m:
+        return None
+    return int(m[1]), int(m[2] or 0), m[3], m[2] is None and m[3] is None
+
+
+def _clock(hour: int, minute: int, ampm: str | None) -> int | None:
+    """Minutes since midnight, None when out of range."""
+    if ampm in ("am", "pm"):
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if ampm == "pm" else 0)
+    if hour > 23 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
+def _range(text: str) -> str | None:
+    m = next((r.match(text) for r in _RANGES if r.match(text)), None)
+    if m is None:
+        m = _SIDE_BY_SIDE.match(text)
+        if m and all(p and p[3] for p in map(_point, (m[1], m[2]))):
+            return None  # two bare numbers side by side are not a range
+    if m is None:
+        return None
+    a, b = _point(m[1]), _point(m[2])
+    if a is None or b is None:
+        return None
+    sa, sb = a[2], b[2]
+    if sb in ("am", "pm") and sa is None:
+        sa = sb  # "3 and 5 pm"
+        start, end = _clock(a[0], a[1], sa), _clock(b[0], b[1], sb)
+        if start is None or end is None or start > end:
+            sa = "am" if sb == "pm" else "pm"  # "11 to 1 pm"
+    elif sa in ("am", "pm") and sb is None:
+        sb = sa
+        start, end = _clock(a[0], a[1], sa), _clock(b[0], b[1], sb)
+        if start is None or end is None or start > end:
+            sb = "am" if sa == "pm" else "pm"
+    start, end = _clock(a[0], a[1], sa), _clock(b[0], b[1], sb)
+    if start is None or end is None:
+        return None
+    return f"{start // 60:02d}:{start % 60:02d}-{end // 60:02d}:{end % 60:02d}"
+
+
+def _time_attempt(tokens: list[str]) -> bool:
+    """The leftover looks like a failed time, not a second day or other words."""
+    if any(t in _DAY_WORDS or re.search(r"\d{4}-\d{2}-\d{2}", t) for t in tokens):
+        return False
+    text = " ".join(tokens)
+    return bool(re.search(r"\d|\b(?:am|pm)\b", text)) or any(t in _PARTS for t in tokens)
 
 
 def _weekend_block(day: date, weekend: set[int], skip_current: bool) -> tuple[date, date] | None:
@@ -160,7 +246,7 @@ def resolve(
     """Resolve the canonical form against ``today`` (a date in the persona timezone)."""
     words = re.sub(r"[,.]", " ", (text or "").strip().lower()).split()
     words = [w for w in words if w not in _FILLER]
-    if not words or len(words) > 6:
+    if not words or len(words) > 8:
         return None
     days = _weekend_set(weekend)
     # Split into day part + time part: try the longest time suffix that parses.
@@ -175,6 +261,12 @@ def resolve(
         if not words[:cut] and not time:
             return None
         return When(start, end, time or default, deadline)
+    if "or" in words:
+        return None
+    for cut in range(len(words) - 1, 0, -1):
+        day = _day(words[:cut], today, days)
+        if day is not None and _time_attempt(words[cut:]):
+            return When(day[0], day[1], "", day[3])
     return None
 
 

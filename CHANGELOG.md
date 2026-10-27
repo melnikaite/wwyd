@@ -153,7 +153,11 @@ shapes (see Changed), so the first release bumps the minor version.
 - `predict` goes by `context` even when no claim names it: a context saying the asked time
   is taken (or the thing is gone, the place closed) now gives a final decline with
   `depends_on: null` instead of an accept or an invented "if free" condition, and one
-  naming the free slot gives a counter-offer suggesting it.
+  naming the free slot gives a counter-offer suggesting it, or an accept of that slot when
+  the request asked for a span that holds it.
+- A time range in the situation ("tomorrow between 15 and 17", "15:00-17:00", "3 to 5 pm")
+  no longer drops the `When:` line with its day: the resolver parses ranges, and a time it
+  cannot parse after a day it can keeps the day.
 - Compaction and `add_claims` no longer merge claims that differ only in a number ("at
   most 40 euros" / "60 euros"): only same-word duplicates (punctuation, case, spacing)
   merge without the judge; every other similar pair goes to the judge. This replaces the

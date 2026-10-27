@@ -54,6 +54,57 @@ def test_resolve(text, today, start, end, time):
     assert resolve(text, today) == When(start, end or start, time)
 
 
+FRI = date(2026, 10, 23)
+
+
+@pytest.mark.parametrize(
+    ("text", "time"),
+    [
+        ("tomorrow 15:00-17:00", "15:00-17:00"),
+        ("tomorrow 15:00\u201317:00", "15:00-17:00"),  # en dash
+        ("tomorrow 15:00 \u2014 17:00", "15:00-17:00"),  # em dash with spaces
+        ("tomorrow between 15:00 and 17:00", "15:00-17:00"),
+        ("tomorrow 15-17", "15:00-17:00"),
+        ("tomorrow 15:00 17:00", "15:00-17:00"),
+        ("tomorrow between 3 and 5 pm", "15:00-17:00"),
+        ("tomorrow from 3pm to 5pm", "15:00-17:00"),
+        ("tomorrow from 3 pm until 5 pm", "15:00-17:00"),
+        ("tomorrow 11 to 1 pm", "11:00-13:00"),
+        ("tomorrow 9am till 1", "09:00-13:00"),
+        ("tomorrow noon-2pm", "12:00-14:00"),
+        # Fallback: a failed time attempt keeps the day.
+        ("tomorrow 25:00", ""),
+        ("tomorrow around 3ish", ""),
+        ("fri 15:00 sharp", ""),
+        ("tomorrow 15 17", ""),  # two bare numbers side by side are not a range
+    ],
+)
+def test_resolve_time_range_and_fallback(text, time):
+    assert resolve(text, THU) == When(FRI, FRI, time)
+
+
+def test_resolve_range_on_weekday_and_iso_date():
+    assert resolve("sat 10:00 to 12:00", THU) == When(SAT, SAT, "10:00-12:00")
+    d = date(2026, 10, 30)
+    assert resolve("2026-10-30 15-17", THU) == When(d, d, "15:00-17:00")
+    assert resolve("2026-10-30", THU) == When(d, d, "")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "tomorrow or thu",
+        "tomorrow 15:00 or fri 10:00",
+        "in 2 days or 3",
+        "tomorrow blah",
+        "tomorrow 15:00 fri",
+        "tomorrow 15:00 next week",
+    ],
+)
+def test_resolve_fallback_rejects(text):
+    assert resolve(text, THU) is None
+
+
 @pytest.mark.parametrize(
     ("text", "today", "end", "time"),
     [
