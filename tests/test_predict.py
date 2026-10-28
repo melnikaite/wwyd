@@ -548,7 +548,7 @@ def test_prompts_static_and_no_favour_fallback():
 
 
 def test_analyze_context_note_only_with_context():
-    from wwyd.predict.prompts import ANALYZE_SYSTEM, CONTEXT_NOTE, analyze_user
+    from wwyd.predict.prompts import ANALYZE_SYSTEM, CONTEXT_NOTE, SPAN_NOTE, analyze_user
 
     args = {"claims": ["[c1] x"], "situation": "S?", "now": "Mon", "when": "Tue"}
     head = "Claims:\n[c1] x\nNow: Mon\nWhen: Tue\nSituation: S?\nContext: none"
@@ -557,6 +557,28 @@ def test_analyze_context_note_only_with_context():
     with_ctx = analyze_user(context="15:00 is taken", **args)
     assert with_ctx == head.replace("none", "15:00 is taken") + "\n" + CONTEXT_NOTE
     assert CONTEXT_NOTE not in ANALYZE_SYSTEM
+    assert SPAN_NOTE not in with_ctx and SPAN_NOTE not in ANALYZE_SYSTEM
+    spanned = analyze_user(context="15:00 is taken", span=True, **args)
+    assert spanned == with_ctx.replace(" No claim excludes", f" {SPAN_NOTE} No claim excludes")
+    assert analyze_user(context=None, span=True, **args) == head
+
+
+async def test_span_note_only_for_a_time_range(conn, user, pid, fake_llm, monkeypatch):
+    from datetime import UTC, datetime
+
+    import wwyd.predict as predict_pkg
+    from wwyd.predict.prompts import CONTEXT_NOTE, SPAN_NOTE
+
+    monkeypatch.setattr(predict_pkg, "_now", lambda: datetime(2026, 10, 27, 8, 0, tzinfo=UTC))
+    big_set(conn, pid)
+    fake_llm.on("answer", answer())
+    ctx = "only 16:00-17:00 is free"
+    for when, span in (("tomorrow 15:00-17:00", True), ("tomorrow 15:00", False)):
+        fake_llm.on("route", {"categories": ["work/meetings"], "when": when})
+        await predict(conn, owner(user), situation="Call?", audience="everyone", context=ctx)
+        user_msg = fake_llm.by_purpose("analyze")[-1]["user"]
+        assert (CONTEXT_NOTE in user_msg) is not span
+        assert (SPAN_NOTE in user_msg) is span
 
 
 async def test_now_line_in_persona_timezone(conn, user, pid, fake_llm, monkeypatch):

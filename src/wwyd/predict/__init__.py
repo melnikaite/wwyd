@@ -112,12 +112,14 @@ def now_line(timezone: str | None) -> str:
     return f"{local.strftime('%A %Y-%m-%d %H:%M')} ({name})"
 
 
-def resolved_when(text: str, timezone: str | None, weekend: list[str] | None) -> str:
+def resolved_when(text: str, timezone: str | None, weekend: list[str] | None) -> tuple[str, bool]:
     """The When line body for the model's canonical time (``predict.when``), "" when there
-    is none or it does not parse."""
+    is none or it does not parse, and whether that time is a range ("15:00-17:00")."""
     if not text:
-        return ""
-    return when_line(resolve(text, _local(timezone)[0].date(), weekend), weekend)
+        return "", False
+    when = resolve(text, _local(timezone)[0].date(), weekend)
+    span = when is not None and "-" in when.time
+    return when_line(when, weekend), span
 
 
 def _escalate(code: str, reason: str, **extra: Any) -> dict[str, Any]:
@@ -228,7 +230,7 @@ async def predict(
         lines = {label: claim_line(label, c) for label, c in zip(labels, claims, strict=True)}
         now = now_line(timezone)
         weekend = settings.get("weekend_days", DEFAULT_SETTINGS["weekend_days"])
-        when = resolved_when(route_when, timezone, weekend)
+        when, span = resolved_when(route_when, timezone, weekend)
         # Call 1, analyze: which claims apply and what they decide (internal only).
         run.llm_called = True
         data, tokens = await answer_step.analyze_call(
@@ -239,6 +241,7 @@ async def predict(
                 situation=situation,
                 now=now,
                 when=when,
+                span=span,
             ),
         )
         run.tokens += tokens

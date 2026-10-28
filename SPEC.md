@@ -885,7 +885,7 @@ through it.
    translates it, from any language, into a small canonical English form (`today`,
    `tonight`, `tomorrow 17:00`, `day after tomorrow`, `sat`, `next thu 15:00`,
    `this weekend`, `next weekend`, `next week`, `this week`, `by fri`, `by next fri`,
-   `in 3 days`, `in 2 weeks`, `2026-10-30`, optional `HH:MM`, `5 pm`, `noon`, `midnight`, `morning`/`afternoon`/`evening`/`night`, or a range of two such points (`15:00-17:00`, `between 3 and 5 pm`, `from 3pm to 5pm`, `10:00 to 12:00`, `15:00 17:00`; bare hours allowed inside one, `15-17`; an am/pm on one end goes to a bare other end unless that reverses the range; stored as `15:00-17:00`). When the time part fails but a leading day parses and the rest is a time attempt (a digit, am/pm or part-of-day word) with no day word and no `or`, the day is kept without a time (2026-10-27: an interval dropped the whole line and the model then read a Wednesday as a weekend);
+   `in 3 days`, `in 2 weeks`, `2026-10-30`, optional `HH:MM`, `5 pm`, `noon`, `midnight`, `morning`/`afternoon`/`evening`/`night`, or a range of two such points (`15:00-17:00`, `between 3 and 5 pm`, `from 3pm to 5pm`, `10:00 to 12:00`, `15:00 17:00`; bare hours allowed inside one, `15-17`; an am/pm on one end goes to a bare other end unless that reverses the range; stored as `15:00-17:00`). When the time part fails but a leading day parses and the rest is a time attempt (a digit, am/pm or part-of-day word) with no day word and no `or`, the day is kept without a time (2026-10-27: an interval dropped the whole line and the model then read a Wednesday as a weekend); both prompts tell the model that a span of two times keeps both ends, `tomorrow 15:00-17:00`, since without it the model often wrote only the start, `tomorrow 15:00`, and the span note below was then left out, 2026-10-27);
    `""` when there is none; `overmorrow` is accepted for `day after tomorrow`). The
    routing call carries it as `when`; when routing is skipped, the small `when` call of
    step 3 does (an analyze field was tried first: the analyze call could not see its own
@@ -943,14 +943,20 @@ through it.
      note). The context is a checked fact the owner goes by, even when no claim names
      it: when it says the request cannot happen as asked (that time is taken, the thing
      is gone, the place is closed), the verdict is `settled` with `a_check` concluding a
-     decline, and when it also says what is possible instead, a decline suggesting that;
+     decline, and when it also says what is possible instead, a decline suggesting that,
+     with `a_check` ending on what is possible (without that the possible time stayed inside
+     the reason and the answer dropped it, 2026-10-27);
      a time the context calls taken is never accepted; when the request itself names a
      span of two times and the context calls only a part of it free, it is possible as
      asked and accepted for that part (2026-10-27: without the span sentence "between 3
      and 5 pm" with "only 16:00–17:00 is free" was declined; without "the rest is taken"
      in its example "only 16:30–17:00 is free" read as "free except 16:30–17:00"; and
      without "never accepted" and "two times" the claim's own 10–19 window was taken for
-     the span and a taken 15:00 accepted);
+     the span and a taken 15:00 accepted). The span sentence is a separate `SPAN_NOTE`
+     put into the context note (before its last sentence) only when the resolved `When` is a time range
+     ("15:00-17:00"): present for a single time, it made the model accept a taken 15:00
+     inside a partly free 15:00–17:00 window instead of counter-offering 16:00
+     (2026-10-27);
      a condition the context already answers is not `open`. This is a static `Note:` paragraph
      appended to the analyze user message after the `Context:` line only when a context
      is given; the system prompt and every call without context stay unchanged, because

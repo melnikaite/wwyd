@@ -27,7 +27,8 @@ relevant category paths, copied exactly from the list, most relevant first. Retu
 list only if nothing fits. In "when" put the time the situation refers to, translated
 into short English and copied as the situation says it, never worked out into a date:
 "today", "tonight", "tomorrow 17:00", "day after tomorrow", "sat", "next thu 15:00",
-"this weekend", "in 3 days", "2026-10-30"; a deadline or period stays one ("this week",
+"this weekend", "in 3 days", "2026-10-30"; a span of two times keeps both ends
+("tomorrow 15:00-17:00"); a deadline or period stays one ("this week",
 also for "by the end of the week"; "by fri"); "" when the situation names no time.
 
 Example
@@ -60,7 +61,8 @@ WHEN_SCHEMA: dict[str, Any] = {
 WHEN_SYSTEM = """You read a message and write down the time it refers to, in short English,
 translated from any language and copied as the message says it, never worked out into a
 date: "today", "tonight", "tomorrow 17:00", "day after tomorrow", "sat", "next thu 15:00",
-"this weekend", "in 3 days", "2026-10-30". A weekday alone is just its name ("thu");
+"this weekend", "in 3 days", "2026-10-30". A span of two times keeps both ends
+("tomorrow 15:00-17:00"). A weekday alone is just its name ("thu");
 write "next" only when the message says it. "The day after tomorrow" is not "tomorrow". A
 deadline or period stays one: "this week" (also for "by the end of the week"), "by fri";
 write "weekend" only when the message names the weekend. Write "" when the message names no time.
@@ -480,27 +482,45 @@ def _context(context: str | None) -> str:
 # Appended to the analyze call's user message only when the caller passed a context, so
 # calls without one stay byte-identical (changing ANALYZE_SYSTEM itself shifted unrelated
 # no-context scenarios). Static: the same text for every call with a context.
-CONTEXT_NOTE = (
+_CONTEXT_RULE = (
     "Note: The owner goes by the Context line even when no claim names it. When it says "
     "the request cannot happen as asked (that time is taken, the thing is gone ...), the "
     'owner declines, and suggests what it says is possible instead ("the kiln is booked '
     'until 16:00" for a 14:00 firing: not at 14:00, suggest 16:00). A time the Context '
-    "line calls taken is never accepted. When the request itself names a span of two "
-    "times and the Context line calls only a part of that span free, the request is "
-    'possible as asked: the owner accepts that part ("only 15:00-16:00 is '
-    'free", the rest is taken, for a firing between 1 and 5 pm, that is 13:00-17:00: '
-    "yes, at 15:00-16:00). No claim excludes "
-    'it then: "c_excluded_by" stays "", the verdict is "settled", and "a_check" '
-    "ends with that decision and its reason from the Context line."
+    "line calls taken is never accepted."
+)
+_CONTEXT_TAIL = (
+    'No claim excludes it then: "c_excluded_by" stays "", the verdict is "settled", and '
+    '"a_check" ends with that decision and its reason from the Context line, then with '
+    'what it calls possible instead when it names that ("not at 14:00; 16:00 is possible").'
+)
+CONTEXT_NOTE = f"{_CONTEXT_RULE} {_CONTEXT_TAIL}"
+
+# Inserted before the tail only when the resolved When is a time range: present for a
+# single-time request, it made the model accept a taken time inside a partly free window.
+SPAN_NOTE = (
+    "When the request itself names a span of two times and the Context line calls only a "
+    "part of that span free, the request is possible as asked: the owner accepts that part "
+    '("only 15:00-16:00 is free", the rest is taken, for a firing between 1 and 5 pm, that '
+    "is 13:00-17:00: yes, at 15:00-16:00)."
 )
 
 
 def analyze_user(
-    *, claims: list[str], context: str | None, situation: str, now: str, when: str = ""
+    *,
+    claims: list[str],
+    context: str | None,
+    situation: str,
+    now: str,
+    when: str = "",
+    span: bool = False,
 ) -> str:
     claim_block = "\n".join(claims) if claims else "(none)"
     when_part = f"When: {when}\n" if when else ""
-    note = f"\n{CONTEXT_NOTE}" if (context or "").strip() else ""
+    note = ""
+    if (context or "").strip():
+        rule = f"{_CONTEXT_RULE} {SPAN_NOTE}" if span else _CONTEXT_RULE
+        note = f"\n{rule} {_CONTEXT_TAIL}"
     return (
         f"Claims:\n{claim_block}\nNow: {now}\n{when_part}"
         f"Situation: {situation}\nContext: {_context(context)}{note}"

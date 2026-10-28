@@ -3248,6 +3248,46 @@
       "context": "завтра (ср 2026-10-28) с 15:00 до 17:00 свободно только 16:00–17:00"
     },
     {
+      "id": "int_ru_point",
+      "persona": "weekdays_ru",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Созвонимся завтра в 15:00?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline",
+        "absent_any": [
+          "выходн"
+        ],
+        "mentions_any": [
+          "16",
+          "4"
+        ]
+      },
+      "context": "Within tomorrow (Wed 2026-10-28) 15:00-17:00 only 16:00-17:00 is free"
+    },
+    {
+      "id": "int_ru_point_p1",
+      "persona": "weekdays_ru",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Можем завтра в 15 обсудить проект по телефону?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "ru",
+        "stance": "decline",
+        "absent_any": [
+          "выходн"
+        ],
+        "mentions_any": [
+          "16",
+          "4"
+        ]
+      },
+      "context": "завтра (ср 2026-10-28) с 15:00 до 17:00 свободно только 16:00–17:00"
+    },
+    {
       "id": "int_ru_sat",
       "persona": "weekdays_ru",
       "now": "2026-10-27T08:00:00+00:00",
@@ -3363,6 +3403,46 @@
         "depends_on": "null",
         "language": "en",
         "stance": "accept",
+        "absent_any": [
+          "weekend"
+        ],
+        "mentions_any": [
+          "16",
+          "4"
+        ]
+      },
+      "context": "Tomorrow between 15:00 and 17:00 the only free slot is 16:00–17:00"
+    },
+    {
+      "id": "int_en_point",
+      "persona": "weekdays_en",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Can we talk tomorrow at 3 pm?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline",
+        "absent_any": [
+          "weekend"
+        ],
+        "mentions_any": [
+          "16",
+          "4"
+        ]
+      },
+      "context": "Within tomorrow (Wed 2026-10-28) 15:00-17:00 only 16:00-17:00 is free"
+    },
+    {
+      "id": "int_en_point_p1",
+      "persona": "weekdays_en",
+      "now": "2026-10-27T08:00:00+00:00",
+      "situation": "Could we go over the project on a call tomorrow at 15:00?",
+      "expect": {
+        "type": "answer",
+        "depends_on": "null",
+        "language": "en",
+        "stance": "decline",
         "absent_any": [
           "weekend"
         ],

@@ -179,17 +179,17 @@ def test_when_line_marks():
 def test_resolved_when_uses_persona_timezone_and_dst(monkeypatch):
     # 21:30 UTC on Saturday 2026-10-24 is already Sunday in Tokyo, still Saturday in Berlin.
     monkeypatch.setattr(P, "_now", lambda: datetime(2026, 10, 24, 21, 30, tzinfo=UTC))
-    assert P.resolved_when("tomorrow", "Asia/Tokyo", None) == "Monday 2026-10-26 (working day)"
-    assert P.resolved_when("tomorrow", "Europe/Berlin", None) == "Sunday 2026-10-25 (weekend)"
+    assert P.resolved_when("tomorrow", "Asia/Tokyo", None)[0] == "Monday 2026-10-26 (working day)"
+    assert P.resolved_when("tomorrow", "Europe/Berlin", None)[0] == "Sunday 2026-10-25 (weekend)"
     # Berlin leaves summer time on 2026-10-25: that evening it is UTC+1, so 23:30 UTC is
     # already Monday there and 22:30 UTC still Sunday (under UTC+2 both would be Monday).
     monkeypatch.setattr(P, "_now", lambda: datetime(2026, 10, 25, 23, 30, tzinfo=UTC))
-    assert P.resolved_when("today", "Europe/Berlin", None) == "Monday 2026-10-26 (working day)"
+    assert P.resolved_when("today", "Europe/Berlin", None)[0] == "Monday 2026-10-26 (working day)"
     monkeypatch.setattr(P, "_now", lambda: datetime(2026, 10, 25, 22, 30, tzinfo=UTC))
-    assert P.resolved_when("today", "Europe/Berlin", None) == "Sunday 2026-10-25 (weekend)"
-    assert P.resolved_when("today", "Not/AZone", None) == "Sunday 2026-10-25 (weekend)"
-    assert P.resolved_when("", "Europe/Berlin", None) == ""
-    assert P.resolved_when("whenever", "Europe/Berlin", None) == ""
+    assert P.resolved_when("today", "Europe/Berlin", None)[0] == "Sunday 2026-10-25 (weekend)"
+    assert P.resolved_when("today", "Not/AZone", None)[0] == "Sunday 2026-10-25 (weekend)"
+    assert P.resolved_when("", "Europe/Berlin", None)[0] == ""
+    assert P.resolved_when("whenever", "Europe/Berlin", None)[0] == ""
 
 
 def test_weekend_days_setting(conn):

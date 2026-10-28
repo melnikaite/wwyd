@@ -158,6 +158,11 @@ shapes (see Changed), so the first release bumps the minor version.
 - A time range in the situation ("tomorrow between 15 and 17", "15:00-17:00", "3 to 5 pm")
   no longer drops the `When:` line with its day: the resolver parses ranges, and a time it
   cannot parse after a day it can keeps the day.
+- A single-time request inside a partly free window ("tomorrow at 15:00?" with "within
+  15:00-17:00 only 16:00-17:00 is free") is declined with a counter-offer of the free time
+  again instead of accepted: the span rule is now sent to the model only when the resolved
+  time is a range, the time extraction keeps both ends of a range, and the analysis ends
+  with what the context calls possible.
 - Compaction and `add_claims` no longer merge claims that differ only in a number ("at
   most 40 euros" / "60 euros"): only same-word duplicates (punctuation, case, spacing)
   merge without the judge; every other similar pair goes to the judge. This replaces the
